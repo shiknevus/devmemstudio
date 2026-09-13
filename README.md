@@ -23,6 +23,14 @@
 - 导入 top 解析 `flow_comp` 组件（设备名/类型/地址/禁用态），重启自动重载；类型无精确表时回退通用表并标 `≈`。
 - 寄存器表由 `tools/gen_component_catalog.py` 从 `reg_addr_pl.vh` + 各 `ps_rw_pl_reg_*.sv` 生成（含 PARAM 注释与行为表收割），打包于 `devmem_studio/data/component_catalog.json`；RTL 变更后重跑脚本刷新。
 
+### 运行时导入组件（RTL 改动后免重新打包）
+
+某个组件**内部**修改后，在发布版 EXE 里点「导入组件」，选择该组件的文件夹（如 `...\pl_exe_io\ec_dv300_do\`，需含 `ps_rw_pl_reg_*.sv`，可选同级 `ec_*.sv`；寄存器地址表从上级 `include_files/reg_addr_pl.vh` 向上查找）：
+
+- 解析出的寄存器表/信号名/行为表/DEBUG 语义**立即覆盖**内置定义并作用于该类型组件（正在查看的组件自动刷新）
+- 定义持久化到 `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json`，重启自动加载；删除该文件即恢复内置定义
+- 与生成器同源（`devmem_studio/component_parse.py`），两端解析结果一致
+
 ## 本次优化
 
 - 打印日志窗口默认开启「自动换行」与「显示行号」，可分别勾选切换。长文本、连续十六进制数据随窗口宽度自动折行。
@@ -249,6 +257,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 devmem_debug.py             启动入口
 devmem_studio/
   catalog.py               字段解析与寄存器分组（含 RTL 宏名视图）
+  component_parse.py       RTL 组件寄存器解析（生成器与「导入组件」共用）
   top_import.py            mix top 组件解析、视图集合与类型元数据
   data/component_catalog.json  生成的各组件类型精确寄存器表（含参数注释与行为表）
   core.py                  配置、数据解析、SSH 与离线模拟

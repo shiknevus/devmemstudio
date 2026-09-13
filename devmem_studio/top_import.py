@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from .core import resource_path
+from .core import resource_path, user_data_dir
 
 REG_GRID_START = 0x800
 REG_GRID_STEP = 0x200
@@ -160,14 +160,25 @@ def parse_base_address(text: str) -> int | None:
 
 
 def load_type_catalog(path: Path | None = None) -> dict | None:
+    """Bundled catalog plus any per-type overrides imported at runtime (导入组件)."""
     target = Path(path) if path else resource_path(CATALOG_RELPATH)
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("types"), dict):
-            return data
+        if not (isinstance(data, dict) and isinstance(data.get("types"), dict)):
+            return None
     except (OSError, ValueError):
-        pass
-    return None
+        return None
+    if path is None:
+        overrides = user_data_dir() / "component_overrides"
+        if overrides.is_dir():
+            for item in sorted(overrides.glob("*.json")):
+                try:
+                    entry = json.loads(item.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("registers"), list) and entry["registers"]:
+                    data["types"][item.stem] = entry
+    return data
 
 
 def registers_for(catalog: dict | None, module_type: str) -> tuple[list[dict], bool]:

@@ -5,6 +5,7 @@ import copy
 import csv
 from datetime import datetime
 import io
+import json
 from pathlib import Path
 import re
 import threading
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxL
                                QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
 
 from . import __version__
-from . import top_import
+from . import component_parse, top_import
 from .catalog import REGISTER_FIELDS
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
@@ -116,6 +117,11 @@ class MainWindow(QMainWindow):
         self.save_timer.setSingleShot(True)
         self.save_timer.timeout.connect(self.save_settings)
         self._shortcuts()
+        if self.type_catalog:
+            imported = sorted(key for key, entry in self.type_catalog["types"].items()
+                              if entry.get("imported_from"))
+            if imported:
+                self.append_log("SYSTEM", f"已加载 {len(imported)} 个导入的组件类型定义：{', '.join(imported)}。")
         saved_top = self.cfg.get("top_path")
         if saved_top:
             if Path(saved_top).is_file():
@@ -208,7 +214,10 @@ class MainWindow(QMainWindow):
         layout.addSpacing(16)
         self.import_button = button("导入 top", self.import_top, "demo", "export")
         self.import_button.setToolTip("解析 emcc mix top 文件，按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
-        layout.addLayout(row(label("组件目录", "sideCaption"), 1, self.import_button))
+        self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
+        self.import_component_button.setToolTip("RTL 组件内部修改后，选择组件文件夹重新解析其寄存器定义；"
+                                                "仅更新本机定义（含地址表需在组件上级 include_files 中）。")
+        layout.addLayout(row(label("组件目录", "sideCaption"), 1, self.import_component_button, self.import_button))
         self.component_search = QLineEdit()
         self.component_search.setPlaceholderText("搜索设备名 / 类型 / 地址")
         self.component_search.setClearButtonEnabled(True)
@@ -552,6 +561,57 @@ class MainWindow(QMainWindow):
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer == QMessageBox.Yes:
             self.load_top(Path(path))
+
+    def import_component(self):
+        """Re-parse one component folder's register definition at runtime (RTL changed, no rebuild)."""
+        if self._closing or self._busy:
+            return
+        start = self.cfg.get("top_path") or ""
+        folder = QFileDialog.getExistingDirectory(self, "选择组件文件夹（需含 ps_rw_pl_reg_*.sv）", start)
+        if not folder:
+            return
+        try:
+            entry, info = component_parse.parse_component_folder(Path(folder))
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "导入组件失败", str(exc))
+            self.append_log("ERROR", f"导入组件失败：{exc}")
+            return
+        key = self._canonical_type_key(Path(folder))
+        previous = self.type_catalog is not None and key in self.type_catalog["types"]
+        answer = QMessageBox.question(
+            self, "确认导入组件",
+            f"类型 {key}：解析到 {len(entry['registers'])} 个寄存器"
+            f"{'，将覆盖内置定义' if previous else ''}。\n来源：{folder}\n\n确认导入？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        if self.type_catalog is None:
+            self.type_catalog = {"schema": 6, "types": {}}
+        self.type_catalog["types"][key] = entry
+        try:
+            overrides = user_data_dir() / "component_overrides"
+            overrides.mkdir(parents=True, exist_ok=True)
+            (overrides / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=2),
+                                                   encoding="utf-8")
+        except OSError as exc:
+            self.append_log("ERROR", f"组件定义保存失败（本次会话内仍生效）：{exc}")
+        self.append_log("SYSTEM", f"已导入组件类型 {key}：{len(entry['registers'])} 项寄存器（{folder}）。")
+        for message in info["warnings"]:
+            self.append_log("SYSTEM", f"组件：{message}")
+        self._rebuild_component_tree()
+        if self.active_component and self.active_component["module_type"] == key:
+            self._last_context = None
+            self.rebuild_registers()
+
+    def _canonical_type_key(self, folder: Path) -> str:
+        """Map an imported folder onto the catalog's type key (decode folders may rename types)."""
+        if self.type_catalog:
+            marker = f"/{folder.name}/"
+            for key, entry in self.type_catalog["types"].items():
+                if marker in f"/{entry.get('decode_file', '')}/" or \
+                        str(entry.get("imported_from", "")) == str(folder):
+                    return key
+        return folder.name
 
     def load_top(self, path, quiet=False):
         """Parse a mix top file and rebuild the sidebar component catalog."""
@@ -1129,7 +1189,7 @@ class MainWindow(QMainWindow):
         self.board_log_button.setEnabled(self.connected and not self._closing)
         for control in (self.host, self.port, self.user, self.password, self.timeout, self.remember):
             control.setEnabled(not self.connected and not self._busy)
-        for control in (self.component_tree, self.component_search,
+        for control in (self.component_tree, self.component_search, self.import_component_button,
                         self.access_filter, self.search, *self.view_buttons.values()):
             control.setEnabled(not self._busy and not self._closing)
         # A top mismatched with the live device can hang the board; import only while disconnected.
