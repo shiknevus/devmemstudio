@@ -230,7 +230,7 @@ class MainWindow(QMainWindow):
         self.base_field.editingFinished.connect(self._base_edited)
         self.base_field.setToolTip("未找到 components_param.vh；可手动修改基地址（十六进制）。")
         layout.addLayout(row(label("基地址", "sideCaption"), 1, self.base_field))
-        layout.addStretch(1)
+        layout.addStretch(0)  # no slack here: the component tree above absorbs it all
         self.side_state = label("○  会话未建立", "sideCaption")
         layout.addWidget(self.side_state)
         layout.addWidget(label("SSH / LINUX / MMIO", "sideCaption"))
