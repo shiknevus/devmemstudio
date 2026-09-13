@@ -119,7 +119,7 @@ def run_smoke(app, directory: Path):
             "input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
             "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
             " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
-        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(comp_folder)), \
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(directory)), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
                 patch("devmem_studio.window.user_data_dir", return_value=directory):
             window.import_component()

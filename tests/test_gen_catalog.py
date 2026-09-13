@@ -289,6 +289,18 @@ class ComponentFolderTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reg_addr_pl.vh"):
                 gen.parse_component_folder(component)
 
+    def test_find_component_folders_scans_recursively(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.build_tree(directory)
+            second = Path(directory) / "emcc_ctrl" / "pl_ps_exe" / "ec_other"
+            second.mkdir(parents=True)
+            (second / "ps_rw_pl_reg_other.v").write_text("module o; endmodule", encoding="utf-8")
+            # A decode-looking name that is not a register module file must be ignored.
+            (Path(directory) / "notes.ps_rw_pl_reg_fake.txt").write_text("x", encoding="utf-8")
+            found = gen.find_component_folders(Path(directory))
+        names = [folder.name for folder in found]
+        self.assertEqual(names, ["ec_uut", "ec_other"])  # path order: pl_exe_io before pl_ps_exe
+
 
 if __name__ == "__main__":
     unittest.main()

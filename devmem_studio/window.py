@@ -215,8 +215,8 @@ class MainWindow(QMainWindow):
         self.import_button = button("导入 top", self.import_top, "demo", "export")
         self.import_button.setToolTip("解析 emcc mix top 文件，按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
         self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
-        self.import_component_button.setToolTip("RTL 组件内部修改后，选择组件文件夹重新解析其寄存器定义；"
-                                                "仅更新本机定义（含地址表需在组件上级 include_files 中）。")
+        self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹导单个，"
+                                                "选上级目录（如 emcc_ctrl）批量导入其下全部组件。")
         layout.addLayout(row(label("组件目录", "sideCaption"), 1, self.import_component_button, self.import_button))
         self.component_search = QLineEdit()
         self.component_search.setPlaceholderText("搜索设备名 / 类型 / 地址")
@@ -563,43 +563,72 @@ class MainWindow(QMainWindow):
             self.load_top(Path(path))
 
     def import_component(self):
-        """Re-parse one component folder's register definition at runtime (RTL changed, no rebuild)."""
+        """Re-parse component register definitions at runtime (RTL changed, no rebuild).
+
+        A picked folder that carries ps_rw_pl_reg_* imports that one component; any other
+        folder is scanned recursively and imports every component found beneath it."""
         if self._closing or self._busy:
             return
         start = self.cfg.get("top_path") or ""
-        folder = QFileDialog.getExistingDirectory(self, "选择组件文件夹（需含 ps_rw_pl_reg_*.sv）", start)
+        folder = QFileDialog.getExistingDirectory(
+            self, "选择组件文件夹，或上级目录（批量导入其下全部组件）", start)
         if not folder:
             return
-        try:
-            entry, info = component_parse.parse_component_folder(Path(folder))
-        except (ValueError, OSError) as exc:
-            QMessageBox.warning(self, "导入组件失败", str(exc))
-            self.append_log("ERROR", f"导入组件失败：{exc}")
+        folder = Path(folder)
+        if any(folder.glob("ps_rw_pl_reg_*.sv")) or any(folder.glob("ps_rw_pl_reg_*.v")):
+            targets = [folder]
+        else:
+            targets = component_parse.find_component_folders(folder)
+            if not targets:
+                QMessageBox.warning(self, "导入组件失败",
+                                    "所选目录及其子目录中未找到组件（需含 ps_rw_pl_reg_*.sv/.v）。")
+                return
+        results, failures = [], []
+        for target in targets:
+            try:
+                entry, info = component_parse.parse_component_folder(target)
+                results.append((target, entry, info))
+            except (ValueError, OSError) as exc:
+                failures.append((target.name, str(exc)))
+        if not results:
+            QMessageBox.warning(self, "导入组件失败", "\n".join(f"{name}：{reason}" for name, reason in failures))
+            self.append_log("ERROR", f"导入组件失败：{failures}")
             return
-        key = self._canonical_type_key(Path(folder))
-        previous = self.type_catalog is not None and key in self.type_catalog["types"]
-        answer = QMessageBox.question(
-            self, "确认导入组件",
-            f"类型 {key}：解析到 {len(entry['registers'])} 个寄存器"
-            f"{'，将覆盖内置定义' if previous else ''}。\n来源：{folder}\n\n确认导入？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        summary = f"解析成功 {len(results)} 个组件，失败 {len(failures)} 个。"
+        if failures:
+            summary += "\n失败项：\n" + "\n".join(f"{name}：{reason}" for name, reason in failures[:8])
+        if len(results) == 1:
+            target, entry, _ = results[0]
+            summary = f"类型 {self._canonical_type_key(target)}：解析到 {len(entry['registers'])} 个寄存器。"
+        answer = QMessageBox.question(self, "确认导入组件",
+                                      f"{summary}\n来源：{folder}\n\n确认导入？",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
         if self.type_catalog is None:
             self.type_catalog = {"schema": 6, "types": {}}
-        self.type_catalog["types"][key] = entry
+        updated_keys = set()
         try:
             overrides = user_data_dir() / "component_overrides"
             overrides.mkdir(parents=True, exist_ok=True)
-            (overrides / f"{key}.json").write_text(json.dumps(entry, ensure_ascii=False, indent=2),
-                                                   encoding="utf-8")
         except OSError as exc:
-            self.append_log("ERROR", f"组件定义保存失败（本次会话内仍生效）：{exc}")
-        self.append_log("SYSTEM", f"已导入组件类型 {key}：{len(entry['registers'])} 项寄存器（{folder}）。")
-        for message in info["warnings"]:
-            self.append_log("SYSTEM", f"组件：{message}")
+            overrides = None
+            self.append_log("ERROR", f"组件定义保存目录不可用（本次会话内仍生效）：{exc}")
+        for target, entry, info in results:
+            key = self._canonical_type_key(target)
+            self.type_catalog["types"][key] = entry
+            updated_keys.add(key)
+            if overrides is not None:
+                try:
+                    (overrides / f"{key}.json").write_text(
+                        json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+                except OSError as exc:
+                    self.append_log("ERROR", f"组件定义保存失败（{key}，本次会话内仍生效）：{exc}")
+            self.append_log("SYSTEM", f"已导入组件类型 {key}：{len(entry['registers'])} 项寄存器（{target}）。")
+            for message in info["warnings"]:
+                self.append_log("SYSTEM", f"组件：{message}")
         self._rebuild_component_tree()
-        if self.active_component and self.active_component["module_type"] == key:
+        if self.active_component and self.active_component["module_type"] in updated_keys:
             self._last_context = None
             self.rebuild_registers()
 

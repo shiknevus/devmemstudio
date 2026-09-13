@@ -12,8 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from devmem_studio.component_parse import (  # noqa: E402,F401
     ALIASES, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry, debug_notes_for,
-    find_top_file, harvest_debug_snapshots, harvest_type_notes, parse_component_folder,
-    parse_decode_file, parse_define_table, read_text_resilient, split_top_level, strip_comments)
+    find_component_folders, find_top_file, harvest_debug_snapshots, harvest_type_notes,
+    parse_component_folder, parse_decode_file, parse_define_table, read_text_resilient,
+    split_top_level, strip_comments)
 from devmem_studio.top_import import parse_top  # noqa: E402
 
 
