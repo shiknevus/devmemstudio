@@ -248,5 +248,47 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(report["forced_irq_registers"], ["ec_uut:IRQ_REG1", "ec_uut:IRQ_REG2"])
 
 
+class ComponentFolderTests(unittest.TestCase):
+    """Runtime 导入组件: re-parsing one component folder without the CLI."""
+
+    def build_tree(self, directory, with_defines=True, with_decode=True):
+        root = Path(directory)
+        if with_defines:
+            (root / "include_files").mkdir(parents=True, exist_ok=True)
+            (root / "include_files/reg_addr_pl.vh").write_text(DEFINE_TEXT, encoding="utf-8")
+        component = root / "emcc_ctrl" / "pl_exe_io" / "ec_uut"
+        component.mkdir(parents=True, exist_ok=True)
+        if with_decode:
+            (component / "ps_rw_pl_reg_uut.sv").write_text(DECODE_TEXT, encoding="utf-8")
+            (component / "ec_uut.sv").write_text(HARVEST_TOP, encoding="utf-8")
+        return component
+
+    def test_parse_component_folder_builds_full_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            component = self.build_tree(directory)
+            entry, info = gen.parse_component_folder(component)
+        names = {item["name"]: item for item in entry["registers"]}
+        self.assertIn("EC_ID", names)
+        self.assertIn("PARAM67", names)
+        self.assertEqual(entry["family"], "pl_exe_io")
+        self.assertEqual(entry["decode_file"], "ps_rw_pl_reg_uut.sv")
+        self.assertEqual(entry["imported_from"], str(component))
+        self.assertEqual(entry["notes"]["PARAM64"], "fwd limit")
+        self.assertEqual(entry["behaviors"]["A"][0], {"name": "home", "value": 1})
+        self.assertEqual(names["PARAM1"]["signal"], "rcfg_spd_max")
+        self.assertTrue(names["PARAM66"]["unwired"])
+        self.assertEqual(info["defines"].replace("\\", "/").endswith("include_files/reg_addr_pl.vh"), True)
+        self.assertTrue(info["top_file"].replace("\\", "/").endswith("ec_uut.sv"))
+
+    def test_parse_component_folder_errors_are_actionable(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaisesRegex(ValueError, "ps_rw_pl_reg"):
+                gen.parse_component_folder(Path(empty))
+        with tempfile.TemporaryDirectory() as directory:
+            component = self.build_tree(directory, with_defines=False)
+            with self.assertRaisesRegex(ValueError, "reg_addr_pl.vh"):
+                gen.parse_component_folder(component)
+
+
 if __name__ == "__main__":
     unittest.main()

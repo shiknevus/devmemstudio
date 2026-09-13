@@ -582,6 +582,35 @@ class TopImportUiTests(UiTests):
         self.assertEqual((idle.x(), idle.y()), (after.x(), after.y()))
         self.assertFalse(self.window.stop_button.isEnabled())
 
+    def test_import_component_updates_runtime_definition(self):
+        from PySide6.QtWidgets import QMessageBox
+        folder = Path(self.temp.name) / "ec_1do"
+        folder.mkdir()
+        (folder / "ps_rw_pl_reg_1do.sv").write_text(
+            "module d(input wr_task_vld, input [8:0] wr_task_addr, input [31:0] i_st_wr_data,"
+            "input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+            "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
+            " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
+        include = Path(self.temp.name) / "include_files"
+        include.mkdir(exist_ok=True)
+        (include / "reg_addr_pl.vh").write_text("`define EC_ID 9'h00C\n", encoding="utf-8")
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No):
+            self.window.import_component()
+        self.assertNotIn("imported_from", self.window.type_catalog["types"]["ec_1do"])
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
+                patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
+            self.window.import_component()
+        self.assertTrue((Path(self.temp.name) / "component_overrides" / "ec_1do.json").exists())
+        entry = self.window.type_catalog["types"]["ec_1do"]
+        self.assertEqual(entry["imported_from"], str(folder))
+        self.assertEqual([item["name"] for item in entry["registers"]],
+                         ["IRQ_REG1", "IRQ_REG2", "EC_ID"])
+        # The imported table applies immediately to components of that type.
+        self.select_and_wait(self.window.top_info["components"][1])
+        self.assertEqual(len(self.window.regs), 3)
+
     def test_startup_reload_of_saved_top_path(self):
         path = self.write_fixture_top()
         store = ConfigStore(Path(self.temp.name) / "reload.json")

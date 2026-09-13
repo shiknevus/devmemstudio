@@ -135,6 +135,24 @@ class CatalogTests(unittest.TestCase):
     def test_missing_catalog_file_returns_none(self):
         self.assertIsNone(top_import.load_type_catalog(Path(tempfile.gettempdir()) / "definitely-missing.json"))
 
+    def test_runtime_component_overrides_merge_into_bundled_catalog(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            overrides = Path(directory) / "component_overrides"
+            overrides.mkdir()
+            (overrides / "ec_custom.json").write_text(json.dumps(
+                {"family": "runtime", "decode_file": "custom.sv", "registers": [
+                    {"offset": "0x000", "name": "IRQ_REG1", "width": 32, "readonly": True}]}),
+                encoding="utf-8")
+            (overrides / "broken.json").write_text("{broken", encoding="utf-8")
+            with patch("devmem_studio.top_import.user_data_dir", return_value=Path(directory)):
+                catalog = top_import.load_type_catalog()
+        self.assertIn("ec_custom", catalog["types"])
+        self.assertNotIn("broken", catalog["types"])
+        registers, exact = top_import.registers_for(catalog, "ec_custom")
+        self.assertTrue(exact)
+        self.assertEqual([item["name"] for item in registers], ["IRQ_REG1", "IRQ_REG2"])
+
     def test_shipped_catalog_is_well_formed(self):
         path = Path(__file__).resolve().parent.parent / "devmem_studio/data/component_catalog.json"
         if not path.exists():

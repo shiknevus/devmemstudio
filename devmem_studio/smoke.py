@@ -9,7 +9,8 @@ import traceback
 
 import paramiko
 from PySide6.QtCore import Qt, QCoreApplication, QEvent
-from PySide6.QtWidgets import QScrollArea, QLineEdit, QPlainTextEdit
+from PySide6.QtWidgets import QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit
+from unittest.mock import patch
 from . import top_import
 from .core import ConfigStore, DemoSession, HostKeyChangedError
 from .dialogs import BatchDialog, HostKeyDialog
@@ -107,6 +108,36 @@ def run_smoke(app, directory: Path):
               and window.regs[0]["_address"] == 0xB0100000 + target["bias"], "Selecting a component pins its register address")
         check(all(reg["_value"] is not None for reg in window.visible_regs), "Selecting a component reads it once")
         check(window.read_count == len(window.visible_regs), "Read counter matches completed operations")
+        # Runtime component re-import: a changed RTL folder updates the definition without a rebuild.
+        bundled_entry = window.type_catalog["types"]["ec_slv_pul_axis"]
+        comp_folder = directory / "ec_slv_pul_axis"
+        comp_folder.mkdir(exist_ok=True)
+        (directory / "include_files").mkdir(exist_ok=True)
+        (directory / "include_files" / "reg_addr_pl.vh").write_text("`define EC_ID 9'h00C\n", encoding="utf-8")
+        (comp_folder / "ps_rw_pl_reg_slv_pul_axis.sv").write_text(
+            "module d(input wr_task_vld, input [8:0] wr_task_addr, input [31:0] i_st_wr_data,"
+            "input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+            "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
+            " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(comp_folder)), \
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
+                patch("devmem_studio.window.user_data_dir", return_value=directory):
+            window.import_component()
+        imported = window.type_catalog["types"]["ec_slv_pul_axis"]
+        check("imported_from" in imported and
+              [item["name"] for item in imported["registers"]] == ["IRQ_REG1", "IRQ_REG2", "EC_ID"],
+              "Runtime component import re-parses a changed RTL folder")
+        window.select_component(target)
+        settle(lambda: not window._busy)
+        check(len(window.regs) == 3, "Imported definition applies to the selected component immediately")
+        with patch("devmem_studio.top_import.user_data_dir", return_value=directory):
+            window.type_catalog = top_import.load_type_catalog()
+        check("imported_from" in window.type_catalog["types"]["ec_slv_pul_axis"],
+              "Imported definitions persist and reload with the catalog")
+        window.type_catalog["types"]["ec_slv_pul_axis"] = bundled_entry   # continue with the full table
+        window._last_context = None
+        window.select_component(target)
+        settle(lambda: not window._busy)
         for view in top_import.VIEW_ORDER:
             window.view_buttons[view].click()
             settle(lambda: not window._busy)
