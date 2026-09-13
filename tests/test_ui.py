@@ -84,7 +84,10 @@ class UiTests(unittest.TestCase):
         self.window.session.connect()
         self.window._set_connection(True)
         self.window.load_top(self.write_fixture_top())
+        # The workbench defaults to the basic view; widen to 全部 for row-level assertions.
         self.select_and_wait(self.window.top_info["components"][0])
+        self.window.view_buttons["all"].click()
+        self.settle(lambda: not self.window._busy)
 
     def write_fixture_top(self, name="emcc_mix_top.sv"):
         path = Path(self.temp.name) / name

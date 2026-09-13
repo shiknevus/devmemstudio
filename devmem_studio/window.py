@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
         self.type_catalog = top_import.load_type_catalog()
         self.active_component = None
         self._pending_component = None
-        self.view = "all"
+        self.view = "basic"
         self.rtl_base = None
         self.visible_regs = []
         self._module_start = None
@@ -314,7 +314,7 @@ class MainWindow(QMainWindow):
             self.view_group.addButton(tab)
             self.view_buttons[key] = tab
             filters_layout.addWidget(tab)
-        self.view_buttons["all"].setChecked(True)
+        self.view_buttons["basic"].setChecked(True)
         filters_layout.addStretch()
         self.access_filter = ComboBox()
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
@@ -578,8 +578,8 @@ class MainWindow(QMainWindow):
         self._filter_components(self.component_search.text())
         self.active_component = None
         self._pending_component = None
-        self.view = "all"
-        self.view_buttons["all"].setChecked(True)
+        self.view = "basic"
+        self.view_buttons["basic"].setChecked(True)
         self.rebuild_registers()
         self.append_log("SYSTEM", "组件目录已更新，请在左侧选择组件。")
         active = [item for item in info["components"] if not item["disabled"]]
