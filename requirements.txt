@@ -1,0 +1,4 @@
+PySide6==6.11.2
+# Paramiko 5 removed ssh-rsa/SHA-1 required by existing embedded boards.
+paramiko==4.0.0
+pyinstaller==6.22.2
