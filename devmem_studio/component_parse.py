@@ -246,3 +246,11 @@ def parse_component_folder(folder: Path) -> tuple[dict, dict]:
         info["top_file"] = str(top_file)
     entry["imported_from"] = str(folder)
     return entry, info
+
+
+def find_component_folders(root: Path) -> list[Path]:
+    """Every folder under root that carries its own ps_rw_pl_reg module (batch 导入组件)."""
+    root = Path(root)
+    folders = {path.parent for path in root.rglob("ps_rw_pl_reg_*")
+               if path.suffix.lower() in (".sv", ".v")}
+    return sorted(folders)
