@@ -1,0 +1,266 @@
+# -*- coding: utf-8 -*-
+"""FPGA register definitions and field layouts; legacy modules are retained."""
+
+DEFAULT_CATEGORIES = ['basic', 'axis', 'io', 'ps bus', 'pl bus', 'pl ps']
+
+DEFAULT_TYPES = {
+    "basic": {
+        "registers": [
+            {"offset": "0x00C", "name": "EC_ID", "width": 32},
+            {"offset": "0x010", "name": "SC_ID", "width": 32},
+            {"offset": "0x014", "name": "BHV_PRIORITY", "width": 32},
+            {"offset": "0x018", "name": "UNIT_ID", "width": 32},
+            {"offset": "0x01C", "name": "UNIT_ECTRL", "width": 32},
+            {"offset": "0x020", "name": "UNIT_ST", "width": 32},
+            {"offset": "0x024", "name": "M_ID", "width": 32},
+            {"offset": "0x028", "name": "M_ECTRL", "width": 32},
+            {"offset": "0x02C", "name": "M_ST", "width": 32},
+            {"offset": "0x030", "name": "M_WK_MOD", "width": 32},
+            {"offset": "0x034", "name": "BHV_EN", "width": 32},
+            {"offset": "0x038", "name": "M_SAF_ST", "width": 32},
+            {"offset": "0x03C", "name": "LINK_M_SAF_ST", "width": 32},
+            {"offset": "0x054", "name": "A_TASK_ID", "width": 32},
+            {"offset": "0x058", "name": "A_TASK_BHV_ID", "width": 32},
+        ],
+    },
+    "axis": {
+        "registers": [
+            {"offset": "0x08", "name": "en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x05c", "name": "a en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x064", "name": "a out", "width": 32, "value": "0x10000"},
+            {"offset": "0x068", "name": "a rpt", "width": 32, "readonly": True},
+            {"offset": "0x074", "name": "a bhv id", "width": 32, "readonly": True},
+            {"offset": "0x084", "name": "b en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x08c", "name": "b out", "width": 32, "value": "0x10000"},
+            {"offset": "0x090", "name": "b rpt", "width": 32, "readonly": True},
+            {"offset": "0x0ac", "name": "c en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x0b4", "name": "c out", "width": 32, "value": "0x10000"},
+            {"offset": "0x0b8", "name": "c rpt", "width": 32, "readonly": True},
+            {"offset": "0x0c8", "name": "c gap crl", "width": 20, "value": "100"},
+            {"offset": "0x0d8", "name": "max spd", "width": 32, "value": "0x60000"},
+            {"offset": "0x0dc", "name": "max acc", "width": 32, "value": "0x60000"},
+            {"offset": "0x0e0", "name": "max dcc", "width": 32, "value": "0x60000"},
+            {"offset": "0x0e8", "name": "acc", "width": 32, "value": "0x50000"},
+            {"offset": "0x114", "name": "dir", "width": 32, "value": "0x01"},
+            {"offset": "0x128", "name": "servo en", "width": 32, "buttons": [{"name": "on", "value": "0x1"}, {"name": "off", "value": "0x2"}]},
+            {"offset": "0x13c", "name": "pause", "width": 32, "action": True},
+            {"offset": "0x140", "name": "stop", "width": 32, "action": True},
+            {"offset": "0x144", "name": "resume", "width": 32, "action": True},
+            {"offset": "0x148", "name": "reset", "width": 32, "action": True},
+            {"offset": "0x158", "name": "touch spd", "width": 32, "value": "1000"},
+            {"offset": "0x15c", "name": "dcc", "width": 32, "value": "0x50000"},
+            {"offset": "0x160", "name": "spd", "width": 32, "value": "0x50000"},
+            {"offset": "0x164", "name": "targetpulse", "width": 32, "value": "0x50000"},
+            {"offset": "0x168", "name": "step pulse", "width": 32, "value": "0x50000"},
+            {"offset": "0x00", "name": "irq1", "width": 32, "readonly": True},
+            {"offset": "0x04", "name": "irq2", "width": 32, "readonly": True},
+            {"offset": "0x060", "name": "a ch st", "width": 1, "readonly": True},
+            {"offset": "0x06c", "name": "a alm num", "width": 8, "readonly": True},
+            {"offset": "0x070", "name": "a tx id", "width": 8, "readonly": True},
+            {"offset": "0x088", "name": "b ch st", "width": 1, "readonly": True},
+            {"offset": "0x094", "name": "b alm num", "width": 8, "readonly": True},
+            {"offset": "0x098", "name": "b tx id", "width": 8, "readonly": True},
+            {"offset": "0x09c", "name": "b bhv id", "width": 8, "readonly": True},
+            {"offset": "0x0b0", "name": "c ch st", "width": 1, "readonly": True},
+            {"offset": "0x0bc", "name": "c alm num", "width": 8, "readonly": True},
+            {"offset": "0x0c0", "name": "c tx id", "width": 8, "readonly": True},
+            {"offset": "0x0c4", "name": "c bhv id", "width": 8, "readonly": True},
+            {"offset": "0x178", "name": "pos", "width": 32, "readonly": True},
+            {"offset": "0x1ec", "name": "a fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f0", "name": "b fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f4", "name": "c fsm", "width": 32, "readonly": True},
+        ],
+    },
+    "io": {
+        "registers": [
+            {"offset": "0x08", "name": "en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x05c", "name": "a en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x064", "name": "a out", "width": 32, "value": "0x10000"},
+            {"offset": "0x084", "name": "b en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x08c", "name": "b out", "width": 32, "value": "0x10000"},
+            {"offset": "0x0ac", "name": "c en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x0b4", "name": "c out", "width": 32, "value": "0x10000"},
+            {"offset": "0x00", "name": "irq1", "width": 32, "readonly": True},
+            {"offset": "0x04", "name": "irq2", "width": 32, "readonly": True},
+            {"offset": "0x060", "name": "a ch st", "width": 1, "readonly": True},
+            {"offset": "0x088", "name": "b ch st", "width": 1, "readonly": True},
+            {"offset": "0x0b0", "name": "c ch st", "width": 1, "readonly": True},
+            {"offset": "0x06c", "name": "a alm num", "width": 8, "readonly": True},
+            {"offset": "0x094", "name": "b alm num", "width": 8, "readonly": True},
+            {"offset": "0x0bc", "name": "c alm num", "width": 8, "readonly": True},
+            {"offset": "0x070", "name": "a tx id", "width": 8, "readonly": True},
+            {"offset": "0x098", "name": "b tx id", "width": 8, "readonly": True},
+            {"offset": "0x0c0", "name": "c tx id", "width": 8, "readonly": True},
+            {"offset": "0x09c", "name": "b bhv id", "width": 8, "readonly": True},
+            {"offset": "0x0c4", "name": "c bhv id", "width": 8, "readonly": True},
+            {"offset": "0x068", "name": "a rpt", "width": 32, "readonly": True},
+            {"offset": "0x090", "name": "b rpt", "width": 32, "readonly": True},
+            {"offset": "0x0b8", "name": "c rpt", "width": 32, "readonly": True},
+            {"offset": "0x1ec", "name": "a fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f0", "name": "b fsm", "width": 32, "readonly": True},
+        ],
+    },
+    "ps bus": {
+        "registers": [
+            {"offset": "0x08", "name": "en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x05c", "name": "a en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x064", "name": "a out", "width": 32, "value": "0x10000"},
+            {"offset": "0x084", "name": "b en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x08c", "name": "b out", "width": 32, "value": "0x10000"},
+            {"offset": "0x0ac", "name": "c en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x0b4", "name": "c out", "width": 32, "value": "0x10000"},
+            {"offset": "0x00", "name": "irq1", "width": 32, "readonly": True},
+            {"offset": "0x04", "name": "irq2", "width": 32, "readonly": True},
+            {"offset": "0x060", "name": "a ch st", "width": 1, "readonly": True},
+            {"offset": "0x088", "name": "b ch st", "width": 1, "readonly": True},
+            {"offset": "0x0b0", "name": "c ch st", "width": 1, "readonly": True},
+            {"offset": "0x06c", "name": "a alm num", "width": 8, "readonly": True},
+            {"offset": "0x094", "name": "b alm num", "width": 8, "readonly": True},
+            {"offset": "0x0bc", "name": "c alm num", "width": 8, "readonly": True},
+            {"offset": "0x070", "name": "a tx id", "width": 8, "readonly": True},
+            {"offset": "0x098", "name": "b tx id", "width": 8, "readonly": True},
+            {"offset": "0x0c0", "name": "c tx id", "width": 8, "readonly": True},
+            {"offset": "0x09c", "name": "b bhv id", "width": 8, "readonly": True},
+            {"offset": "0x0c4", "name": "c bhv id", "width": 8, "readonly": True},
+            {"offset": "0x068", "name": "a rpt", "width": 32, "readonly": True},
+            {"offset": "0x090", "name": "b rpt", "width": 32, "readonly": True},
+            {"offset": "0x0b8", "name": "c rpt", "width": 32, "readonly": True},
+            {"offset": "0x1ec", "name": "a fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f0", "name": "b fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f4", "name": "c fsm", "width": 32, "readonly": True},
+        ],
+    },
+    "pl bus": {
+        "registers": [
+            {"offset": "0x08", "name": "en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x05c", "name": "a en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x064", "name": "a out", "width": 20, "value": "0x0"},
+            {"offset": "0x074", "name": "a bhv id", "width": 8, "readonly": True},
+            {"offset": "0x0d8", "name": "cfg data", "width": 32, "value": "0x0"},
+            {"offset": "0x0dc", "name": "param2", "width": 32, "value": "0x0"},
+            {"offset": "0x0ec", "name": "baud rate", "width": 20, "value": "0x0"},
+            {"offset": "0x0f0", "name": "resp timeout", "width": 20, "value": "0x0"},
+            {"offset": "0x0f4", "name": "param8", "width": 20, "value": "0x0"},
+            {"offset": "0x114", "name": "parity", "width": 8, "value": "0x0"},
+            {"offset": "0x118", "name": "retry cnt", "width": 8, "value": "0x0"},
+            {"offset": "0x11c", "name": "slave addr", "width": 8, "value": "0x0"},
+            {"offset": "0x13c", "name": "trigger", "width": 1, "value": "0x0"},
+            {"offset": "0x00", "name": "irq1", "width": 32, "readonly": True},
+            {"offset": "0x04", "name": "irq2", "width": 32, "readonly": True},
+            {"offset": "0x060", "name": "a ch st", "width": 1, "readonly": True},
+            {"offset": "0x06c", "name": "a alm num", "width": 8, "readonly": True},
+            {"offset": "0x070", "name": "a tx id", "width": 8, "readonly": True},
+            {"offset": "0x068", "name": "a rpt", "width": 32, "readonly": True},
+            {"offset": "0x178", "name": "rx frame1", "width": 32, "readonly": True},
+            {"offset": "0x17c", "name": "rx frame2", "width": 32, "readonly": True},
+            {"offset": "0x1ec", "name": "a fsm", "width": 32, "readonly": True},
+        ],
+    },
+    "pl ps": {
+        "registers": [
+            {"offset": "0x08", "name": "en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x05c", "name": "a en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x064", "name": "a out", "width": 32, "value": "0x10000"},
+            {"offset": "0x084", "name": "b en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x08c", "name": "b out", "width": 32, "value": "0x10000"},
+            {"offset": "0x0ac", "name": "c en", "width": 32, "aliases": [{"name": "off", "value": "0x0"}, {"name": "on", "value": "0x1"}]},
+            {"offset": "0x0b4", "name": "c out", "width": 32, "value": "0x10000"},
+            {"offset": "0x114", "name": "dir", "width": 8, "value": "0x01"},
+            {"offset": "0x128", "name": "servo en", "width": 8, "buttons": [{"name": "on", "value": "0x1"}, {"name": "off", "value": "0x2"}]},
+            {"offset": "0x13c", "name": "pause", "width": 32, "action": True},
+            {"offset": "0x140", "name": "stop", "width": 32, "action": True},
+            {"offset": "0x144", "name": "resume", "width": 32, "action": True},
+            {"offset": "0x148", "name": "reset", "width": 32, "action": True},
+            {"offset": "0x00", "name": "irq1", "width": 32, "readonly": True},
+            {"offset": "0x04", "name": "irq2", "width": 32, "readonly": True},
+            {"offset": "0x060", "name": "a ch st", "width": 1, "readonly": True},
+            {"offset": "0x088", "name": "b ch st", "width": 1, "readonly": True},
+            {"offset": "0x0b0", "name": "c ch st", "width": 1, "readonly": True},
+            {"offset": "0x06c", "name": "a alm num", "width": 8, "readonly": True},
+            {"offset": "0x094", "name": "b alm num", "width": 8, "readonly": True},
+            {"offset": "0x0bc", "name": "c alm num", "width": 8, "readonly": True},
+            {"offset": "0x070", "name": "a tx id", "width": 8, "readonly": True},
+            {"offset": "0x098", "name": "b tx id", "width": 8, "readonly": True},
+            {"offset": "0x0c0", "name": "c tx id", "width": 8, "readonly": True},
+            {"offset": "0x09c", "name": "b bhv id", "width": 8, "readonly": True},
+            {"offset": "0x0c4", "name": "c bhv id", "width": 8, "readonly": True},
+            {"offset": "0x068", "name": "a rpt", "width": 32, "readonly": True},
+            {"offset": "0x090", "name": "b rpt", "width": 32, "readonly": True},
+            {"offset": "0x0b8", "name": "c rpt", "width": 32, "readonly": True},
+            {"offset": "0x1ec", "name": "a fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f0", "name": "b fsm", "width": 32, "readonly": True},
+            {"offset": "0x1f4", "name": "c fsm", "width": 32, "readonly": True},
+            {"offset": "0x1b4", "name": "axis lim f", "width": 1, "readonly": True},
+            {"offset": "0x1b8", "name": "axis zero", "width": 1, "readonly": True},
+            {"offset": "0x1bc", "name": "axis lim b", "width": 1, "readonly": True},
+        ],
+    },
+}
+
+# Field name, most significant bit, least significant bit, display radix.
+# irq1 keeps the legacy 14 / 10 / 8-bit layout used by this board debugger.
+IRQ1_FIELDS = (("ec_id", 31, 18, "DEC"), ("sc_id", 17, 8, "DEC"), ("r_a_bhv_id", 7, 0, "DEC"))
+IRQ2_FIELDS = (("r_a_tx_id", 31, 24, "DEC"), ("r_a_alm_num", 23, 16, "DEC"))
+RPT_FIELDS = (("ack_beh_id", 31, 24, "DEC"), ("ack_tx_id", 23, 16, "DEC"),
+              ("ack_tx_result", 15, 8, "HEX"), ("ack_ps_alart_num", 7, 0, "DEC"))
+REGISTER_FIELDS = {"irq1": IRQ1_FIELDS, "irq2": IRQ2_FIELDS,
+                   "a rpt": RPT_FIELDS, "b rpt": RPT_FIELDS, "c rpt": RPT_FIELDS}
+# RTL macro names used by imported component tables share the same field layouts.
+REGISTER_FIELDS.update({"IRQ_REG1": IRQ1_FIELDS, "IRQ_REG2": IRQ2_FIELDS,
+                        "A_TX_RSULT_RPT": RPT_FIELDS, "B_TX_RSULT_RPT": RPT_FIELDS,
+                        "C_TX_RSULT_RPT": RPT_FIELDS})
+# DEBUG_REG1/2/3: behavior FSM state history, one 8-bit state per byte, newest in [7:0].
+DEBUG_HISTORY_FIELDS = (("前第3拍", 31, 24, "DEC"), ("前第2拍", 23, 16, "DEC"),
+                        ("前第1拍", 15, 8, "DEC"), ("当前", 7, 0, "DEC"))
+REGISTER_FIELDS.update({"DEBUG_REG1": DEBUG_HISTORY_FIELDS, "DEBUG_REG2": DEBUG_HISTORY_FIELDS,
+                        "DEBUG_REG3": DEBUG_HISTORY_FIELDS})
+
+NAME_GROUPS = {
+        # Basic component (all read/write).
+        "EC_ID": (0, "标识"), "SC_ID": (0, "标识"),
+        "BHV_PRIORITY": (1, "行为"), "BHV_EN": (1, "行为"),
+        "UNIT_ID": (2, "单元"), "UNIT_ECTRL": (2, "单元"), "UNIT_ST": (2, "单元"),
+        "M_ID": (3, "模块"), "M_ECTRL": (3, "模块"), "M_ST": (3, "模块"), "M_WK_MOD": (3, "模块"),
+        "M_SAF_ST": (4, "安全状态"), "LINK_M_SAF_ST": (4, "安全状态"),
+        "A_TASK_ID": (5, "任务"), "A_TASK_BHV_ID": (5, "任务"),
+        # RO
+        "irq1": (0, "中断"), "irq2": (0, "中断"),
+        "a ch st": (1, "通道状态"), "b ch st": (1, "通道状态"), "c ch st": (1, "通道状态"),
+        "a alm num": (2, "报警"), "b alm num": (2, "报警"), "c alm num": (2, "报警"),
+        "a tx id": (3, "事务"), "b tx id": (3, "事务"), "c tx id": (3, "事务"),
+        "a bhv id": (4, "行为"), "b bhv id": (4, "行为"), "c bhv id": (4, "行为"),
+        "a rpt": (5, "上报"), "b rpt": (5, "上报"), "c rpt": (5, "上报"),
+        "pos": (6, "数据"), "rx frame1": (6, "数据"), "rx frame2": (6, "数据"),
+        "a fsm": (7, "状态机"), "b fsm": (7, "状态机"), "c fsm": (7, "状态机"),
+        "axis lim f": (8, "限位"), "axis zero": (8, "限位"), "axis lim b": (8, "限位"),
+        # RW
+        "en": (0, "使能"), "a en": (0, "使能"), "b en": (0, "使能"), "c en": (0, "使能"),
+        "a out": (1, "输出"), "b out": (1, "输出"), "c out": (1, "输出"),
+        "dir": (2, "伺服"), "servo en": (2, "伺服"),
+        "spd": (3, "运动参数"), "acc": (3, "运动参数"), "dcc": (3, "运动参数"),
+        "max spd": (3, "运动参数"), "max acc": (3, "运动参数"), "max dcc": (3, "运动参数"),
+        "touch spd": (3, "运动参数"),
+        "targetpulse": (4, "脉冲"), "step pulse": (4, "脉冲"),
+        "c gap crl": (5, "任务"),
+        "cfg data": (6, "通信参数"), "param2": (6, "通信参数"),
+        "baud rate": (6, "通信参数"), "resp timeout": (6, "通信参数"), "param8": (6, "通信参数"),
+        "parity": (6, "通信参数"), "retry cnt": (6, "通信参数"), "slave addr": (6, "通信参数"),
+        "pause": (7, "动作"), "stop": (7, "动作"), "resume": (7, "动作"),
+        "reset": (7, "动作"), "trigger": (7, "动作"),
+    }
+
+# RTL macro names from imported component tables.
+for _channel in "ABC":
+    NAME_GROUPS[f"{_channel}_EN"] = (0, "使能")
+    NAME_GROUPS[f"{_channel}_TX_OT"] = (1, "输出")
+    NAME_GROUPS[f"EC_CH{_channel}_ST"] = (1, "通道状态")
+    NAME_GROUPS[f"{_channel}_ALM_NUM"] = (2, "报警")
+    NAME_GROUPS[f"{_channel}_TX_ID"] = (3, "事务")
+    NAME_GROUPS[f"{_channel}_BHV_ID"] = (4, "行为")
+    NAME_GROUPS[f"{_channel}_TX_RSULT_RPT"] = (5, "上报")
+NAME_GROUPS.update({"IRQ_REG1": (0, "中断"), "IRQ_REG2": (0, "中断"), "RST_EN": (0, "复位"),
+                    "A_TASK_ID": (5, "任务"), "A_TASK_BHV_ID": (5, "任务"), "C_GAP_CRL": (5, "任务")})
+for _index in range(1, 71):
+    NAME_GROUPS[f"PARAM{_index}"] = (6, "参数")
+for _index in range(1, 6):
+    NAME_GROUPS[f"DEBUG_REG{_index}"] = (7, "调试")
