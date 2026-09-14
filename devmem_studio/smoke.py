@@ -46,6 +46,8 @@ ec_1do_2
 
 
 def run_smoke(app, directory: Path):
+    import os
+    os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"   # acceptance runs against bundled data only
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     checks = []
@@ -130,8 +132,10 @@ def run_smoke(app, directory: Path):
         window.select_component(target)
         settle(lambda: not window._busy)
         check(len(window.regs) == 3, "Imported definition applies to the selected component immediately")
+        os.environ.pop("DEVMEMSTUDIO_IGNORE_OVERRIDES", None)   # verify the override reloads
         with patch("devmem_studio.top_import.user_data_dir", return_value=directory):
             window.type_catalog = top_import.load_type_catalog()
+        os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"
         check("imported_from" in window.type_catalog["types"]["ec_slv_pul_axis"],
               "Imported definitions persist and reload with the catalog")
         window.type_catalog["types"]["ec_slv_pul_axis"] = bundled_entry   # continue with the full table

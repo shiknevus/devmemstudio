@@ -145,6 +145,6 @@ QScrollArea#sidebarScroll QWidget#sidebar { background: #142635; }
 QWidget#sidebar QTreeWidget { background: #1C303F; color: #C8D7E5; border: 1px solid #365061; border-radius: 5px; font-size: 11px; }
 QWidget#sidebar QTreeWidget::item { padding: 3px 4px; border-radius: 3px; }
 QWidget#sidebar QTreeWidget::item:hover { background: #233D50; }
-QWidget#sidebar QTreeWidget::item:selected { background: #294963; color: #FFFFFF; }
+QWidget#sidebar QTreeWidget::item:selected { background: #2F6FBF; color: #FFFFFF; }
 QWidget#sidebar QTreeWidget::branch { background: transparent; }
 """

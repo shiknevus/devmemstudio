@@ -53,6 +53,7 @@ ec_1do_2
 class UiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"   # isolate from real machine imports
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setStyle("Fusion")
         cls.app.setStyleSheet(STYLE)
