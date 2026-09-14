@@ -822,9 +822,14 @@ class MainWindow(QMainWindow):
             group = self.component_tree.topLevelItem(group_index)
             for child_index in range(group.childCount()):
                 child = group.child(child_index)
+                comp = child.data(0, Qt.UserRole)
+                if not isinstance(comp, dict) or comp.get("disabled"):
+                    continue  # disabled items keep their greyed-out look
+                active = comp is self.active_component
                 font = child.font(0)
-                font.setBold(child.data(0, Qt.UserRole) is self.active_component)
+                font.setBold(active)
                 child.setFont(0, font)
+                child.setForeground(0, QColor("#FFFFFF" if active else "#C8D7E5"))
 
     def rebuild_registers(self):
         if not self.active_component:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import re
 
@@ -168,7 +169,8 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
             return None
     except (OSError, ValueError):
         return None
-    if path is None:
+    # Tests and offline acceptance opt out of the machine's real overrides via env flag.
+    if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
         overrides = user_data_dir() / "component_overrides"
         if overrides.is_dir():
             for item in sorted(overrides.glob("*.json")):
