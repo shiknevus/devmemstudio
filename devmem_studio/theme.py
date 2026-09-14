@@ -146,5 +146,10 @@ QWidget#sidebar QTreeWidget { background: #1C303F; color: #C8D7E5; border: 1px s
 QWidget#sidebar QTreeWidget::item { padding: 3px 4px; border-radius: 3px; }
 QWidget#sidebar QTreeWidget::item:hover { background: #233D50; }
 QWidget#sidebar QTreeWidget::item:selected { background: #2F6FBF; color: #FFFFFF; }
+/* Selection must cover the branch/indent area too, or the bar looks torn off the row start. */
 QWidget#sidebar QTreeWidget::branch { background: transparent; }
+QWidget#sidebar QTreeWidget::branch:hover,
+QWidget#sidebar QTreeWidget::branch:selected,
+QWidget#sidebar QTreeWidget::branch:has-siblings:adjoins-item:selected,
+QWidget#sidebar QTreeWidget::branch:has-siblings:adjoins-item:hover { background: #2F6FBF; }
 """

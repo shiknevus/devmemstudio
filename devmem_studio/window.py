@@ -745,7 +745,7 @@ class MainWindow(QMainWindow):
             registers, exact = top_import.registers_for(self.type_catalog, module_type)
             note = f"精确寄存器 {len(registers)} 项" if exact else "无精确寄存器表，使用通用回退（≈）"
             group = QTreeWidgetItem([f"{module_type} ({len(items)})"])
-            group.setFlags(Qt.ItemIsEnabled)
+            group.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             group.setToolTip(0, f"{module_type}\n{note}")
             for comp in items:
                 # Address lives in the tooltip and the title row; keep list items name-only.
@@ -818,6 +818,7 @@ class MainWindow(QMainWindow):
     def _highlight_component(self):
         if not hasattr(self, "component_tree"):
             return
+        # Color only - toggling bold would resize the text and tear the selection bar.
         for group_index in range(self.component_tree.topLevelItemCount()):
             group = self.component_tree.topLevelItem(group_index)
             for child_index in range(group.childCount()):
@@ -825,11 +826,7 @@ class MainWindow(QMainWindow):
                 comp = child.data(0, Qt.UserRole)
                 if not isinstance(comp, dict) or comp.get("disabled"):
                     continue  # disabled items keep their greyed-out look
-                active = comp is self.active_component
-                font = child.font(0)
-                font.setBold(active)
-                child.setFont(0, font)
-                child.setForeground(0, QColor("#FFFFFF" if active else "#C8D7E5"))
+                child.setForeground(0, QColor("#FFFFFF" if comp is self.active_component else "#C8D7E5"))
 
     def rebuild_registers(self):
         if not self.active_component:
