@@ -414,7 +414,7 @@ class TopImportUiTests(UiTests):
                    if not self.window.component_tree.topLevelItem(index).isHidden()
                    for child in range(self.window.component_tree.topLevelItem(index).childCount())
                    if not self.window.component_tree.topLevelItem(index).child(child).isHidden()]
-        self.assertEqual([item.text(0).split(" ·")[0] for item in visible], ["A0001_测试轴"])
+        self.assertEqual([item.text(0).split(" ·")[0].strip() for item in visible], ["A0001_测试轴"])
         self.window.component_search.setText("不存在的东西")
         self.settle()
         self.assertTrue(all(self.window.component_tree.topLevelItem(index).isHidden()

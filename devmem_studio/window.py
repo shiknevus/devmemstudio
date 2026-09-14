@@ -750,14 +750,16 @@ class MainWindow(QMainWindow):
         for module_type, items in groups.items():
             registers, exact = top_import.registers_for(self.type_catalog, module_type)
             note = f"精确寄存器 {len(registers)} 项" if exact else "无精确寄存器表，使用通用回退（≈）"
-            group = QTreeWidgetItem([f"▸ {module_type} ({len(items)})"])
+            group = QTreeWidgetItem([f"    {module_type} ({len(items)})"])
             group.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             group.setData(0, Qt.UserRole + 1, module_type)
             group.setForeground(0, QColor("#8097AA"))
             group.setToolTip(0, f"{module_type}\n{note}")
             for comp in items:
                 # Address lives in the tooltip and the title row; keep list items name-only.
-                item = QTreeWidgetItem([comp["label"]])
+                # Leading spaces indent level-2 items without a branch column, so the
+                # selection bar still spans the full row (no torn selection).
+                item = QTreeWidgetItem(["        " + comp["label"]])
                 item.setData(0, Qt.UserRole, comp)
                 if comp["disabled"]:
                     item.setFlags(Qt.NoItemFlags)
@@ -773,12 +775,11 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _update_group_marker(item):
-        """▸/▾ expand marker for type groups (no native branch arrows in the flat layout)."""
+        """Keep the group count in sync after search-driven expansion changes."""
         module_type = item.data(0, Qt.UserRole + 1)
         if not module_type:
             return
-        count = item.childCount()
-        item.setText(0, f"{'▾' if item.isExpanded() else '▸'} {module_type} ({count})")
+        item.setText(0, f"    {module_type} ({item.childCount()})")
 
     def _filter_components(self, text):
         if not hasattr(self, "component_tree"):

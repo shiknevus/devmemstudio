@@ -1,4 +1,4 @@
-# 寄存器调试工作台 2.2.1
+# 寄存器调试工作台 3.0.0
 
 作者：szzhang / cgliu / bxli
 
@@ -207,7 +207,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 重新打包
 
-双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller。构建后会隔离启动 EXE 验收，并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和 `dist/DevmemStudio-2.2.1-win64.zip`。
+双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller。构建后会隔离启动 EXE 验收，并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和 `dist/DevmemStudio-3.0.0-win64.zip`。
 
 也可手动执行：
 
