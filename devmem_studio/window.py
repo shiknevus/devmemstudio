@@ -228,8 +228,14 @@ class MainWindow(QMainWindow):
         self.component_tree.setHeaderHidden(True)
         self.component_tree.setMinimumWidth(300)
         self.component_tree.setMinimumHeight(220)
+        # Flat single-column layout: the selection bar spans the full row with no
+        # separate branch area, which QSS cannot paint consistently (torn selection).
+        self.component_tree.setRootIsDecorated(False)
+        self.component_tree.setIndentation(0)
         self.component_tree.itemClicked.connect(self._component_clicked)
         self.component_tree.setExpandsOnDoubleClick(False)
+        self.component_tree.itemExpanded.connect(self._update_group_marker)
+        self.component_tree.itemCollapsed.connect(self._update_group_marker)
         layout.addWidget(self.component_tree, 1)
         self.top_summary = label("导入 top 后按类型列出组件", "sideCaption")
         self.top_summary.setWordWrap(True)
@@ -744,8 +750,10 @@ class MainWindow(QMainWindow):
         for module_type, items in groups.items():
             registers, exact = top_import.registers_for(self.type_catalog, module_type)
             note = f"精确寄存器 {len(registers)} 项" if exact else "无精确寄存器表，使用通用回退（≈）"
-            group = QTreeWidgetItem([f"{module_type} ({len(items)})"])
+            group = QTreeWidgetItem([f"▸ {module_type} ({len(items)})"])
             group.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            group.setData(0, Qt.UserRole + 1, module_type)
+            group.setForeground(0, QColor("#8097AA"))
             group.setToolTip(0, f"{module_type}\n{note}")
             for comp in items:
                 # Address lives in the tooltip and the title row; keep list items name-only.
@@ -762,6 +770,15 @@ class MainWindow(QMainWindow):
                 group.addChild(item)
             self.component_tree.addTopLevelItem(group)
         self._highlight_component()
+
+    @staticmethod
+    def _update_group_marker(item):
+        """▸/▾ expand marker for type groups (no native branch arrows in the flat layout)."""
+        module_type = item.data(0, Qt.UserRole + 1)
+        if not module_type:
+            return
+        count = item.childCount()
+        item.setText(0, f"{'▾' if item.isExpanded() else '▸'} {module_type} ({count})")
 
     def _filter_components(self, text):
         if not hasattr(self, "component_tree"):
