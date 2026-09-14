@@ -4,7 +4,8 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QDialogButtonBox, QPlainTextEdit,
-                               QFileDialog, QMessageBox, QTextBrowser, QLineEdit, QCheckBox, QSpinBox, QPushButton)
+                               QFileDialog, QMessageBox, QTextBrowser, QLineEdit, QCheckBox, QSpinBox,
+                               QPushButton, QProgressBar)
 from .core import write_command
 from . import __version__
 from .widgets import label, button, row
@@ -275,6 +276,95 @@ class HostKeyDialog(QDialog):
         self.confirm_button.setAutoDefault(False)
         layout.addLayout(row(1, self.cancel_button, self.confirm_button))
         self.cancel_button.setFocus()
+
+
+class BitUploadDialog(QDialog):
+    """Pick or drop a .bit file and send it to the board as sunny_fpga.bit."""
+    upload_requested = Signal(str, str)  # local path, remote dir
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("上传bit file")
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        self.setWindowModality(Qt.NonModal)
+        self.setMinimumSize(540, 240)
+        self.setAcceptDrops(True)
+        self._local_path = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(label("选择或拖入 .bit 文件", "title"))
+        hint = label("上传后板端原 sunny_fpga.bit 会重命名为 sunny_fpga.bit_时间戳 备份，新文件以 sunny_fpga.bit 落到 /run/media/sda。", "muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.path_label = label("未选择文件", "mono")
+        self.path_label.setWordWrap(True)
+        layout.addWidget(self.path_label)
+        choose = button("选择文件…", self.choose_file, "flat", "export")
+        self.remote_dir = QLineEdit("/run/media/sda")
+        self.remote_dir.setObjectName("mono")
+        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, 1, choose, spacing=8))
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bitProgress")
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(4)   # thin line, like the main-window progress
+        # Tween toward the target so the line advances smoothly instead of stepping.
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+        self._anim = QPropertyAnimation(self.progress, b"value", self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        layout.addWidget(self.progress)
+        self.status = label("", "muted")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.upload_button = button("上传", self.start_upload, "primary", "write")
+        self.upload_button.setMinimumWidth(110)
+        layout.addLayout(row(1, self.upload_button))
+
+    def choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 .bit 文件", "", "bit file (*.bit);;所有文件 (*)")
+        if path:
+            self.set_path(path)
+
+    def set_percent(self, percent):
+        """Slide the line smoothly to the target percentage."""
+        self._anim.stop()
+        self._anim.setStartValue(self.progress.value())
+        self._anim.setEndValue(max(self.progress.value(), percent))
+        self._anim.setDuration(220)
+        self._anim.start()
+
+    def set_done(self):
+        self._anim.stop()
+        self.progress.setValue(100)
+
+    def set_reset(self):
+        self._anim.stop()
+        self.progress.setValue(0)
+
+    def set_path(self, path):
+        self._local_path = path
+        self.path_label.setText(path)
+        self.path_label.setToolTip(path)
+        self.set_reset()
+        self.status.setText(f"本地文件：{Path(path).name}（{Path(path).stat().st_size:,} 字节）")
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".bit") for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            local = url.toLocalFile()
+            if local.lower().endswith(".bit"):
+                self.set_path(local)
+                break
+
+    def start_upload(self):
+        if self._local_path:
+            self.upload_requested.emit(self._local_path, self.remote_dir.text().strip() or "/run/media/sda")
 
 
 def show_help(parent):

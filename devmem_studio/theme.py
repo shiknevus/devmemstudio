@@ -131,6 +131,8 @@ QPlainTextEdit#console, QPlainTextEdit#boardConsole { background: #182C3B; color
 QPlainTextEdit#boardConsole { selection-background-color: #F0C478; selection-color: #142635; }
 QProgressBar { border: none; border-radius: 2px; background: #E4EBF3; max-height: 3px; }
 QProgressBar::chunk { background: #2463DC; border-radius: 2px; }
+QProgressBar#bitProgress { max-height: 4px; }
+QProgressBar#bitProgress::chunk { border-radius: 2px; }
 QCheckBox { spacing: 6px; }
 QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid #A6B6C6; border-radius: 3px; background: white; }
 QCheckBox::indicator:checked { background: #2463DC; border: 3px solid #B0CCF8; }

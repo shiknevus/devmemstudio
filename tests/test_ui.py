@@ -485,6 +485,19 @@ class TopImportUiTests(UiTests):
         self.assertIn("没有可读取", self.window.status_left.text())
         self.assertTrue(any("通用回退" in message for _, _, message in self.window.log_records))
 
+    def test_upload_download_available_without_selected_component(self):
+        # Connected but no component chosen: upload/download must stay usable.
+        self.window.select_component(self.window.top_info["components"][0])
+        self.settle(lambda: not self.window._busy)
+        self.assertTrue(self.window.bit_upload_button.isEnabled())
+        self.assertTrue(self.window.log_download_button.isEnabled())
+        self.window.active_component = None
+        self.window.rebuild_registers()
+        self.settle()
+        self.assertFalse(self.window.read_all_button.isEnabled())   # register ops stay locked
+        self.assertTrue(self.window.bit_upload_button.isEnabled())   # file ops stay unlocked
+        self.assertTrue(self.window.log_download_button.isEnabled())
+
     def test_empty_state_without_component(self):
         window = MainWindow(ConfigStore(Path(self.temp.name) / "empty.json"), persist=False)
         try:
