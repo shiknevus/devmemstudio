@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import paramiko
 from devmem_studio.catalog import DEFAULT_TYPES
@@ -161,6 +162,127 @@ class BoardFixture:
         self.listener.close()
         self.server_thread.join(1)
         self.temp.cleanup()
+
+
+class BitUploadUnitTests(unittest.TestCase):
+    """Verify the upload_bitfile rename-and-put sequence without a live SSH server."""
+
+    def test_upload_renames_prior_bit_then_puts_new(self):
+        from devmem_studio.core import SshSession
+        import paramiko
+
+        local = Path(tempfile.gettempdir()) / "test_design.bit"
+        local.write_bytes(b"\x00\x01\x02\x03" * 100)
+        try:
+            events = {"renames": [], "puts": [], "makedirs": []}
+
+            class FakeSFTP:
+                from types import SimpleNamespace as _NS
+
+                def stat(self, path):
+                    from types import SimpleNamespace
+                    # Directories up to /run/media/sda exist; the prior sunny_fpga.bit
+                    # exists; anything else (timestamped backups) does not.
+                    basename = path.rsplit("/", 1)[-1]
+                    if basename == "sunny_fpga.bit":
+                        return SimpleNamespace(st_size=400)
+                    if path in ("/run", "/run/media", "/run/media/sda"):
+                        return SimpleNamespace(st_size=4096)
+                    raise FileNotFoundError
+
+                def rename(self, src, dst):
+                    events["renames"].append((src, dst))
+
+                def mkdir(self, path):
+                    events["makedirs"].append(path)
+
+                def put(self, local_path, remote_path, callback=None):
+                    events["puts"].append((local_path, remote_path))
+                    if callback:
+                        callback(100, 100)
+
+                def close(self):
+                    pass
+
+            session = SshSession()
+            session._alive = True
+
+            class FakeTransport:
+                pass
+
+            class FakeClient:
+                def get_transport(self):
+                    return FakeTransport()
+
+            session.client = FakeClient()
+            session.chan = object()  # alive checks chan too
+            original = paramiko.SFTPClient.from_transport
+            paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+            original_alive = type(session).alive
+            try:
+                type(session).alive = property(lambda s: True)
+                session.upload_bitfile(str(local))
+            finally:
+                paramiko.SFTPClient.from_transport = original
+                type(session).alive = original_alive
+
+            self.assertEqual(len(events["renames"]), 1)
+            self.assertTrue(events["renames"][0][1].endswith("_sunny_fpga.bit") is False)
+            self.assertIn("_", events["renames"][0][1])  # backup has timestamp suffix
+            self.assertEqual(len(events["puts"]), 1)
+            self.assertTrue(events["puts"][0][1].endswith("/sunny_fpga.bit"))
+            self.assertEqual(len(events["makedirs"]), 0)  # /run/media/sda exists
+        finally:
+            local.unlink(missing_ok=True)
+
+    def test_download_file_reports_progress_and_saves(self):
+        from devmem_studio.core import SshSession
+        import paramiko
+
+        local = Path(tempfile.gettempdir()) / "test_sunny_download.log"
+        try:
+            class FakeSFTP:
+                def stat(self, path):
+                    from types import SimpleNamespace
+                    if path == "/run/media/sda/sunny.log":
+                        return SimpleNamespace(st_size=2048)
+                    raise FileNotFoundError
+
+                def get(self, remote_path, local_path, callback=None):
+                    local_path = Path(local_path)
+                    local_path.write_bytes(b"x" * 2048)
+                    if callback:
+                        callback(2048, 2048)
+
+                def close(self):
+                    pass
+
+            session = SshSession()
+
+            class FakeTransport:
+                pass
+
+            class FakeClient:
+                def get_transport(self):
+                    return FakeTransport()
+
+            session.client = FakeClient()
+            session.chan = object()
+            original = paramiko.SFTPClient.from_transport
+            original_alive = type(session).alive
+            received = []
+            paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+            try:
+                type(session).alive = property(lambda s: True)
+                session.download_file("/run/media/sda/sunny.log", str(local),
+                                      progress=lambda done, total: received.append((done, total)))
+            finally:
+                paramiko.SFTPClient.from_transport = original
+                type(session).alive = original_alive
+            self.assertEqual(local.stat().st_size, 2048)
+            self.assertTrue(received and received[-1] == (2048, 2048))
+        finally:
+            local.unlink(missing_ok=True)
 
 
 class SshTests(BoardFixture, unittest.TestCase):

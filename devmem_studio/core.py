@@ -475,6 +475,115 @@ class SshSession:
             raise
         self.log("CMD", command)
 
+    def upload_bitfile(self, local_path, remote_dir="/run/media/sda",
+                       dest_name="sunny_fpga.bit", timestamp=None, progress=None):
+        """Rename the existing remote bit to a timestamped backup, then upload the new one.
+
+        The remote directory and any parent path components are created on demand; the
+        previous sunny_fpga.bit (if present) is renamed to sunny_fpga.bit_<timestamp>.
+        Runs on the worker thread; `progress(done, total)` reports byte transfer."""
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        import os
+        stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
+        transport = self.client.get_transport()
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        try:
+            if sftp is None:
+                raise CommandError("SSH 通道不可用，无法上传。")
+            if remote_dir and remote_dir != ".":
+                parts = [p for p in remote_dir.replace("\\", "/").split("/") if p]
+                current = "/"
+                for part in parts:
+                    current = current.rstrip("/") + "/" + part
+                    try:
+                        sftp.stat(current)
+                    except IOError:
+                        sftp.mkdir(current)
+            backup_name = f"{dest_name}_{stamp}"
+            backup_path = f"{remote_dir.rstrip('/')}/{backup_name}"
+            try:
+                sftp.stat(f"{remote_dir}/{dest_name}")
+                self.log("CMD", f"rename {remote_dir}/{dest_name} -> {backup_name}")
+                sftp.rename(f"{remote_dir}/{dest_name}", backup_path)
+            except IOError:
+                pass  # no previous bit to back up
+            total = os.path.getsize(local_path)
+            sent = [0]
+
+            def callback(transferred, _total):
+                if progress is not None and transferred > sent[0]:
+                    sent[0] = transferred
+                    progress(transferred, total)
+
+            remote_path = f"{remote_dir}/{dest_name}"
+            self.log("CMD", f"put {local_path} -> {remote_path}")
+            sftp.put(local_path, remote_path, callback=callback)
+            try:
+                attrs = sftp.stat(remote_path)
+                self.log("INFO", f"{remote_path}: {attrs.st_size} 字节")
+            except IOError:
+                pass
+        finally:
+            if sftp is not None:
+                sftp.close()
+
+    def download_file(self, remote_path, local_path, progress=None):
+        """Download a remote file via SFTP; progress(done, total) reports byte transfer."""
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        import os
+        transport = self.client.get_transport()
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        try:
+            if sftp is None:
+                raise CommandError("SSH 通道不可用，无法下载。")
+            attrs = sftp.stat(remote_path)
+            total = attrs.st_size
+            sent = [0]
+
+            def callback(transferred, _total):
+                if progress is not None and transferred > sent[0]:
+                    sent[0] = transferred
+                    progress(transferred, total)
+
+            self.log("CMD", f"get {remote_path} -> {local_path}")
+            sftp.get(remote_path, local_path, callback=callback)
+            self.log("INFO", f"{local_path}: {os.path.getsize(local_path)} 字节")
+        finally:
+            if sftp is not None:
+                sftp.close()
+
+    def start_stream(self, path: str, output, stopped, cancel_event=None):
+        stop = cancel_event if cancel_event is not None else threading.Event()
+        if stop.is_set():
+            return False
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        if not path.strip() or "\x00" in path or "\n" in path:
+            raise ValueError("请输入有效的板端日志路径。")
+        self.stop_stream()
+        self._stream_stop = stop
+        command = "tail -f " + shlex.quote(path)
+        if stop.is_set():
+            return False
+        channel = self.client.get_transport().open_session(timeout=8)
+        self._stream_channel = channel
+        try:
+            if stop.is_set():
+                channel.close()
+                return False
+            channel.exec_command(command)
+            if stop.is_set():
+                channel.close()
+                return False
+        except Exception:
+            channel.close()
+            if stop.is_set():
+                return False
+            raise
+        self.log("CMD", command)
+
         def reader():
             decoders = [codecs.getincrementaldecoder("utf-8")("replace") for _ in range(2)]
             try:
@@ -527,6 +636,75 @@ class DemoSession:
         self.last_exit = 0
         self.memory = {}
         self._stream_stop = threading.Event()
+        # fake remote filesystem root, seeded with a demo sunny.log
+        import tempfile as _tempfile
+        self.remote_root = Path(_tempfile.mkdtemp(prefix="demo-board-"))
+        (self.remote_root / "run" / "media" / "sda").mkdir(parents=True, exist_ok=True)
+        demo_log = self.remote_root / "run" / "media" / "sda" / "sunny.log"
+        if not demo_log.exists():
+            demo_log.write_text("\n".join(
+                f"2026-09-14 20:{minute:02d}:{second:02d} INFO  [DEMO] board boot ok, fpga loaded"
+                .replace("20:", "20:").replace("fpga loaded", f"event #{minute * 60 + second}")
+                for minute in range(0, 2) for second in range(0, 60, 7)), encoding="utf-8")
+
+    def _to_remote(self, remote_path):
+        return self.remote_root / remote_path.lstrip("/")
+
+    def upload_bitfile(self, local_path, remote_dir="/run/media/sda",
+                       dest_name="sunny_fpga.bit", timestamp=None, progress=None):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        import os
+        stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
+        target_dir = self._to_remote(remote_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        dest = target_dir / dest_name
+        if dest.exists():
+            backup = target_dir / f"{dest_name}_{stamp}"
+            self.log("CMD", f"rename {remote_dir}/{dest_name} -> {dest.name}_{stamp}")
+            dest.rename(backup)
+        total = os.path.getsize(local_path)
+        self.log("CMD", f"put {local_path} -> {remote_dir}/{dest_name}")
+        chunk = max(1, total // 20)
+        written = 0
+        with open(local_path, "rb") as src, open(dest, "wb") as dst:
+            while True:
+                block = src.read(chunk)
+                if not block:
+                    break
+                dst.write(block)
+                written += len(block)
+                if progress:
+                    progress(min(written, total), total)
+                time.sleep(0.03)   # visible progress in the UI
+        if progress:
+            progress(total, total)
+        self.log("INFO", f"{remote_dir}/{dest_name}: {total} 字节")
+
+    def download_file(self, remote_path, local_path, progress=None):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        import os
+        source = self._to_remote(remote_path)
+        if not source.is_file():
+            raise CommandError(f"演示板端文件不存在：{remote_path}")
+        total = source.stat().st_size
+        self.log("CMD", f"get {remote_path} -> {local_path}")
+        chunk = max(1, total // 20)
+        written = 0
+        with open(source, "rb") as src, open(local_path, "wb") as dst:
+            while True:
+                block = src.read(chunk)
+                if not block:
+                    break
+                dst.write(block)
+                written += len(block)
+                if progress:
+                    progress(min(written, total), total)
+                time.sleep(0.03)
+        if progress:
+            progress(total, total)
+        self.log("INFO", f"{local_path}: {os.path.getsize(local_path)} 字节")
 
     def connect(self, *args, **kwargs):
         time.sleep(0.08)

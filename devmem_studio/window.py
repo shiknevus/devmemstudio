@@ -28,7 +28,7 @@ from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyC
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, CommandLine,
                       BitView, DecodedFieldsView, Worker, LogBridge)
-from .dialogs import BatchDialog, BoardLogDialog, HostKeyDialog, show_help
+from .dialogs import BatchDialog, BoardLogDialog, HostKeyDialog, BitUploadDialog, show_help
 
 VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "basic": "身份、模块状态与安全链（公共寄存器头）",
@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
         self.bridge.stream_worker_finished.connect(self._stream_worker_finished)
         self.session = SshSession(self.bridge.message.emit)
         self.board_log = None
+        self.bit_dialog = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
         self.log_records = []
@@ -513,10 +514,15 @@ class MainWindow(QMainWindow):
         self.follow_log.setChecked(True)
         self.board_log_button = button("打印日志", self.open_board_log, "flat", "terminal")
         self.board_log_button.setToolTip("新窗口打印 tail -f /run/media/sda/sunny.log，主窗口可继续读写寄存器。")
+        self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "export")
+        self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；原文件备份为 sunny_fpga.bit_时间戳。")
+        self.log_download_button = button("下载log", self.download_board_log, "flat", "export")
+        self.log_download_button.setToolTip("下载板端 /run/media/sda/sunny.log 到本地（选择保存位置）。")
         self.reboot_button = button("重启设备", self.reboot, "flat", "refresh")
-        self.remote_buttons.append(self.reboot_button)
+        # upload/download/reboot need only a live session, not a selected register component
         layout.addLayout(row(label("会话终端", "sectionTitle"), self.log_filter, self.follow_log, 1,
-                             self.board_log_button, self.reboot_button,
+                             self.board_log_button, self.bit_upload_button, self.log_download_button,
+                             self.reboot_button,
                              button("导出", self.export_logs, "flat", "export"),
                              button("清空", self.clear_logs, "flat"), spacing=6))
         self.console = QPlainTextEdit()
@@ -1232,9 +1238,9 @@ class MainWindow(QMainWindow):
         for control in self.remote_buttons + getattr(self, "row_buttons", []):
             control.setEnabled(enabled)
         # Commands and the independent log stream do not depend on register addresses.
-        for control in (self.send_button, self.reboot_button,
-                        self.hex_read_button, self.dec_read_button):
-            control.setEnabled(self.connected and not self._busy)
+        for control in (self.send_button, self.reboot_button, self.bit_upload_button,
+                        self.log_download_button, self.hex_read_button, self.dec_read_button):
+            control.setEnabled(self.connected and not self._busy and not self._closing)
         self.board_log_button.setEnabled(self.connected and not self._closing)
         for control in (self.host, self.port, self.user, self.password, self.timeout, self.remember):
             control.setEnabled(not self.connected and not self._busy)
@@ -1351,6 +1357,112 @@ class MainWindow(QMainWindow):
         self._pending_component = None
         self.append_log("SYSTEM", "会话已断开。当前显示保留为最近一次读取结果。")
 
+    def open_bit_upload(self):
+        if self._closing or not self.connected or self._busy:
+            return
+        if self.bit_dialog is None:
+            self.bit_dialog = BitUploadDialog(self)
+            self.bit_dialog.upload_requested.connect(self._start_bit_upload)
+        if self.bit_dialog.isMinimized():
+            self.bit_dialog.showNormal()
+        else:
+            self.bit_dialog.show()
+        self.bit_dialog.raise_()
+        self.bit_dialog.activateWindow()
+
+    def _start_bit_upload(self, local_path, remote_dir):
+        if self._closing or self._busy or not self.connected:
+            return
+        if not Path(local_path).is_file():
+            QMessageBox.warning(self.bit_dialog, "上传失败", f"找不到文件：{local_path}")
+            return
+        self.bit_dialog.upload_button.setEnabled(False)
+        self.bit_dialog.set_reset()
+        self.bit_dialog.status.setText("正在备份旧文件并上传，请勿断开连接。")
+        self._bit_last_paint = 0.0
+        session = self.session
+
+        def task(progress):
+            def report(done, total):
+                progress({"current": done, "total": total})
+            session.upload_bitfile(local_path, remote_dir, "sunny_fpga.bit", progress=report)
+            return True
+
+        def done(_result):
+            self.bit_dialog.set_done()
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            self.bit_dialog.status.setText(f"已上传为 {remote_dir}/sunny_fpga.bit；原文件备份为 sunny_fpga.bit_{stamp}。")
+            self.bit_dialog.upload_button.setEnabled(True)
+            self.status_left.setText("bit file 上传完成。")
+            self.append_log("SUCCESS", f"bit file 上传完成：{Path(local_path).name} -> {remote_dir}/sunny_fpga.bit")
+
+        def failed(message):
+            self.bit_dialog.set_reset()
+            self.bit_dialog.status.setText("上传失败：" + message)
+            self.bit_dialog.upload_button.setEnabled(True)
+            self.append_log("ERROR", f"bit file 上传失败：{message}")
+            self.status_left.setText(message[:150])
+
+        def finished():
+            self._busy = False
+            self.stop_button.setEnabled(False)
+            self._next_poll = time.monotonic() + self.interval.currentData() / 1000
+            self._refresh_controls()
+
+        worker = Worker(task)
+        worker.signals.result.connect(done)
+        worker.signals.failed.connect(failed)
+        worker.signals.progress.connect(self._bit_progress)
+        worker.signals.finished.connect(finished)
+        self._active_worker = worker   # keep a reference or Qt may drop the queued signals
+        self._busy = True
+        self._task_kind = "upload"
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+        self._refresh_controls()
+        self.pool.start(worker)
+
+    @Slot(object)
+    def _bit_progress(self, data):
+        current, total = data.get("current", 0), data.get("total", 0)
+        if total <= 0 or self._closing or not self.bit_dialog:
+            return
+        percent = min(100, int(current * 100 / total))
+        # SFTP callbacks arrive far faster than the display needs; throttle to ~10 Hz
+        # (and always fire at 100%) so the tween advances smoothly instead of stepping.
+        now = time.monotonic()
+        if percent < 100 and now - self._bit_last_paint < 0.1:
+            return
+        self._bit_last_paint = now
+        self.bit_dialog.set_percent(percent)
+        self.status_left.setText(f"上传bit file {percent}% ({current:,} / {total:,} 字节)")
+
+    def download_board_log(self):
+        if self._closing or not self.connected or self._busy:
+            return
+        default_name = f"sunny-{datetime.now():%Y%m%d-%H%M%S}.log"
+        path, _ = QFileDialog.getSaveFileName(self, "保存板端日志", default_name, "日志文件 (*.log);;所有文件 (*)")
+        if not path:
+            return
+        session = self.session
+        remote_path = DEFAULT_LOG_PATH
+
+        def task(progress):
+            def report(done, total):
+                progress({"current": done, "total": total})
+            session.download_file(remote_path, path, progress=report)
+            return path
+
+        def done(result):
+            self.status_left.setText("板端日志已下载：" + result)
+            self.append_log("SUCCESS", f"板端日志已下载：{remote_path} -> {result}")
+
+        def failed(message):
+            self.append_log("ERROR", f"板端日志下载失败：{message}")
+            self.status_left.setText(message[:150])
+
+        self._run_task(task, done, "下载板端日志", "download")
+
     def _run_task(self, function, callback, description, kind="operation"):
         if self._busy or self._closing:
             return False
@@ -1361,7 +1473,7 @@ class MainWindow(QMainWindow):
         self.status_left.setText(description + "…")
         self.progress.setRange(0, 0)
         self.progress.show()
-        self.stop_button.setEnabled(kind in ("read", "write", "connect", "command"))
+        self.stop_button.setEnabled(kind in ("read", "write", "connect", "command", "download", "upload"))
         self._refresh_controls()
         worker = Worker(function)
         self._active_worker = worker
