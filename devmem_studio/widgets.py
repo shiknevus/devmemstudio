@@ -70,47 +70,52 @@ class ComboBox(QComboBox):
 
 
 class DecodedFieldsView(QFrame):
-    """Aligned field names, bit ranges and values, without rebuilding on each poll."""
+    """Aligned field names, bit ranges and values; grows rows on demand."""
     def __init__(self):
         super().__init__()
         self.setObjectName("decodedFields")
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setHorizontalSpacing(5)
-        layout.setVerticalSpacing(7)
-        layout.setColumnStretch(0, 1)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(8, 8, 8, 8)
+        self.grid.setHorizontalSpacing(5)
+        self.grid.setVerticalSpacing(7)
+        self.grid.setColumnStretch(0, 1)
         for column, title in enumerate(("字段解析", "位段", "值")):
             heading = label(title, "eyebrow")
             heading.setAlignment((Qt.AlignLeft if column == 0 else Qt.AlignRight) | Qt.AlignVCenter)
-            layout.addWidget(heading, 0, column)
+            self.grid.addWidget(heading, 0, column)
         self.rows = []
         self.field_values = {}
-        for index in range(4):
+
+    def _row_cells(self, index):
+        """Create grid rows on demand so any field count fits (one per line)."""
+        while len(self.rows) <= index:
             cells = (label("", "fieldName"), label("", "fieldBits"), label("", "fieldValue"))
             for column, cell in enumerate(cells):
                 cell.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 cell.setAlignment((Qt.AlignLeft if column == 0 else Qt.AlignRight) | Qt.AlignVCenter)
-                layout.addWidget(cell, index + 1, column)
+                self.grid.addWidget(cell, len(self.rows) + 1, column)
             self.rows.append(cells)
+        return self.rows[index]
 
     def set_fields(self, definitions, values):
         self.field_values = {}
-        for index, cells in enumerate(self.rows):
-            active = index < len(definitions)
+        for index, definition in enumerate(definitions):
+            cells = self._row_cells(index)
             for cell in cells:
-                cell.setVisible(active)
-            if not active:
-                continue
-            name, high, low, radix = definitions[index]
+                cell.setVisible(True)
+            name, high, low, radix = definition
             cells[0].setText(name)
-            cells[1].setText(f"[{high}:{low}]")
+            cells[1].setText(f"[{high}:{low}]" if high != low else f"[{low}]")
             cells[2].setText(values.get(name, "—"))
-            description = f"{name} · 位 [{high}:{low}] · {'十六进制' if radix == 'HEX' else '十进制'}"
+            description = f"{name} · 位 [{high}:{low}] · {'十六进制' if radix == 'HEX' else '十进制'}\n每行一个 RTL 信号"
             for cell in cells:
                 cell.setToolTip(description)
             cells[2].setStyleSheet("color:#2463DC;" if radix == "HEX" and name in values else
                                   "color:#23374A;" if name in values else "color:#91A0AF;")
             self.field_values[name] = cells[2]
+        for cells in self.rows[len(definitions):]:
+            for cell in cells:
+                cell.setVisible(False)
 
 
 class CommandLine(QLineEdit):
