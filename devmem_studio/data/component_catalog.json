@@ -1,6 +1,6 @@
 {
-  "schema": 7,
-  "generated_at": "2026-09-15T08:52:45",
+  "schema": 8,
+  "generated_at": "2026-09-16T01:23:33",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -13538,7 +13538,8 @@
           "name": "PARAM51",
           "width": 32,
           "readonly": true,
-          "signal": "r_pf_abspos"
+          "signal": "r_pf_abspos",
+          "signed": true
         },
         {
           "offset": "0x17C",
@@ -15651,7 +15652,8 @@
           "name": "PARAM51",
           "width": 32,
           "readonly": true,
-          "signal": "r_pf_abspos"
+          "signal": "r_pf_abspos",
+          "signed": true
         },
         {
           "offset": "0x17C",

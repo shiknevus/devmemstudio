@@ -276,10 +276,15 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     param_hookups = {number: expression for number, expression in PARAM_EXPR.findall(top_body)}
     wired = set(param_hookups)
     debug_hookups = {number: expression for number, expression in DEBUG_HOOKUP.findall(top_body)}
+    signed_names = harvest_signed_signals(top_file.parent)
     for item in registers:
         signal = signals.get(item["name"])
         if signal:
             item["signal"] = signal
+            # A register fed by a signed wire displays as two's complement in DEC.
+            roots = [part.split("[")[0] for part in signal.split("/")]
+            if any(root in signed_names for root in roots):
+                item["signed"] = True
         elif item["name"].startswith("PARAM") and item["name"][5:] not in wired:
             item["unwired"] = True
         # Concat hookups carry a per-bit layout: show every wire as a field.
@@ -299,7 +304,22 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     return entry, forced, warnings
 
 
-CATALOG_SCHEMA = 7
+SIGNED_PORT = re.compile(r"\b(?:input|output)\s+(?:wire|reg)?\s*signed\s*\[[^\]]*\]\s*([A-Za-z_]\w*)")
+
+
+def harvest_signed_signals(folder: Path) -> set[str]:
+    """Signal names declared signed in any module of the component folder."""
+    folder = Path(folder)
+    names = set()
+    for path in sorted([*folder.glob("*.sv"), *folder.glob("*.v")]):
+        try:
+            names.update(SIGNED_PORT.findall(strip_comments(read_text_resilient(path))))
+        except OSError:
+            continue
+    return names
+
+
+CATALOG_SCHEMA = 8
 
 
 def find_reg_addr_map(folder: Path) -> Path | None:

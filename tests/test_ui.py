@@ -453,6 +453,33 @@ class TopImportUiTests(UiTests):
         self.settle(lambda: not self.window._busy)
         self.assertEqual(self.window.read_count, before + len(self.window.visible_regs))
 
+    def test_signed_register_displays_twos_complement(self):
+        # r_pf_abspos is declared signed in the RTL: 0xFFFFFF9C must display as -100.
+        self.window.view_buttons["param"].click()
+        self.settle(lambda: not self.window._busy)
+        row = self.row_of("PARAM51")
+        self.assertTrue(self.window.regs[row].get("signed"))
+        self.window.session.memory[self.window.regs[row]["_address"]] = 0xFFFFFF9C
+        self.window.table.selectRow(row)
+        self.window.read_selected()
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.table.item(row, 4).text(), "-100")
+        self.assertIn("DEC  -100", self.window.dec_value.text())
+        csv_row = next(item for item in csv.reader(io.StringIO(self.window.snapshot_csv()))
+                      if item[3].startswith("PARAM51"))
+        self.assertEqual(csv_row[11], "-100")
+        # A positive value stays untouched.
+        self.window.session.memory[self.window.regs[row]["_address"]] = 1000
+        self.window.read_selected()
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.table.item(row, 4).text(), "1000")
+        # Unsigned registers are unaffected.
+        self.window.table.selectRow(self.row_of("PARAM1"))
+        self.window.read_selected()
+        self.settle(lambda: not self.window._busy)
+        pos = self.window.regs[self.row_of("PARAM1")]
+        self.assertEqual(self.window.table.item(pos["_row"], 4).text(), str(pos["_value"]))
+
     def test_param_rows_show_actual_signal_names(self):
         self.window.view_buttons["param"].click()
         self.settle(lambda: not self.window._busy)

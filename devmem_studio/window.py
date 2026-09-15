@@ -997,6 +997,19 @@ class MainWindow(QMainWindow):
             return f'{reg["name"]} · {"未接线" if reg.get("unwired") else "预留"}'
         return reg["name"]
 
+    @staticmethod
+    def _dec_display(reg, value):
+        """Decimal text: two's complement for registers fed by signed wires."""
+        if value is None:
+            return "—"
+        if reg.get("signed"):
+            width = reg.get("width", 32) or 32
+            if width < 8 or width not in (8, 16, 32, 64):
+                width = 32
+            if value >= 1 << (width - 1):
+                return str(value - (1 << width))
+        return str(value)
+
     def _update_table_row(self, reg):
         index = reg["_row"]
         value = reg["_value"]
@@ -1004,7 +1017,7 @@ class MainWindow(QMainWindow):
         self._updating = True
         self.table.item(index, 3).setText("回读失败" if reg.get("_readback_failed") else "读取错误" if reg["_error"] else f"0x{value:08X}" if value is not None else "—")
         self.table.item(index, 3).setForeground(QColor("#C44848" if reg["_error"] else "#2463DC"))
-        self.table.item(index, 4).setText(str(value) if value is not None and not reg["_error"] else "—")
+        self.table.item(index, 4).setText(self._dec_display(reg, value) if not reg["_error"] else "—")
         if reg["_error"]:
             self.table.item(index, 3).setToolTip(reg["_error"])
         else:
@@ -1187,7 +1200,7 @@ class MainWindow(QMainWindow):
             return
         value = reg["_value"] if not reg["_error"] else None
         self.hex_value.setText(f"0x{value:08X}" if value is not None else "—")
-        self.dec_value.setText(f"DEC  {value:,}" if value is not None else "写入已完成，回读失败" if reg.get("_readback_failed") else "读取失败" if reg["_error"] else "尚未读取")
+        self.dec_value.setText(f"DEC  {int(self._dec_display(reg, value)):,}" if value is not None and not reg["_error"] else "写入已完成，回读失败" if reg.get("_readback_failed") else "读取失败" if reg["_error"] else "尚未读取")
         when = reg["_updated"]
         self.updated_label.setText((f"更新于 {when}" + (" · 离线缓存" if not self.connected else "")) if when else "等待设备数据")
         self.bits.set_value(value)
@@ -1910,7 +1923,8 @@ class MainWindow(QMainWindow):
             writer.writerow([reg["_source"], reg["_target"], context,
                              self._display_name(reg), register_group(reg), reg["offset"], f'0x{reg["_address"]:08X}',
                              "RO" if reg.get("readonly") else "ACT" if reg.get("action") else "RW", reg.get("width", 32),
-                             reg["_access_width"], f"0x{value:08X}" if value is not None else "", value if value is not None else "",
+                             reg["_access_width"], f"0x{value:08X}" if value is not None else "",
+                             int(self._dec_display(reg, value)) if value is not None and not reg["_error"] else "",
                              " ".join(f"{key}={val}" for key, val in fields.items()), reg["_updated"],
                              reg["_error"] or ("离线缓存" if not self.connected and value is not None else "已读取" if value is not None else "未读取")])
         return stream.getvalue()

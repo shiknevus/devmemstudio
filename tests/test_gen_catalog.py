@@ -196,7 +196,7 @@ class BuildTests(unittest.TestCase):
             catalog, report = gen.build(root, [top], stamp="fixed")
             self.assertEqual(report["unparsed_files"], [])
             self.assertEqual(report["unmatched_top_types"], [])
-            self.assertEqual(catalog["schema"], 7)
+            self.assertEqual(catalog["schema"], 8)
             registers = {item["name"]: item for item in catalog["types"]["ec_uut"]["registers"]}
             self.assertEqual(registers["EC_ID"], {"offset": "0x00C", "name": "EC_ID", "width": 14, "readonly": False})
             self.assertEqual(registers["IRQ_REG1"]["readonly"], True)

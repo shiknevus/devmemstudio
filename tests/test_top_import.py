@@ -159,7 +159,7 @@ class CatalogTests(unittest.TestCase):
             self.skipTest("catalog not generated yet")
         catalog = top_import.load_type_catalog(path)
         self.assertIsNotNone(catalog)
-        self.assertEqual(catalog["schema"], 7)
+        self.assertEqual(catalog["schema"], 8)
         self.assertIn("位快照（低位→高位）：\no_fwd\n", catalog["types"]["ec_dv300_do"]["debug_notes"]["DEBUG_REG3"])
         self.assertIn("irq_negedge_cnt", catalog["types"]["ec_2di_2do"]["debug_notes"]["DEBUG_REG2"])
         spindle = {item["name"]: item for item in catalog["types"]["ec_slv_pul_axis"]["registers"]}
