@@ -383,6 +383,7 @@ def show_help(parent):
     <h3>5. 打印日志与命令</h3><p>「打印日志」新窗口执行 tail -f sunny.log，期间可继续读写寄存器；Ctrl+F 查找，F3 跳转，Ctrl+G 跳行。下方输入 shell 命令，「读 HEX / DEC」快速读取地址。</p>
     <h3>6. 组件定义更新</h3><p>RTL 组件内部修改后，点「导入组件」选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义，立即生效并保存到本机。</p>
     <h3>快捷键</h3><p>F5 读取全部 · Ctrl+F 搜索寄存器 · Ctrl+L 命令输入 · Ctrl+Shift+S 导出快照 · Esc 停止后续操作。</p>
+    <h3>Auth</h3><p>szzhang / cgliu / bxli</p>
     """)
     layout.addWidget(browser, 1)
     layout.addLayout(row(1, button("知道了", dialog.accept, "primary")))
