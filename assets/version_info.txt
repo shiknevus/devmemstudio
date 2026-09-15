@@ -2,12 +2,14 @@ VSVersionInfo(
   ffi=FixedFileInfo(filevers=(3,3,0,0), prodvers=(3,3,0,0), mask=0x3f,
                    flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0,0)),
   kids=[StringFileInfo([StringTable('040904B0', [
-    StringStruct('CompanyName', 'Devmem Studio'),
-    StringStruct('FileDescription', '寄存器调试工作台'),
+    StringStruct('CompanyName', 'sunny'),
+    StringStruct('FileDescription', 'DevmemStudio'),
     StringStruct('FileVersion', '3.3.0'),
     StringStruct('InternalName', 'DevmemStudio'),
     StringStruct('OriginalFilename', 'DevmemStudio.exe'),
-    StringStruct('ProductName', 'Devmem Studio'),
-    StringStruct('ProductVersion', '3.3.0')
+    StringStruct('ProductName', 'DevmemStudio'),
+    StringStruct('ProductVersion', '3.3.0'),
+    StringStruct('LegalCopyright', 'auth szzhang/cgliu/bxli'),
+    StringStruct('Comments', 'auth szzhang/cgliu/bxli')
   ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])]
 )

@@ -40,6 +40,25 @@ VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "debug": "行为状态机历史(DEBUG_REG，每字节一个状态)"}
 
 
+class _SidebarScroll(QScrollArea):
+    """Fixed-width sidebar whose content can never widen past the viewport.
+
+    widgetResizable(True) alone lets a single wide child (a non-wrapping
+    path label, for example) stretch the content past the fixed sidebar
+    width with the horizontal scrollbar off, clipping the rest."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("sidebarScroll")
+        self.setFixedWidth(360)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.widget():
+            self.widget().setFixedWidth(self.viewport().width())
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store=None, persist=True):
         super().__init__()
@@ -168,9 +187,11 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self):
         side = QWidget()
         side.setObjectName("sidebar")
-        side.setMinimumWidth(190)
+        # Ignored horizontally: no child (a long non-wrapping path label, for example)
+        # may widen the content past the sidebar viewport - text wraps instead.
+        side.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(side)
-        layout.setSizeConstraint(QLayout.SetMinimumSize)
+        layout.setSizeConstraint(QLayout.SetNoConstraint)
         layout.setContentsMargins(16, 23, 16, 14)
         layout.setSpacing(10)
         logo = QLabel()
@@ -250,11 +271,7 @@ class MainWindow(QMainWindow):
         self.side_state = label("○  会话未建立", "sideCaption")
         layout.addWidget(self.side_state)
         layout.addWidget(label("SSH / LINUX / MMIO", "sideCaption"))
-        scroll = QScrollArea()
-        scroll.setObjectName("sidebarScroll")
-        scroll.setFixedWidth(360)
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll = _SidebarScroll()
         scroll.setWidget(side)
         return scroll
 
