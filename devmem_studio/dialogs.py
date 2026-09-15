@@ -7,7 +7,6 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, 
                                QFileDialog, QMessageBox, QTextBrowser, QLineEdit, QCheckBox, QSpinBox,
                                QPushButton, QProgressBar)
 from .core import write_command
-from . import __version__
 from .widgets import label, button, row
 from .theme import icon
 from .log_view import LogView, LogSearchEdit
@@ -370,28 +369,21 @@ class BitUploadDialog(QDialog):
 def show_help(parent):
     dialog = QDialog(parent)
     dialog.setWindowTitle("使用指南")
-    dialog.resize(720, 610)
+    dialog.resize(720, 520)
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(24, 24, 24, 20)
-    layout.addWidget(label("从连接到寄存器调试", "title"))
+    layout.addWidget(label("使用指南", "title"))
     browser = QTextBrowser()
     browser.setHtml("""
-    <style>body {color:#344B60;font-family:'Microsoft YaHei UI';font-size:13px} h3{color:#2463DC;margin-top:20px} p{line-height:1.65} code{font-family:Consolas;color:#2463DC}</style>
-    <h3>1. 连接设备</h3><p>填写主机、端口、用户名和密码，点击「连接设备」。设备需要提供 SSH shell 和 devmem 命令。</p>
-    <p>重启板卡后若出现主机密钥变化提示，窗口会显示上次记录与本次连接的 SHA-256 指纹。核对设备地址与新指纹后，点击「信任新密钥并重连」。软件仅更新该设备的记录，并自动备份原记录；取消会保留原记录并停止连接。</p>
-    <h3>2. 导入 top 并选择组件</h3><p>点击侧栏「导入 top」选择 emcc mix 顶层文件：组件目录按类型分组列出全部设备（可按设备名 / 类型 / 地址搜索，禁用组件灰色且不可选）。点击组件即加载该类型的精确寄存器表（寄存器名与 RTL 宏一致），标题行显示设备名、类型徽标和全地址；基地址自动取自 components_param.vh，找不到时左侧出现可编辑的基地址框。重启后自动重新加载上次导入的 top。</p>
-    <p>用「全部 / 基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试」页签切换视图：<b>基础</b>是身份与状态头（RST_EN 写 1 运行 / 0 复位保持、BHV_PRIORITY 仲裁序、M_WK_MOD=3 手动模式）；<b>A/B/C通道</b>按通道分列各自的 EN 门控、BHV_ID 触发（预设来自 RTL 行为表）、TX_OT 秒级超时、TX_ID 事务号、ALM_NUM 报警码（A 含任务标记，C 含心跳周期）；<b>中断</b>含 IRQ 字段解码与 A/B/C 上报应答（TX_RSULT_RPT 写 0x51/0x52 应答）；<b>参数</b>的寄存器名带实际信号名（如 PARAM1 · rcfg_spd_max），悬停另显示 RTL 注释；<b>调试</b>的 DEBUG_REG 按字节解码状态机历史（前第3拍…当前）。读取全部、轮询和批量写入只作用于当前视图。无精确表的类型带 ≈ 标记并使用通用回退。</p>
-    <p>某组件 RTL 内部修改后，点「导入组件」选择该组件文件夹即可重新解析其寄存器定义（无需改源码或重新打包）：解析结果立即生效并保存到本机 %LOCALAPPDATA%/DevmemStudio/component_overrides，重启自动加载，删除对应文件即恢复内置定义。</p>
-    <h3>3. 读取、检查与写入</h3><p>点击行内读取按钮，或使用「读取全部」。选中行后，右侧同步显示 HEX、DEC、32 位状态及 irq / rpt 字段解析。待写入值可在表格中双击编辑，也可在检查器中使用 HEX / DEC 与预设。点击「写入并回读」才会写入设备。</p>
-    <p>「解析与位状态」逐行展示字段名、位区间和数值。irq1 按 ec_id [31:18]、sc_id [17:8]、r_a_bhv_id [7:0] 解析；irq2 按 r_a_tx_id [31:24]、r_a_alm_num [23:16] 解析，均为十进制。a / b / c rpt 从高到低依次为 ack_beh_id、ack_tx_id、ack_tx_result、ack_ps_alart_num，各占 8 位；仅 ack_tx_result 使用十六进制，其余使用十进制。悬停当前值及导出 CSV 使用相同字段名和进制。</p>
-    <p>字段长度 1 / 20 位默认使用 32 位总线访问。读取命令沿用原程序：<code>devmem 0xADDR</code>。写入命令：<code>devmem 0xADDR WIDTH 0xVALUE</code>。访问位宽与目标板的 devmem 支持保持一致。回读值为实测值，动作寄存器可能自动清零。</p>
-    <h3>4. 轮询与批量操作</h3><p>「自动读取」按设定间隔轮询当前模块；上一次任务完成后才执行下一次，不堆积请求。「批量写入」先列出准确地址和数值，再勾选执行。动作和伺服按钮需要主动勾选。任务遇错停止，停止按钮在当前命令完成后生效。</p>
-    <h3>5. 命令与记录</h3><p>下方支持 shell 命令；读 HEX / DEC 把输入地址转换为 devmem 读取。↑ / ↓ 浏览命令历史。点击「打印日志」会立即打开独立窗口并执行 <code>tail -f /run/media/sda/sunny.log</code>，无需再次点击开始。日志启动和打印期间，主窗口均可继续读写寄存器；停止或关闭日志窗口只结束日志通道。可导出 CSV 快照、会话日志与板端日志。</p>
-    <p>日志窗口默认开启「自动换行」和「显示行号」，可分别勾选切换。长日志按窗口宽度折行，续行不重复编号，复制和保存仍保留原文。左侧行号对应当前缓存中的原始行，Ctrl+G 输入同一行号并按 Enter 跳转。最多保留最近 5000 行，旧行淘汰或清空后按当前缓存重新编号。</p>
-    <p>日志按错误、告警、成功、调试分级高亮。Ctrl+F 查找普通文本，可选择区分大小写；Enter / F3 跳到下一处，Shift+Enter / Shift+F3 跳到上一处，首尾循环。查找框中 Esc 清空查找。查找和向上浏览时暂停自动滚动，日志继续接收；「回到最新」恢复自动跟随。保存日志导出当前缓存的纯文本。</p>
-    <h3>快捷键</h3><p>F5 读取全部 · Ctrl+F 搜索寄存器 · Ctrl+L 聚焦命令 · Ctrl+Shift+S 导出快照 · Esc 停止后续批量操作。</p>
-    <h3>配置与版本</h3><p>寄存器调试工作台，版本 {version}，作者 szzhang / cgliu / bxli。配置优先存放于程序旁 registers.json；目录不可写时使用 %LOCALAPPDATA%/DevmemStudio。勾选「记住密码」将密码保存在本机配置中。寄存器模板在 devmem_studio/catalog.py。</p>
-    """.replace("{version}", __version__))
+    <style>body {color:#344B60;font-family:'Microsoft YaHei UI';font-size:13px} h3{color:#2463DC;margin-top:18px} p{line-height:1.65} code{font-family:Consolas;color:#2463DC}</style>
+    <h3>1. 连接设备</h3><p>填写主机、端口、用户名和密码，点击「连接设备」。</p>
+    <h3>2. 导入 top 并选择组件</h3><p>点击「导入 top」选择 emcc mix 顶层文件（需在连接设备前导入）：组件按类型分组列出，点击组件即加载其寄存器表并自动读取。基地址自动取自 components_param.vh。</p>
+    <h3>3. 切换视图读写</h3><p>用「基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部」页签切换视图，每页自动读取。选中行后右侧显示位状态与字段解析；双击待写入值或选预设，点「写入并回读」。「批量写入」先预览再执行。</p>
+    <h3>4. 上传 bit 与下载日志</h3><p>「上传bit」选择或拖入 .bit 文件，自动备份板端旧文件后上传为 sunny_fpga.bit；「下载log」把板端 sunny.log 保存到本地。</p>
+    <h3>5. 打印日志与命令</h3><p>「打印日志」新窗口执行 tail -f sunny.log，期间可继续读写寄存器；Ctrl+F 查找，F3 跳转，Ctrl+G 跳行。下方输入 shell 命令，「读 HEX / DEC」快速读取地址。</p>
+    <h3>6. 组件定义更新</h3><p>RTL 组件内部修改后，点「导入组件」选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义，立即生效并保存到本机。</p>
+    <h3>快捷键</h3><p>F5 读取全部 · Ctrl+F 搜索寄存器 · Ctrl+L 命令输入 · Ctrl+Shift+S 导出快照 · Esc 停止后续操作。</p>
+    """)
     layout.addWidget(browser, 1)
     layout.addLayout(row(1, button("知道了", dialog.accept, "primary")))
     dialog.exec()
