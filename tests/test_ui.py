@@ -455,7 +455,7 @@ class TopImportUiTests(UiTests):
 
     def test_param_rows_show_actual_signal_names(self):
         self.window.view_buttons["param"].click()
-        self.settle()
+        self.settle(lambda: not self.window._busy)
         row = self.row_of("PARAM1")
         self.assertIn("rcfg_spd_max", self.window.table.item(row, 0).text())
         self.assertIn("rcfg_spd_max", self.window.table.item(row, 0).toolTip())
@@ -464,6 +464,16 @@ class TopImportUiTests(UiTests):
         unwired = self.row_of("PARAM4")
         self.assertIn("未接线", self.window.table.item(unwired, 0).text())
         self.assertIn("读回值无意义", self.window.table.item(unwired, 0).toolTip())
+        # PARAM52 concat: every wire becomes its own field row, values live.
+        row52 = self.row_of("PARAM52")
+        self.window.session.memory[self.window.regs[row52]["_address"]] = 0b110
+        self.window.table.selectRow(row52)
+        self.window.read_selected()
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual({k: c.text() for k, c in self.window.decoded_view.field_values.items()},
+                         {"b_reset": "1", "param16[0]": "0"})
+        self.assertEqual([c.text() for c in self.window.decoded_view.field_values.values()],
+                         ["1", "0"])   # one RTL wire per line
         self.window.search.setText("r_pf_abspos")
         self.settle()
         self.assertEqual([reg["name"] for reg in self.window.visible_regs], ["PARAM51"])

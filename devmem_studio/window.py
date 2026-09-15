@@ -991,8 +991,9 @@ class MainWindow(QMainWindow):
         if reg["_error"]:
             self.table.item(index, 3).setToolTip(reg["_error"])
         else:
-            fields = format_decoded_fields(reg["name"], value) if self._has_field_decode(reg) else {}
-            self.table.item(index, 3).setToolTip("\n".join(f"{key}={value}" for key, value in fields.items()) or "HEX 实测值")
+            definitions = self._field_defs(reg)
+            fields = self._decoded_values(reg, value, definitions)
+            self.table.item(index, 3).setToolTip("\n".join(f"{key}={val}" for key, val in fields.items()) or "HEX 实测值")
         if reg.get("readonly"):
             text = "—"
         elif reg.get("action"):
@@ -1132,12 +1133,36 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._reveal_inspector)
 
     @staticmethod
-    def _has_field_decode(reg):
-        """DEBUG registers wired as bit snapshots carry their own legend, not the state history."""
+    def _field_defs(reg):
+        """Field decode for the inspector: per-bit layout parsed from the RTL concat
+        hookup first, then the static table; DEBUG state history is excluded when the
+        register is actually a bit snapshot."""
+        fields = reg.get("fields")
+        if fields:
+            return tuple((item["name"], item["low"] + item["width"] - 1, item["low"], "DEC")
+                         for item in fields)
         definitions = REGISTER_FIELDS.get(reg["name"], ())
         if definitions and reg["name"].startswith("DEBUG_REG") and str(reg.get("_note", "")).startswith("位快照"):
             return ()
         return definitions
+
+    def _has_field_decode(self, reg):
+        return bool(self._field_defs(reg))
+
+    @staticmethod
+    def _decoded_values(reg, value, definitions):
+        """Live per-field values for the inspector (decimal unless a static HEX field)."""
+        if value is None:
+            return {}
+        static = format_decoded_fields(reg["name"], value) if not reg.get("fields") else {}
+        values = {}
+        for name, high, low, radix in definitions:
+            if name in static:
+                values[name] = static[name]
+                continue
+            masked = (value >> low) & ((1 << (high - low + 1)) - 1)
+            values[name] = f"0x{masked:02X}" if radix == "HEX" else str(masked)
+        return values
 
     def _show_measurement(self):
         reg = self.selected
@@ -1149,8 +1174,8 @@ class MainWindow(QMainWindow):
         when = reg["_updated"]
         self.updated_label.setText((f"更新于 {when}" + (" · 离线缓存" if not self.connected else "")) if when else "等待设备数据")
         self.bits.set_value(value)
-        definitions = self._has_field_decode(reg)
-        self.decoded_view.set_fields(definitions, format_decoded_fields(reg["name"], value) if definitions else {})
+        definitions = self._field_defs(reg)
+        self.decoded_view.set_fields(definitions, self._decoded_values(reg, value, definitions))
         self.decoded_view.setVisible(self.bit_mode.isChecked() and bool(definitions))
         note = f' · {reg["_note"]}' if reg.get("_note") else ""
         self.decoded_label.setText(reg["_error"] or f'{register_group(reg)} · 字段长度 {reg.get("width", 32)} 位{note}')

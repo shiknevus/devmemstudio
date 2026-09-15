@@ -1,6 +1,6 @@
 {
-  "schema": 6,
-  "generated_at": "2026-09-14T00:00:00",
+  "schema": 7,
+  "generated_at": "2026-09-15T08:52:45",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -257,84 +257,168 @@
           "name": "PARAM54",
           "width": 32,
           "readonly": true,
-          "signal": "i_sign1_check"
+          "signal": "i_sign1_check",
+          "fields": [
+            {
+              "name": "i_sign1_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x188",
           "name": "PARAM55",
           "width": 32,
           "readonly": true,
-          "signal": "i_sign2_check"
+          "signal": "i_sign2_check",
+          "fields": [
+            {
+              "name": "i_sign2_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x18C",
           "name": "PARAM56",
           "width": 20,
           "readonly": true,
-          "signal": "i_sign3_check"
+          "signal": "i_sign3_check",
+          "fields": [
+            {
+              "name": "i_sign3_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x190",
           "name": "PARAM57",
           "width": 20,
           "readonly": true,
-          "signal": "i_sign4_check"
+          "signal": "i_sign4_check",
+          "fields": [
+            {
+              "name": "i_sign4_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x194",
           "name": "PARAM58",
           "width": 20,
           "readonly": true,
-          "signal": "i_sign5_check"
+          "signal": "i_sign5_check",
+          "fields": [
+            {
+              "name": "i_sign5_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x198",
           "name": "PARAM59",
           "width": 20,
           "readonly": true,
-          "signal": "i_sign6_check"
+          "signal": "i_sign6_check",
+          "fields": [
+            {
+              "name": "i_sign6_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x19C",
           "name": "PARAM60",
           "width": 20,
           "readonly": true,
-          "signal": "i_sign7_check"
+          "signal": "i_sign7_check",
+          "fields": [
+            {
+              "name": "i_sign7_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A0",
           "name": "PARAM61",
           "width": 8,
           "readonly": true,
-          "signal": "i_sign8_check"
+          "signal": "i_sign8_check",
+          "fields": [
+            {
+              "name": "i_sign8_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A4",
           "name": "PARAM62",
           "width": 8,
           "readonly": true,
-          "signal": "i_sign9_check"
+          "signal": "i_sign9_check",
+          "fields": [
+            {
+              "name": "i_sign9_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A8",
           "name": "PARAM63",
           "width": 8,
           "readonly": true,
-          "signal": "i_sign10_check"
+          "signal": "i_sign10_check",
+          "fields": [
+            {
+              "name": "i_sign10_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_sign11_check"
+          "signal": "i_sign11_check",
+          "fields": [
+            {
+              "name": "i_sign11_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_sign12_check"
+          "signal": "i_sign12_check",
+          "fields": [
+            {
+              "name": "i_sign12_check",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -374,7 +458,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -625,7 +721,14 @@
           "name": "PARAM51",
           "width": 32,
           "readonly": true,
-          "signal": "adc_dat_o"
+          "signal": "adc_dat_o",
+          "fields": [
+            {
+              "name": "adc_dat_o",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1EC",
@@ -637,7 +740,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -907,7 +1022,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -1170,7 +1297,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -1433,7 +1572,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -1703,7 +1854,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -1980,7 +2143,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -2250,7 +2425,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -2527,7 +2714,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -2790,7 +2989,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -3067,7 +3278,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -3344,7 +3567,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -3628,7 +3863,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -3905,7 +4152,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -4189,7 +4448,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -4480,7 +4751,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -4750,7 +5033,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -5034,7 +5329,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -5325,7 +5632,322 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
+        }
+      ],
+      "debug_notes": {
+        "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
+        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+      }
+    },
+    "ec_3di2do_3pos": {
+      "family": "pl_exe_io",
+      "decode_file": "emcc_ctrl/pl_exe_io/ec_3di2do_3pos/ps_rw_pl_reg_3di_2do_3pos.sv",
+      "registers": [
+        {
+          "offset": "0x000",
+          "name": "IRQ_REG1",
+          "width": 32,
           "readonly": true
+        },
+        {
+          "offset": "0x004",
+          "name": "IRQ_REG2",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x008",
+          "name": "RST_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x00C",
+          "name": "EC_ID",
+          "width": 14,
+          "readonly": false
+        },
+        {
+          "offset": "0x010",
+          "name": "SC_ID",
+          "width": 10,
+          "readonly": false
+        },
+        {
+          "offset": "0x014",
+          "name": "BHV_PRIORITY",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x018",
+          "name": "UNIT_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x01C",
+          "name": "UNIT_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x020",
+          "name": "UNIT_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x024",
+          "name": "M_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x028",
+          "name": "M_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x02C",
+          "name": "M_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x030",
+          "name": "M_WK_MOD",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x038",
+          "name": "M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x03C",
+          "name": "LINK_M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x054",
+          "name": "A_TASK_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x058",
+          "name": "A_TASK_BHV_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x05C",
+          "name": "A_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x060",
+          "name": "EC_CHA_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x064",
+          "name": "A_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x068",
+          "name": "A_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x06C",
+          "name": "A_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x070",
+          "name": "A_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x074",
+          "name": "A_BHV_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x084",
+          "name": "B_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x088",
+          "name": "EC_CHB_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x08C",
+          "name": "B_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x090",
+          "name": "B_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x094",
+          "name": "B_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x098",
+          "name": "B_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x09C",
+          "name": "B_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0AC",
+          "name": "C_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B0",
+          "name": "EC_CHC_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x0B4",
+          "name": "C_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B8",
+          "name": "C_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x0BC",
+          "name": "C_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C0",
+          "name": "C_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C4",
+          "name": "C_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C8",
+          "name": "C_GAP_CRL",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x1B4",
+          "name": "PARAM66",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos1"
+        },
+        {
+          "offset": "0x1B8",
+          "name": "PARAM67",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos2"
+        },
+        {
+          "offset": "0x1BC",
+          "name": "PARAM68",
+          "width": 1,
+          "readonly": true,
+          "signal": "o_dri1"
+        },
+        {
+          "offset": "0x1C0",
+          "name": "PARAM69",
+          "width": 1,
+          "readonly": true,
+          "signal": "o_dri2"
+        },
+        {
+          "offset": "0x1C4",
+          "name": "PARAM70",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos3"
+        },
+        {
+          "offset": "0x1EC",
+          "name": "DEBUG_REG1",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x1F0",
+          "name": "DEBUG_REG2",
+          "width": 32,
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -5609,7 +6231,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -5900,7 +6534,322 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
+        }
+      ],
+      "debug_notes": {
+        "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
+        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+      }
+    },
+    "ec_3di_2do_3pos": {
+      "family": "pl_exe_io",
+      "decode_file": "emcc_ctrl/pl_exe_io/ec_3di2do_3pos/ps_rw_pl_reg_3di_2do_3pos.sv",
+      "registers": [
+        {
+          "offset": "0x000",
+          "name": "IRQ_REG1",
+          "width": 32,
           "readonly": true
+        },
+        {
+          "offset": "0x004",
+          "name": "IRQ_REG2",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x008",
+          "name": "RST_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x00C",
+          "name": "EC_ID",
+          "width": 14,
+          "readonly": false
+        },
+        {
+          "offset": "0x010",
+          "name": "SC_ID",
+          "width": 10,
+          "readonly": false
+        },
+        {
+          "offset": "0x014",
+          "name": "BHV_PRIORITY",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x018",
+          "name": "UNIT_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x01C",
+          "name": "UNIT_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x020",
+          "name": "UNIT_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x024",
+          "name": "M_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x028",
+          "name": "M_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x02C",
+          "name": "M_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x030",
+          "name": "M_WK_MOD",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x038",
+          "name": "M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x03C",
+          "name": "LINK_M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x054",
+          "name": "A_TASK_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x058",
+          "name": "A_TASK_BHV_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x05C",
+          "name": "A_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x060",
+          "name": "EC_CHA_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x064",
+          "name": "A_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x068",
+          "name": "A_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x06C",
+          "name": "A_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x070",
+          "name": "A_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x074",
+          "name": "A_BHV_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x084",
+          "name": "B_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x088",
+          "name": "EC_CHB_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x08C",
+          "name": "B_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x090",
+          "name": "B_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x094",
+          "name": "B_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x098",
+          "name": "B_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x09C",
+          "name": "B_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0AC",
+          "name": "C_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B0",
+          "name": "EC_CHC_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x0B4",
+          "name": "C_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B8",
+          "name": "C_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x0BC",
+          "name": "C_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C0",
+          "name": "C_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C4",
+          "name": "C_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C8",
+          "name": "C_GAP_CRL",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x1B4",
+          "name": "PARAM66",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos1"
+        },
+        {
+          "offset": "0x1B8",
+          "name": "PARAM67",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos2"
+        },
+        {
+          "offset": "0x1BC",
+          "name": "PARAM68",
+          "width": 1,
+          "readonly": true,
+          "signal": "o_dri1"
+        },
+        {
+          "offset": "0x1C0",
+          "name": "PARAM69",
+          "width": 1,
+          "readonly": true,
+          "signal": "o_dri2"
+        },
+        {
+          "offset": "0x1C4",
+          "name": "PARAM70",
+          "width": 1,
+          "readonly": true,
+          "signal": "i_pos3"
+        },
+        {
+          "offset": "0x1EC",
+          "name": "DEBUG_REG1",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x1F0",
+          "name": "DEBUG_REG2",
+          "width": 32,
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -6191,7 +7140,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "notes": {
@@ -6445,7 +7406,14 @@
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_pos1_1"
+          "signal": "i_pos1_1",
+          "fields": [
+            {
+              "name": "i_pos1_1",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -6492,7 +7460,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -6743,7 +7723,14 @@
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_pos1_1"
+          "signal": "i_pos1_1",
+          "fields": [
+            {
+              "name": "i_pos1_1",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -6790,7 +7777,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -7088,7 +8087,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -7339,35 +8350,70 @@
           "name": "PARAM61",
           "width": 8,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "fields": [
+            {
+              "name": "o_dri1",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A4",
           "name": "PARAM62",
           "width": 8,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "fields": [
+            {
+              "name": "o_dri2",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A8",
           "name": "PARAM63",
           "width": 8,
           "readonly": true,
-          "signal": "o_dri3"
+          "signal": "o_dri3",
+          "fields": [
+            {
+              "name": "o_dri3",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "o_dri4"
+          "signal": "o_dri4",
+          "fields": [
+            {
+              "name": "o_dri4",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "o_dri5"
+          "signal": "o_dri5",
+          "fields": [
+            {
+              "name": "o_dri5",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -7400,7 +8446,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -8258,7 +9316,49 @@
           "offset": "0x1F4",
           "name": "DEBUG_REG3",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "o_rst",
+              "low": 7,
+              "width": 1
+            },
+            {
+              "name": "i_error",
+              "low": 6,
+              "width": 1
+            },
+            {
+              "name": "o_spdx4",
+              "low": 5,
+              "width": 1
+            },
+            {
+              "name": "o_spdx3",
+              "low": 4,
+              "width": 1
+            },
+            {
+              "name": "o_spdx2",
+              "low": 3,
+              "width": 1
+            },
+            {
+              "name": "o_spdx1",
+              "low": 2,
+              "width": 1
+            },
+            {
+              "name": "o_rev",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "o_fwd",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -11206,7 +12306,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -12433,21 +13545,52 @@
           "name": "PARAM52",
           "width": 32,
           "readonly": true,
-          "signal": "o_dv_dir/o_dv_pulse"
+          "signal": "o_dv_reset/o_dv_dir/o_dv_pulse",
+          "fields": [
+            {
+              "name": "o_dv_reset",
+              "low": 2,
+              "width": 1
+            },
+            {
+              "name": "o_dv_dir",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "o_dv_pulse",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf"
+          "signal": "i_axis_limf",
+          "fields": [
+            {
+              "name": "i_axis_limf",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_servo_ready"
+          "signal": "i_servo_ready",
+          "fields": [
+            {
+              "name": "i_servo_ready",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -12762,7 +13905,14 @@
           "name": "PARAM51",
           "width": 32,
           "readonly": true,
-          "signal": "speed_gear"
+          "signal": "speed_gear",
+          "fields": [
+            {
+              "name": "speed_gear",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x17C",
@@ -12776,70 +13926,140 @@
           "name": "PARAM56",
           "width": 20,
           "readonly": true,
-          "signal": "i_stp_x10"
+          "signal": "i_stp_x10",
+          "fields": [
+            {
+              "name": "i_stp_x10",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x190",
           "name": "PARAM57",
           "width": 20,
           "readonly": true,
-          "signal": "i_stp_x100"
+          "signal": "i_stp_x100",
+          "fields": [
+            {
+              "name": "i_stp_x100",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x194",
           "name": "PARAM58",
           "width": 20,
           "readonly": true,
-          "signal": "i_estop"
+          "signal": "i_estop",
+          "fields": [
+            {
+              "name": "i_estop",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x198",
           "name": "PARAM59",
           "width": 20,
           "readonly": true,
-          "signal": "i_pulse_a"
+          "signal": "i_pulse_a",
+          "fields": [
+            {
+              "name": "i_pulse_a",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x19C",
           "name": "PARAM60",
           "width": 20,
           "readonly": true,
-          "signal": "i_pulse_b"
+          "signal": "i_pulse_b",
+          "fields": [
+            {
+              "name": "i_pulse_b",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A0",
           "name": "PARAM61",
           "width": 8,
           "readonly": true,
-          "signal": "axis_number"
+          "signal": "axis_number",
+          "fields": [
+            {
+              "name": "axis_number",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A4",
           "name": "PARAM62",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_x"
+          "signal": "i_axis_x",
+          "fields": [
+            {
+              "name": "i_axis_x",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1A8",
           "name": "PARAM63",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_y"
+          "signal": "i_axis_y",
+          "fields": [
+            {
+              "name": "i_axis_y",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_z"
+          "signal": "i_axis_z",
+          "fields": [
+            {
+              "name": "i_axis_z",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_4"
+          "signal": "i_axis_4",
+          "fields": [
+            {
+              "name": "i_axis_4",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -12886,7 +14106,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -13419,7 +14651,14 @@
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_open_req_key"
+          "signal": "i_open_req_key",
+          "fields": [
+            {
+              "name": "i_open_req_key",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -14419,21 +15658,47 @@
           "name": "PARAM52",
           "width": 32,
           "readonly": true,
-          "signal": "b_reset/b_son"
+          "signal": "b_reset/param16[0]",
+          "fields": [
+            {
+              "name": "b_reset",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "param16[0]",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf"
+          "signal": "i_axis_limf",
+          "fields": [
+            {
+              "name": "i_axis_limf",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_servo_ready"
+          "signal": "i_servo_ready",
+          "fields": [
+            {
+              "name": "i_servo_ready",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -14788,7 +16053,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -15463,7 +16740,14 @@
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_start"
+          "signal": "i_start",
+          "fields": [
+            {
+              "name": "i_start",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -15510,7 +16794,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -15761,14 +17057,28 @@
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_close_arr"
+          "signal": "i_close_arr",
+          "fields": [
+            {
+              "name": "i_close_arr",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_open_arr"
+          "signal": "i_open_arr",
+          "fields": [
+            {
+              "name": "i_open_arr",
+              "low": 0,
+              "width": 1
+            }
+          ]
         },
         {
           "offset": "0x1B4",
@@ -15815,7 +17125,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {
@@ -16078,7 +17400,19 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true
+          "readonly": true,
+          "fields": [
+            {
+              "name": "irq_posedge_cnt",
+              "low": 1,
+              "width": 1
+            },
+            {
+              "name": "irq_negedge_cnt",
+              "low": 0,
+              "width": 1
+            }
+          ]
         }
       ],
       "debug_notes": {

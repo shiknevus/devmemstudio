@@ -11,10 +11,11 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from devmem_studio.component_parse import (  # noqa: E402,F401
-    ALIASES, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry, debug_notes_for,
-    find_component_folders, find_top_file, harvest_debug_snapshots, harvest_type_notes,
-    parse_component_folder, parse_decode_file, parse_define_table, read_text_resilient,
-    split_top_level, strip_comments)
+    ALIASES, CATALOG_SCHEMA, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry,
+    debug_notes_for, extract_concat_fields, find_component_folders, find_top_file,
+    harvest_debug_snapshots, harvest_type_notes, parse_component_folder,
+    parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
+    strip_comments)
 from devmem_studio.top_import import parse_top  # noqa: E402
 
 
@@ -94,7 +95,7 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
     report["unmatched_top_types"] = sorted(t for t in active if t not in types)
     report["types"] = len(types)
     report["registers_total"] = sum(len(entry["registers"]) for entry in types.values())
-    catalog = {"schema": 6, "generated_at": stamp,
+    catalog = {"schema": CATALOG_SCHEMA, "generated_at": stamp,
                "source": {"rtl_root": str(rtl_root), "reg_addr_map": defines_path.name,
                           "note": "由 tools/gen_component_catalog.py 生成；RTL 变更后需重新生成"},
                "types": types}

@@ -137,7 +137,7 @@ class HarvestTests(unittest.TestCase):
         self.assertEqual(result["signals"]["PARAM5"], "rcfg_home_acc/rcfg_jog_acc")
         self.assertEqual(result["signals"]["PARAM16"], "rserv_dir/o_spdx1/o_spdx2")
         self.assertEqual(result["signals"]["PARAM51"], "r_pf_abspos")   # identifier comment fallback
-        self.assertEqual(result["signals"]["PARAM52"], "b_reset/b_son")  # concat hookup, no cross-param leak
+        self.assertEqual(result["signals"]["PARAM52"], "b_reset/b_son/param16[0]")  # every concat wire
         self.assertEqual(result["signals"]["PARAM64"], "i_axis_limf")    # concat hookup signal
         self.assertNotIn("PARAM4", result["signals"])    # commented-out connection
         self.assertNotIn("PARAM7", result["signals"])    # commented-out port
@@ -196,7 +196,7 @@ class BuildTests(unittest.TestCase):
             catalog, report = gen.build(root, [top], stamp="fixed")
             self.assertEqual(report["unparsed_files"], [])
             self.assertEqual(report["unmatched_top_types"], [])
-            self.assertEqual(catalog["schema"], 6)
+            self.assertEqual(catalog["schema"], 7)
             registers = {item["name"]: item for item in catalog["types"]["ec_uut"]["registers"]}
             self.assertEqual(registers["EC_ID"], {"offset": "0x00C", "name": "EC_ID", "width": 14, "readonly": False})
             self.assertEqual(registers["IRQ_REG1"]["readonly"], True)
@@ -299,7 +299,35 @@ class ComponentFolderTests(unittest.TestCase):
             (Path(directory) / "notes.ps_rw_pl_reg_fake.txt").write_text("x", encoding="utf-8")
             found = gen.find_component_folders(Path(directory))
         names = [folder.name for folder in found]
-        self.assertEqual(names, ["ec_uut", "ec_other"])  # path order: pl_exe_io before pl_ps_exe
+        self.assertEqual(names, ["ec_uut", "ec_other"])
+
+    def test_concat_hookups_yield_per_bit_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "include_files").mkdir()
+            (root / "include_files/reg_addr_pl.vh").write_text(
+                "`define EC_ID 9'h00C\n`define PARAM52 9'h178\n`define DEBUG_REG3 9'h1F4\n", encoding="utf-8")
+            component = root / "emcc_ctrl" / "pl_exe_io" / "ec_uut"
+            component.mkdir(parents=True)
+            (component / "ps_rw_pl_reg_uut.sv").write_text(
+                "module d(input wr_task_vld, input [8:0] wr_task_addr, input [31:0] i_st_wr_data,"
+                "input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+                "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
+                " `PARAM52: o_st_rd_data = param52; `DEBUG_REG3: o_st_rd_data = dbg3;"
+                " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
+            (component / "ec_uut.sv").write_text(
+                "module t;\n"
+                " ,.param52 ({30'd0,b_reset,param16[0]}) //out cmd [2]rst [1]son [0]dir\n"
+                " ,.debug_reg3 ({{24{1'b0}},o_rst,i_error,o_fwd})\n"
+                "endmodule\n", encoding="utf-8")
+            catalog, report = gen.build(root, [], stamp="fixed")
+            registers = {item["name"]: item for item in catalog["types"]["ec_uut"]["registers"]}
+            self.assertEqual(registers["PARAM52"]["fields"], [
+                {"name": "b_reset", "low": 1, "width": 1},
+                {"name": "param16[0]", "low": 0, "width": 1}])
+            self.assertEqual([f["name"] for f in registers["DEBUG_REG3"]["fields"]],
+                             ["o_rst", "i_error", "o_fwd"])
+            self.assertEqual([f["low"] for f in registers["DEBUG_REG3"]["fields"]], [2, 1, 0])  # path order: pl_exe_io before pl_ps_exe
 
 
 if __name__ == "__main__":

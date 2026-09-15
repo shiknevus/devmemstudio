@@ -107,8 +107,15 @@ def harvest_type_notes(top_path: Path) -> dict:
     for port, number in SIGNAL_PORT.findall(body) + SIGNAL_ASSIGN.findall(body):
         add(number, port)
     # Reg-file hookups like .param64 ({7'd0,i_axis_limf}): the real signals sit in the
-    # connection expression itself, next to sized literals and cross-param references.
+    # connection expression itself. For concats keep every wire (with its bit select).
     for number, expression in PARAM_EXPR.findall(body):
+        stripped = expression.strip()
+        if stripped.startswith("{"):
+            fields = extract_concat_fields(stripped)
+            if fields:
+                for item in fields:
+                    add(number, item["name"])
+                continue
         for name in IDENTIFIER.findall(SIZED_LITERAL.sub(" ", expression)):
             add(number, name)
     # Identifier-only port comments (.param51 (param51) // r_pf_abspos) carry the signal name.
@@ -117,6 +124,74 @@ def harvest_type_notes(top_path: Path) -> dict:
             add(name[5:], note)
     return {"notes": notes, "behaviors": behaviors,
             "signals": {f"PARAM{number}": "/".join(names) for number, names in signals.items()}}
+
+
+def split_top_level(text: str) -> list[str]:
+    parts, depth, current = [], 0, []
+    for character in text:
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+        if character == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+    parts.append("".join(current))
+    return parts
+
+
+def element_width(element: str) -> int | None:
+    """Width of one concat element: None for unknown plain identifiers."""
+    if element.startswith("{") and element.endswith("}"):
+        element = element[1:-1].strip()   # replication group {N{literal}}
+    replication = REPLICATION.match(element)
+    if replication:
+        return int(replication.group(1)) * int(replication.group(2))
+    sized = SIZED_LITERAL_LINE.match(element)
+    if sized:
+        return int(sized.group(1))
+    selected = re.match(r"^[A-Za-z_]\w*\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]$", element)
+    if selected:
+        return abs(int(selected.group(1)) - int(selected.group(2))) + 1
+    if re.match(r"^[A-Za-z_]\w*\s*\[\s*\d+\s*\]$", element):
+        return 1
+    if re.match(r"^[A-Za-z_]\w*$", element):
+        return 1   # plain 1-bit wire in these hookups
+    return None
+
+
+def extract_concat_fields(expression: str) -> list[dict]:
+    """Bit-field layout of a Verilog concat {a, b, c}: a takes the highest bits.
+
+    Sized literals count toward the width (padding) but carry no name; plain
+    identifiers are treated as 1-bit wires, indexed selections keep their range."""
+    expression = expression.strip()
+    if expression.startswith("{") and expression.endswith("}"):
+        expression = expression[1:-1]
+    elements = []
+    total = 0
+    for raw in split_top_level(expression):
+        element = raw.strip()
+        width = element_width(element)
+        if width is None:
+            return []
+        total += width
+        identifier = HOOKUP_IDENT.match(element)
+        if identifier:
+            elements.append({"name": identifier.group(0).replace(" ", ""),
+                             "width": width})
+        elif width:
+            elements.append({"name": None, "width": width})  # sized constant padding
+    fields, cursor = [], total
+    for element in elements:
+        low = cursor - element["width"]
+        if element.get("name"):
+            fields.append({"name": element["name"], "low": low,
+                           "width": element["width"]})
+        cursor = low
+    return fields if fields else []
 
 
 def harvest_debug_snapshots(body: str) -> dict:
@@ -198,15 +273,33 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     signals = harvested.get("signals", {})
     top_body = strip_comments(read_text_resilient(top_file))
     # A hookup that survives comment stripping means the register is wired at all.
-    wired = {number for number, _ in PARAM_EXPR.findall(top_body)}
+    param_hookups = {number: expression for number, expression in PARAM_EXPR.findall(top_body)}
+    wired = set(param_hookups)
+    debug_hookups = {number: expression for number, expression in DEBUG_HOOKUP.findall(top_body)}
     for item in registers:
         signal = signals.get(item["name"])
         if signal:
             item["signal"] = signal
         elif item["name"].startswith("PARAM") and item["name"][5:] not in wired:
             item["unwired"] = True
+        # Concat hookups carry a per-bit layout: show every wire as a field.
+        if item["name"].startswith("PARAM"):
+            expression = param_hookups.get(item["name"][5:], "")
+            if expression.lstrip().startswith("{"):
+                fields = extract_concat_fields(expression)
+                if fields:
+                    item["fields"] = fields
+        elif item["name"].startswith("DEBUG_REG"):
+            expression = debug_hookups.get(item["name"][-1], "")
+            if expression.lstrip().startswith("{"):
+                fields = extract_concat_fields(expression)
+                if fields:
+                    item["fields"] = fields
     entry["debug_notes"] = debug_notes_for(key, registers, harvest_debug_snapshots(top_body))
     return entry, forced, warnings
+
+
+CATALOG_SCHEMA = 7
 
 
 def find_reg_addr_map(folder: Path) -> Path | None:
