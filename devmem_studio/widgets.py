@@ -105,9 +105,11 @@ class DecodedFieldsView(QFrame):
                 cell.setVisible(True)
             name, high, low, radix = definition
             cells[0].setText(name)
-            cells[1].setText(f"[{high}:{low}]" if high != low else f"[{low}]")
+            derived = high < low   # sentinel: derived/aggregate row, not an RTL bit field
+            cells[1].setText("·" if derived else f"[{high}:{low}]" if high != low else f"[{low}]")
             cells[2].setText(values.get(name, "—"))
-            description = f"{name} · 位 [{high}:{low}] · {'十六进制' if radix == 'HEX' else '十进制'}\n每行一个 RTL 信号"
+            description = (f"{name} · 由寄存器计算得出\n每行一个派生值" if derived else
+                           f"{name} · 位 [{high}:{low}] · {'十六进制' if radix == 'HEX' else '十进制'}\n每行一个 RTL 信号")
             for cell in cells:
                 cell.setToolTip(description)
             cells[2].setStyleSheet("color:#2463DC;" if radix == "HEX" and name in values else

@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from devmem_studio import top_import
 from devmem_studio.core import ConfigStore, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH
 from devmem_studio.theme import STYLE
@@ -163,6 +163,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.window.regs[0]["_address"], 0xB0200000 + 0x6400 + 0x000)
         self.assertEqual(self.window.regs[index]["_address"], 0xB020640C)
         self.window.table.selectRow(index)
+        self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "ABCD" fails to parse
         self.window.write_input.setText("ABCD")
         self.assertIn("devmem 0xb020640c 32 0xabcd", self.window.command_preview.text())
         self.window.write_button.click()
@@ -233,6 +234,7 @@ class UiTests(unittest.TestCase):
         self.window.table.selectRow(self.row_of("A_BHV_ID"))
         self.window.preset_combo.setCurrentIndex(2)
         self.assertEqual(self.window.write_input.text(), "2")
+        self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "15" parses as decimal
         self.window.write_input.setText("15")
         self.assertEqual(self.window.preset_combo.currentData(), 21)
 
@@ -279,6 +281,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.window._stream_state, "starting")
         self.assertTrue(self.window.read_all_button.isEnabled())
         self.window.table.selectRow(self.row_of("A_TX_OT"))
+        self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "37" parses as decimal
         self.window.write_input.setText("37")
         self.window.write_button.click()
         self.settle(lambda: not self.window._busy)
@@ -320,6 +323,7 @@ class UiTests(unittest.TestCase):
         self.settle(lambda: not dialog.search_timer.isActive() and dialog.text.current_match.hasSelection())
         position = dialog.text.current_match.selectionStart()
         self.window.table.selectRow(self.row_of("A_TX_OT"))
+        self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "39" parses as decimal
         self.window.write_input.setText("39")
         self.window.write_button.click()
         dialog.append("INFO [DEMO] axis new data\n" * 300)
@@ -373,6 +377,41 @@ class UiTests(unittest.TestCase):
         self.exercise_host_key_dialog(QDialog.Rejected)
         self.assertIn("已取消连接", self.window.status_left.text())
         self.assertFalse(self.window.read_all_button.isEnabled())
+
+    def test_pul_axis_abspos_actual_value_row(self):
+        # 实际值 = 补码(r_pf_abspos) / PARAM4，浮点；PARAM4 为 0/未读显示 —.
+        self.window.view_buttons["param"].click()
+        self.settle(lambda: not self.window._busy)
+        abspos = self.window.regs[self.row_of("PARAM51")]
+        param4 = self.window.regs[self.row_of("PARAM4")]
+        self.assertTrue(self.window._pulse_abspos_reg(abspos))
+        self.assertFalse(self.window._pulse_abspos_reg(param4))
+        # PARAM4 未读取 → 派生行显示 —.
+        self.window.session.memory[abspos["_address"]] = 0xFFFFFF9C
+        self.window.table.selectRow(abspos["_row"])
+        self.window.bit_mode.click()
+        self.window.read_selected()
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "—")
+        # PARAM4=4, abspos=-100（0xFFFFFF9C 补码）→ -25.
+        self.window.session.memory[param4["_address"]] = 4
+        self.window.read_register(param4)
+        self.settle(lambda: not self.window._busy)
+        self.window.read_register(abspos)
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "-25")
+        # 正数不受补码分支影响：abspos=1000, param4=4 → 250.
+        self.window.session.memory[abspos["_address"]] = 1000
+        self.window.read_register(abspos)
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "250")
+        # PARAM4=0 → 显示 —.
+        self.window.session.memory[param4["_address"]] = 0
+        self.window.read_register(param4)
+        self.settle(lambda: not self.window._busy)
+        self.window.read_register(abspos)
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "—")
 
 
 class TopImportUiTests(UiTests):
@@ -527,13 +566,68 @@ class TopImportUiTests(UiTests):
         self.window.select_component(self.window.top_info["components"][0])
         self.settle(lambda: not self.window._busy)
         self.assertTrue(self.window.bit_upload_button.isEnabled())
+        self.assertTrue(self.window.bit_rollback_button.isEnabled())
         self.assertTrue(self.window.log_download_button.isEnabled())
         self.window.active_component = None
         self.window.rebuild_registers()
         self.settle()
         self.assertFalse(self.window.read_all_button.isEnabled())   # register ops stay locked
         self.assertTrue(self.window.bit_upload_button.isEnabled())   # file ops stay unlocked
+        self.assertTrue(self.window.bit_rollback_button.isEnabled())
         self.assertTrue(self.window.log_download_button.isEnabled())
+
+    def test_bit_rollback_lists_backups_and_restores_selected(self):
+        # Seed the demo board with a current bit and two timestamped backups.
+        sda = self.window.session.remote_root / "run" / "media" / "sda"
+        sda.mkdir(parents=True, exist_ok=True)
+        (sda / "sunny_fpga.bit").write_bytes(b"\x00" * 100)
+        (sda / "sunny_fpga.bit_20260916000000").write_bytes(b"\x01" * 100)
+        (sda / "sunny_fpga.bit_20260918000000").write_bytes(b"\x02" * 100)
+        self.window.bit_rollback_button.click()
+        self.settle(lambda: self.window.bit_rollback_dialog and
+                    not self.window._busy and self.window.bit_rollback_dialog.list.count() == 3)
+        dialog = self.window.bit_rollback_dialog
+        rows = [dialog.list.item(i).text() for i in range(dialog.list.count())]
+        self.assertTrue(any("当前版本" in text for text in rows))
+        self.assertTrue(any("备份于" in text for text in rows))
+        # The live bit must not be selectable as a rollback target; newest backup preselected.
+        current = next(i for i in range(dialog.list.count())
+                       if "当前版本" in dialog.list.item(i).text())
+        self.assertFalse(dialog.list.item(current).flags() & Qt.ItemIsEnabled)
+        self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit_20260918000000")
+        # Double-click the chosen backup, confirm, and verify the rename sequence.
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes) as question:
+            dialog.list.item(1).setSelected(True)
+            dialog.list.setCurrentRow(1)
+            dialog.list.itemDoubleClicked.emit(dialog.list.item(1))
+            self.settle(lambda: not self.window._busy)
+            question.assert_called_once()
+        sda = self.window.session.remote_root / "run" / "media" / "sda"
+        self.assertTrue((sda / "sunny_fpga.bit").is_file())           # restored
+        self.assertEqual((sda / "sunny_fpga.bit").read_bytes(), b"\x02" * 100)
+        self.assertTrue(any(p.name.startswith("sunny_fpga.bit_") for p in sda.iterdir()
+                            if p.name not in ("sunny_fpga.bit_20260916000000",
+                                              "sunny_fpga.bit_20260918000000")))   # new aside backup
+        self.assertIn("回退完成", " ".join(message for _, _, message in self.window.log_records))
+
+    def test_bit_rollback_cancel_leaves_files_untouched(self):
+        sda = self.window.session.remote_root / "run" / "media" / "sda"
+        sda.mkdir(parents=True, exist_ok=True)
+        (sda / "sunny_fpga.bit").write_bytes(b"\x00" * 100)
+        (sda / "sunny_fpga.bit_20260916000000").write_bytes(b"\x01" * 100)
+        self.window.bit_rollback_button.click()
+        self.settle(lambda: self.window.bit_rollback_dialog and
+                    not self.window._busy and self.window.bit_rollback_dialog.list.count() == 2)
+        dialog = self.window.bit_rollback_dialog
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No):
+            dialog.list.setCurrentRow(1)
+            dialog.rollback_button.click()
+            self.settle(lambda: not self.window._busy)
+        self.assertEqual((sda / "sunny_fpga.bit").read_bytes(), b"\x00" * 100)
+        self.assertEqual((sda / "sunny_fpga.bit_20260916000000").read_bytes(), b"\x01" * 100)
+        # No new aside backup created on cancel: only current + the one seeded backup remain.
+        bit_files = [p.name for p in sda.iterdir() if p.name.startswith("sunny_fpga.bit")]
+        self.assertEqual(sorted(bit_files), ["sunny_fpga.bit", "sunny_fpga.bit_20260916000000"])
 
     def test_empty_state_without_component(self):
         window = MainWindow(ConfigStore(Path(self.temp.name) / "empty.json"), persist=False)
@@ -706,6 +800,66 @@ class TopImportUiTests(UiTests):
         finally:
             fresh.close()
             self.settle(lambda: not fresh._busy and not fresh.isVisible())
+
+
+    def test_bit_upload_paste_file_path(self):
+        # Paste a raw .bit path (text clipboard) → picked.
+        bit = Path(self.temp.name) / "pasted.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        self.assertEqual(dialog._local_path, None)
+        QApplication.clipboard().setText(str(bit))
+        dialog.paste_file()
+        self.assertEqual(dialog._local_path, str(bit))
+        self.assertEqual(dialog.path_label.text(), str(bit))
+
+    def _normpath(self, p):
+        # QUrl.toLocalFile() returns forward slashes; compare canonically.
+        return str(Path(p)).lower()
+
+    def test_bit_upload_paste_url_clipboard(self):
+        # Copying a file in Explorer lands as a file:// URL; paste must accept it.
+        bit = Path(self.temp.name) / "pasted_url.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        QApplication.clipboard().setText(bit.as_uri())
+        dialog.paste_file()
+        self.assertEqual(self._normpath(dialog._local_path), self._normpath(bit))
+
+    def test_bit_upload_paste_ignores_wrong_type(self):
+        # Non-.bit content in the clipboard must not select anything (no modal blocking).
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        QApplication.clipboard().setText(str(Path("C:/Windows/notepad.exe")))
+        dialog.paste_file()
+        self.assertEqual(dialog._local_path, None)
+        self.assertIn("剪贴板中没有", dialog.status.text())
+        QApplication.clipboard().setText("")
+        self.window.close()
+
+    def test_bit_upload_resets_state_after_close(self):
+        # Closing and reopening must forget the previously picked/dragged/pasted file.
+        bit = Path(self.temp.name) / "pick.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        dialog.set_path(str(bit))
+        self.assertEqual(dialog._local_path, str(bit))
+        dialog.close()
+        self.settle(lambda: not dialog.isVisible())
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        self.assertEqual(dialog._local_path, None)
+        self.assertEqual(dialog.path_label.text(), "未选择文件")
+        self.assertEqual(dialog.status.text(), "")
+        self.window.close()
 
 
 if __name__ == "__main__":

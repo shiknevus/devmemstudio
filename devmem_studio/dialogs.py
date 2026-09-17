@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
+import re
+from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtCore import Qt, Signal, QTimer, QUrl
+from PySide6.QtGui import QFont, QKeySequence, QShortcut, QGuiApplication
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QDialogButtonBox, QPlainTextEdit,
                                QFileDialog, QMessageBox, QTextBrowser, QLineEdit, QCheckBox, QSpinBox,
-                               QPushButton, QProgressBar)
+                               QPushButton, QProgressBar, QListWidget, QListWidgetItem)
 from .core import write_command
 from .widgets import label, button, row
 from .theme import icon
@@ -292,7 +294,7 @@ class BitUploadDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
-        layout.addWidget(label("选择或拖入 .bit 文件", "title"))
+        layout.addWidget(label("选择、拖入或粘贴 .bit 文件", "title"))
         hint = label("上传后板端原 sunny_fpga.bit 会重命名为 sunny_fpga.bit_时间戳 备份，新文件以 sunny_fpga.bit 落到 /run/media/sda。", "muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -300,9 +302,10 @@ class BitUploadDialog(QDialog):
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
         choose = button("选择文件…", self.choose_file, "flat", "export")
+        paste = button("粘贴", self.paste_file, "flat", "export")
         self.remote_dir = QLineEdit("/run/media/sda")
         self.remote_dir.setObjectName("mono")
-        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, 1, choose, spacing=8))
+        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, 1, choose, paste, spacing=8))
         self.progress = QProgressBar()
         self.progress.setObjectName("bitProgress")
         self.progress.setTextVisible(False)
@@ -321,6 +324,9 @@ class BitUploadDialog(QDialog):
         self.upload_button = button("上传", self.start_upload, "primary", "write")
         self.upload_button.setMinimumWidth(110)
         layout.addLayout(row(1, self.upload_button))
+
+        # Ctrl+V pastes a copied .bit file (or a raw file path) from the clipboard.
+        QShortcut(QKeySequence.Paste, self, self.paste_file)
 
     def choose_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择 .bit 文件", "", "bit file (*.bit);;所有文件 (*)")
@@ -350,6 +356,50 @@ class BitUploadDialog(QDialog):
         self.set_reset()
         self.status.setText(f"本地文件：{Path(path).name}（{Path(path).stat().st_size:,} 字节）")
 
+    def paste_file(self):
+        """Accept a .bit file pasted from the clipboard (Ctrl+V)."""
+        local = self._clipboard_bit_path()
+        if local:
+            self.set_path(local)
+        else:
+            self.status.setText("剪贴板中没有 .bit 文件路径：请在文件资源管理器中复制一个 .bit 文件再粘贴。")
+
+    def _clipboard_bit_path(self):
+        """Resolve a .bit file from the clipboard, or None. Handles copied files
+        (URLs / file:// URIs) and raw Windows/Unix path text."""
+        mime = QGuiApplication.clipboard().mimeData()
+        if mime.hasUrls():
+            for url in mime.urls():
+                local = url.toLocalFile()
+                if local.lower().endswith(".bit"):
+                    return local
+        for raw in (mime.text().strip().strip('"'),) if mime.hasText() else ():
+            candidate = QUrl(raw).toLocalFile() if raw.startswith("file://") else raw
+            candidate = candidate.strip('"')
+            if candidate.lower().endswith(".bit"):
+                try:
+                    if Path(candidate).is_file():
+                        return candidate
+                except OSError:
+                    pass
+        return None
+
+    def closeEvent(self, event):
+        self._reset_state()
+        event.accept()
+
+    def reject(self):
+        self._reset_state()
+        super().reject()
+
+    def _reset_state(self):
+        """Fresh dialog each open: require a new pick/drag/paste."""
+        self._local_path = None
+        self.path_label.setText("未选择文件")
+        self.path_label.setToolTip("")
+        self.set_reset()
+        self.status.clear()
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".bit") for u in event.mimeData().urls()):
             event.acceptProposedAction()
@@ -364,6 +414,107 @@ class BitUploadDialog(QDialog):
     def start_upload(self):
         if self._local_path:
             self.upload_requested.emit(self._local_path, self.remote_dir.text().strip() or "/run/media/sda")
+
+
+class BitRollbackDialog(QDialog):
+    """Pick a timestamped bit backup to restore as the live sunny_fpga.bit.
+
+    The window lists board-side backups, then runs the rollback rename on a worker
+    thread; this dialog stays a stateless view (mirroring BitUploadDialog)."""
+    rollback_requested = Signal(str)  # backup file name
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("回退bit")
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        self.setWindowModality(Qt.NonModal)
+        self.setMinimumSize(560, 420)
+        self._busy = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(label("选择要回退的 bit 版本", "title"))
+        hint = label("仅列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份。回退时当前 "
+                     "sunny_fpga.bit 会先备份为 sunny_fpga.bit_时间戳，再把所选版本恢复为 sunny_fpga.bit。", "muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.list = QListWidget()
+        self.list.setObjectName("rollbackList")
+        self.list.setAlternatingRowColors(True)
+        self.list.itemDoubleClicked.connect(self.start_rollback)
+        layout.addWidget(self.list, 1)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bitProgress")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+        layout.addWidget(self.progress)
+        self.status = label("", "muted")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.rollback_button = button("回退到所选版本", self.start_rollback, "primary")
+        self.rollback_button.setMinimumWidth(140)
+        self.rollback_button.setEnabled(False)
+        self.cancel_button = button("关闭", self.reject, "flat")
+        self.cancel_button.setAutoDefault(False)
+        layout.addLayout(row(1, self.cancel_button, self.rollback_button))
+        self.list.currentRowChanged.connect(
+            lambda _row: self.rollback_button.setEnabled(not self._busy and self.list.currentItem() is not None))
+
+    def set_busy(self, busy):
+        self._busy = busy
+        self.list.setEnabled(not busy)
+        self.rollback_button.setEnabled(not busy and self.list.currentItem() is not None)
+
+    def populate(self, entries, status=""):
+        self.list.clear()
+        for entry in entries:
+            name = entry["name"]
+            stamp = entry.get("timestamp")
+            if stamp:
+                human = datetime.strptime(stamp, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S") \
+                    if re.fullmatch(r"\d{14}", stamp) else stamp
+                text = f"{name}    备份于 {human}"
+            else:
+                text = f"{name}    当前版本"
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, name)   # the actual backup file name
+            if not stamp:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled)   # live bit is not a rollback target
+            self.list.addItem(item)
+        self.status.setText(status)
+        if entries:
+            self.list.setCurrentRow(self._find_rollback_target())
+        self.set_busy(False)
+
+    def _find_rollback_target(self):
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            if item.flags() & Qt.ItemIsEnabled:
+                return row
+        return -1
+
+    def selected_backup(self):
+        item = self.list.currentItem()
+        if item:
+            return item.data(Qt.UserRole)
+        return None
+
+    def start_rollback(self):
+        backup = self.selected_backup()
+        if not backup or self._busy:
+            return
+        self.rollback_requested.emit(backup)
+
+    def set_percent(self, percent):
+        self.progress.setValue(max(self.progress.value(), percent))
+
+    def set_done(self):
+        self.progress.setValue(100)
+
+    def set_reset(self):
+        self.progress.setValue(0)
 
 
 def show_help(parent):

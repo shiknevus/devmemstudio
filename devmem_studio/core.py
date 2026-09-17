@@ -528,6 +528,73 @@ class SshSession:
             if sftp is not None:
                 sftp.close()
 
+    def list_bit_backups(self, remote_dir="/run/media/sda", bitname="sunny_fpga.bit"):
+        """List bit files on the board: the current bit plus timestamped backups.
+
+        Returns [{name, timestamp}] with the current bit first (timestamp None),
+        then backups newest first. timestamp is the suffix after '{bitname}_'."""
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        transport = self.client.get_transport()
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        try:
+            if sftp is None:
+                raise CommandError("SSH 通道不可用，无法读取板端目录。")
+            prefix = bitname + "_"
+            try:
+                names = [name for name in sftp.listdir(remote_dir)
+                         if name == bitname or name.startswith(prefix)]
+            except IOError:
+                raise CommandError(f"板端目录不存在：{remote_dir}")
+            entries = [{"name": bitname, "timestamp": None}] if bitname in names else []
+            backups = sorted(({"name": n, "timestamp": n[len(prefix):]} for n in names
+                              if n.startswith(prefix)), key=lambda item: item["timestamp"], reverse=True)
+            return entries + backups
+        finally:
+            if sftp is not None:
+                sftp.close()
+
+    def rollback_bit(self, backup_name, remote_dir="/run/media/sda",
+                     dest_name="sunny_fpga.bit", timestamp=None, progress=None):
+        """Move the current bit aside with a fresh timestamp and restore a chosen backup.
+
+        The live sunny_fpga.bit (if present) is renamed to sunny_fpga.bit_<timestamp>,
+        then the chosen backup is renamed back to sunny_fpga.bit. Runs on the worker
+        thread; `progress(done, total)` reports the step."""
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
+        transport = self.client.get_transport()
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        try:
+            if sftp is None:
+                raise CommandError("SSH 通道不可用，无法回退。")
+            dest = f"{remote_dir.rstrip('/')}/{dest_name}"
+            backup = f"{remote_dir.rstrip('/')}/{backup_name}"
+            if backup_name == dest_name or not backup_name.startswith(dest_name + "_"):
+                raise CommandError("请选择带时间戳的 bit 备份。")
+            try:
+                sftp.stat(backup)
+            except IOError:
+                raise CommandError(f"备份文件不存在：{backup_name}")
+            aside = f"{remote_dir.rstrip('/')}/{dest_name}_{stamp}"
+            try:
+                sftp.stat(dest)
+                self.log("CMD", f"rename {dest_name} -> {dest_name}_{stamp}")
+                sftp.rename(dest, aside)
+            except IOError:
+                pass  # no current bit to move aside
+            if progress:
+                progress(50, 100)
+            self.log("CMD", f"rename {backup_name} -> {dest_name}")
+            sftp.rename(backup, dest)
+            if progress:
+                progress(100, 100)
+            self.log("INFO", f"回退完成：{backup_name} -> {dest_name}")
+        finally:
+            if sftp is not None:
+                sftp.close()
+
     def download_file(self, remote_path, local_path, progress=None):
         """Download a remote file via SFTP; progress(done, total) reports byte transfer."""
         if not self.alive:
@@ -680,6 +747,44 @@ class DemoSession:
         if progress:
             progress(total, total)
         self.log("INFO", f"{remote_dir}/{dest_name}: {total} 字节")
+
+    def list_bit_backups(self, remote_dir="/run/media/sda", bitname="sunny_fpga.bit"):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        target_dir = self._to_remote(remote_dir)
+        if not target_dir.is_dir():
+            raise CommandError(f"板端目录不存在：{remote_dir}")
+        prefix = bitname + "_"
+        names = [p.name for p in target_dir.iterdir()
+                 if p.name == bitname or p.name.startswith(prefix)]
+        entries = [{"name": bitname, "timestamp": None}] if bitname in names else []
+        backups = sorted(({"name": n, "timestamp": n[len(prefix):]} for n in names
+                          if n.startswith(prefix)), key=lambda item: item["timestamp"], reverse=True)
+        return entries + backups
+
+    def rollback_bit(self, backup_name, remote_dir="/run/media/sda",
+                     dest_name="sunny_fpga.bit", timestamp=None, progress=None):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        target_dir = self._to_remote(remote_dir)
+        dest = target_dir / dest_name
+        backup = target_dir / backup_name
+        if backup_name == dest_name or not backup_name.startswith(dest_name + "_"):
+            raise CommandError("请选择带时间戳的 bit 备份。")
+        if not backup.is_file():
+            raise CommandError(f"备份文件不存在：{backup_name}")
+        stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
+        aside = target_dir / f"{dest_name}_{stamp}"
+        if dest.exists():
+            self.log("CMD", f"rename {dest_name} -> {dest_name}_{stamp}")
+            dest.rename(aside)
+        if progress:
+            progress(50, 100)
+        self.log("CMD", f"rename {backup_name} -> {dest_name}")
+        backup.rename(dest)
+        if progress:
+            progress(100, 100)
+        self.log("INFO", f"回退完成：{backup_name} -> {dest_name}")
 
     def download_file(self, remote_path, local_path, progress=None):
         if not self.alive:
