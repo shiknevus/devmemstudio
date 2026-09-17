@@ -1,3 +1,3 @@
 """Devmem Studio desktop workbench."""
 
-__version__ = "3.3.2"
+__version__ = "4.0.0"

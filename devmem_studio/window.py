@@ -28,7 +28,7 @@ from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyC
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, CommandLine,
                       BitView, DecodedFieldsView, Worker, LogBridge)
-from .dialogs import BatchDialog, BoardLogDialog, HostKeyDialog, BitUploadDialog, show_help
+from .dialogs import BatchDialog, BoardLogDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
 
 VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "basic": "身份、模块状态与安全链（公共寄存器头）",
@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         self._task_kind = ""
         self._pending_host_key_change = None
         self._last_context = None
-        self._last_fmt = "H"
+        self._last_fmt = "D"
         self.top_info = None
         self.type_catalog = top_import.load_type_catalog()
         self.active_component = None
@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self.session = SshSession(self.bridge.message.emit)
         self.board_log = None
         self.bit_dialog = None
+        self.bit_rollback_dialog = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
         self.log_records = []
@@ -533,12 +534,15 @@ class MainWindow(QMainWindow):
         self.board_log_button.setToolTip("新窗口打印 tail -f /run/media/sda/sunny.log，主窗口可继续读写寄存器。")
         self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "export")
         self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；原文件备份为 sunny_fpga.bit_时间戳。")
+        self.bit_rollback_button = button("回退bit", self.open_bit_rollback, "flat", "refresh")
+        self.bit_rollback_button.setToolTip("列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份，选择后把所选版本恢复为 sunny_fpga.bit（当前版本先备份为时间戳）。")
         self.log_download_button = button("下载log", self.download_board_log, "flat", "export")
         self.log_download_button.setToolTip("下载板端 /run/media/sda/sunny.log 到本地（选择保存位置）。")
         self.reboot_button = button("重启设备", self.reboot, "flat", "refresh")
         # upload/download/reboot need only a live session, not a selected register component
         layout.addLayout(row(label("会话终端", "sectionTitle"), self.log_filter, self.follow_log, 1,
-                             self.board_log_button, self.bit_upload_button, self.log_download_button,
+                             self.board_log_button, self.bit_upload_button, self.bit_rollback_button,
+                             self.log_download_button,
                              self.reboot_button,
                              button("导出", self.export_logs, "flat", "export"),
                              button("清空", self.clear_logs, "flat"), spacing=6))
@@ -931,7 +935,7 @@ class MainWindow(QMainWindow):
         self.row_buttons = []
         for index, reg in enumerate(self.regs):
             reg.update(_address=start + parse_addr(reg["offset"]), _value=None, _updated="", _error="", _readback_failed=False,
-                       _row=index, _access_width=access_width(reg), _fmt="H", _source="未读取", _target="")
+                       _row=index, _access_width=access_width(reg), _fmt="D", _source="未读取", _target="")
             note = meta["notes"].get(reg["name"]) or meta["debug_notes"].get(reg["name"])
             if note:
                 reg["_note"] = note
@@ -942,16 +946,16 @@ class MainWindow(QMainWindow):
                                                for item in behaviors])
             presets = reg.get("aliases") or reg.get("buttons") or []
             initial = "0x1" if reg.get("action") else (presets[0]["value"] if presets else reg.get("value", "0x0"))
-            reg["_draft"] = f"{(parse_int(initial) or 0):X}"
+            reg["_draft"] = f"{parse_int(initial) or 0}"
             remembered = cache.get(reg["name"])
             if isinstance(remembered, dict) and not reg.get("action"):
                 previous = str(remembered.get("v", reg["_draft"]))
                 match = re.search(r"\((0[xX][0-9a-fA-F]+|\d+)\)\s*$", previous)
                 if match:
-                    reg["_draft"] = f"{parse_int(match.group(1)):X}"
+                    reg["_draft"] = f"{parse_int(match.group(1))}"
                 else:
                     reg["_draft"] = previous
-                    reg["_fmt"] = remembered.get("f", "H") if remembered.get("f") in ("H", "D") else "H"
+                    reg["_fmt"] = remembered.get("f", "D") if remembered.get("f") in ("H", "D") else "D"
                 if remembered.get("w") in (8, 16, 32, 64):
                     reg["_access_width"] = remembered["w"]
             mode = "RO" if reg.get("readonly") else "WO" if reg.get("write_only") else "ACT" if reg.get("action") else "RW"
@@ -1009,6 +1013,34 @@ class MainWindow(QMainWindow):
             if value >= 1 << (width - 1):
                 return str(value - (1 << width))
         return str(value)
+
+    @staticmethod
+    def _pulse_abspos_reg(reg):
+        """Pulse-motor absolute-position register (r_pf_abspos) shown with a derived row."""
+        if reg["name"] != "PARAM51":
+            return False
+        signals = {part.split("[")[0] for part in reg.get("signal", "").split("/")}
+        return "r_pf_abspos" in signals
+
+    def _param4_value(self):
+        """Scaled pulse count per unit; None when PARAM4 is unread or not present."""
+        for reg in self.regs:
+            if reg["name"] == "PARAM4" and reg.get("_value") is not None:
+                return reg["_value"]
+        return None
+
+    def _actual_value(self, reg, value):
+        """Actual position in units = two's-complement abspos / param4, or None."""
+        divisor = self._param4_value()
+        if divisor is None or divisor == 0:
+            return None
+        return int(self._dec_display(reg, value)) / divisor
+
+    @staticmethod
+    def _format_actual(number):
+        if number is None:
+            return "—"
+        return f"{number:.6f}".rstrip("0").rstrip(".")
 
     def _update_table_row(self, reg):
         index = reg["_row"]
@@ -1162,11 +1194,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, "inspector_scroll"):
             QTimer.singleShot(0, self._reveal_inspector)
 
-    @staticmethod
-    def _field_defs(reg):
+    def _field_defs(self, reg):
         """Field decode for the inspector: per-bit layout parsed from the RTL concat
         hookup first, then the static table; DEBUG state history is excluded when the
         register is actually a bit snapshot."""
+        if self._pulse_abspos_reg(reg):
+            return (("实际值 (abspos/param4)", 0, 1, "DEC"),)   # high<low → derived row
         fields = reg.get("fields")
         if fields:
             return tuple((item["name"], item["low"] + item["width"] - 1, item["low"], "DEC")
@@ -1179,11 +1212,12 @@ class MainWindow(QMainWindow):
     def _has_field_decode(self, reg):
         return bool(self._field_defs(reg))
 
-    @staticmethod
-    def _decoded_values(reg, value, definitions):
+    def _decoded_values(self, reg, value, definitions):
         """Live per-field values for the inspector (decimal unless a static HEX field)."""
         if value is None:
             return {}
+        if self._pulse_abspos_reg(reg):
+            return {"实际值 (abspos/param4)": self._format_actual(self._actual_value(reg, value))}
         static = format_decoded_fields(reg["name"], value) if not reg.get("fields") else {}
         values = {}
         for name, high, low, radix in definitions:
@@ -1221,7 +1255,7 @@ class MainWindow(QMainWindow):
             return
         reg = self.regs[item.row()]
         reg["_draft"] = item.text().strip()
-        reg["_fmt"] = "H"
+        reg["_fmt"] = "D"
         self._remember_reg(reg)
         self._update_table_row(reg)
         self._selection_changed()
@@ -1293,7 +1327,7 @@ class MainWindow(QMainWindow):
         for control in self.remote_buttons + getattr(self, "row_buttons", []):
             control.setEnabled(enabled)
         # Commands and the independent log stream do not depend on register addresses.
-        for control in (self.send_button, self.reboot_button, self.bit_upload_button,
+        for control in (self.send_button, self.reboot_button, self.bit_upload_button, self.bit_rollback_button,
                         self.log_download_button, self.hex_read_button, self.dec_read_button):
             control.setEnabled(self.connected and not self._busy and not self._closing)
         self.board_log_button.setEnabled(self.connected and not self._closing)
@@ -1491,6 +1525,138 @@ class MainWindow(QMainWindow):
         self._bit_last_paint = now
         self.bit_dialog.set_percent(percent)
         self.status_left.setText(f"上传bit file {percent}% ({current:,} / {total:,} 字节)")
+
+    def open_bit_rollback(self):
+        if self._closing or not self.connected or self._busy:
+            return
+        if self.bit_rollback_dialog is None:
+            self.bit_rollback_dialog = BitRollbackDialog(self)
+            self.bit_rollback_dialog.rollback_requested.connect(self._start_bit_rollback)
+        self.bit_rollback_dialog.set_reset()
+        if self.bit_rollback_dialog.isMinimized():
+            self.bit_rollback_dialog.showNormal()
+        else:
+            self.bit_rollback_dialog.show()
+        self.bit_rollback_dialog.raise_()
+        self.bit_rollback_dialog.activateWindow()
+        self._refresh_bit_backups()
+
+    def _refresh_bit_backups(self):
+        if self._closing or not self.connected or self._busy:
+            return
+        session = self.session
+        dialog = self.bit_rollback_dialog
+        dialog.set_busy(True)
+        dialog.status.setText("正在读取板端 bit 备份列表…")
+
+        def task(progress):
+            return session.list_bit_backups()
+
+        def done(entries):
+            if self._closing or not dialog:
+                return
+            dialog.set_reset()
+            dialog.populate(entries, f"共 {len(entries)} 个 bit 文件：当前版本 + {len(entries) - 1} 个备份（双击可直接回退）。"
+                             if entries else "板端没有可回退的 bit 备份。")
+            self.append_log("INFO", f"读取到 {len(entries)} 个板端 bit 文件。")
+
+        def failed(message):
+            if self._closing or not dialog:
+                return
+            dialog.set_reset()
+            dialog.set_busy(False)
+            dialog.status.setText("读取备份列表失败：" + message)
+            self.append_log("ERROR", f"读取 bit 备份列表失败：{message}")
+
+        def finished():
+            if self._closing:
+                return
+            self._busy = False
+            self._active_worker = None
+            self.stop_button.setEnabled(False)
+            self.stop_button.setVisible(False)
+            self._refresh_controls()
+
+        worker = Worker(task)
+        worker.signals.result.connect(done)
+        worker.signals.failed.connect(failed)
+        worker.signals.finished.connect(finished)
+        self._active_worker = worker
+        self._busy = True
+        self._task_kind = "operation"
+        self.stop_button.setVisible(False)
+        self._refresh_controls()
+        self.pool.start(worker)
+
+    def _start_bit_rollback(self, backup_name):
+        if self._closing or self._busy or not self.connected:
+            return
+        dialog = self.bit_rollback_dialog
+        if not dialog:
+            return
+        answer = QMessageBox.question(self, "确认回退",
+                                      f"将把当前 sunny_fpga.bit 备份为 sunny_fpga.bit_时间戳，"
+                                      f"然后把 {backup_name} 恢复为 sunny_fpga.bit。\n\n是否继续？",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        session = self.session
+        dialog.set_busy(True)
+        dialog.set_reset()
+        dialog.status.setText(f"正在回退到 {backup_name} …")
+
+        def task(progress):
+            session.rollback_bit(backup_name, progress=lambda done, total: progress({"current": done, "total": total}))
+            return backup_name
+
+        def done(name):
+            if self._closing or not dialog:
+                return
+            dialog.set_done()
+            dialog.status.setText(f"已回退：{name} 恢复为 sunny_fpga.bit（原当前版本已备份）。")
+            self.status_left.setText("bit 回退完成。")
+            self.append_log("SUCCESS", f"bit 回退完成：{name} -> sunny_fpga.bit")
+
+        def failed(message):
+            if self._closing or not dialog:
+                return
+            dialog.set_reset()
+            dialog.set_busy(False)
+            dialog.status.setText("回退失败：" + message)
+            self.append_log("ERROR", f"bit 回退失败：{message}")
+            self.status_left.setText(message[:150])
+
+        def finished():
+            if self._closing:
+                return
+            self._busy = False
+            self._active_worker = None
+            self.stop_button.setEnabled(False)
+            self.stop_button.setVisible(False)
+            self._refresh_controls()
+            self._refresh_bit_backups()   # reload the list after a successful or failed rollback
+
+        worker = Worker(task)
+        worker.signals.result.connect(done)
+        worker.signals.failed.connect(failed)
+        worker.signals.progress.connect(self._rollback_progress)
+        worker.signals.finished.connect(finished)
+        self._active_worker = worker
+        self._busy = True
+        self._task_kind = "upload"
+        self.stop_button.setEnabled(True)
+        self.stop_button.setVisible(True)
+        self._refresh_controls()
+        self.pool.start(worker)
+
+    @Slot(object)
+    def _rollback_progress(self, data):
+        if self._closing or not self.bit_rollback_dialog:
+            return
+        current, total = data.get("current", 0), data.get("total", 100)
+        percent = min(100, int(current * 100 / total)) if total > 0 else 0
+        self.bit_rollback_dialog.set_percent(percent)
+        self.status_left.setText(f"bit 回退 {percent}%")
 
     def download_board_log(self):
         if self._closing or not self.connected or self._busy:

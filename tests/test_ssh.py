@@ -284,6 +284,108 @@ class BitUploadUnitTests(unittest.TestCase):
         finally:
             local.unlink(missing_ok=True)
 
+    def test_list_bit_backups_orders_current_first_then_newest(self):
+        from devmem_studio.core import SshSession
+        import paramiko
+
+        class FakeSFTP:
+            def listdir(self, remote_dir):
+                return ["sunny.log", "sunny_fpga.bit_20260916000000", "sunny_fpga.bit",
+                        "sunny_fpga.bit_20260918000000"]
+
+            def stat(self, path):
+                from types import SimpleNamespace
+                return SimpleNamespace(st_size=4096)
+
+            def close(self):
+                pass
+
+        session = SshSession()
+        session.client = type("C", (), {"get_transport": lambda self: object()})()
+        session.chan = object()
+        original = paramiko.SFTPClient.from_transport
+        original_alive = type(session).alive
+        paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+        try:
+            type(session).alive = property(lambda s: True)
+            entries = session.list_bit_backups()
+        finally:
+            paramiko.SFTPClient.from_transport = original
+            type(session).alive = original_alive
+        self.assertEqual([e["name"] for e in entries],
+                         ["sunny_fpga.bit", "sunny_fpga.bit_20260918000000", "sunny_fpga.bit_20260916000000"])
+        self.assertIsNone(entries[0]["timestamp"])
+        self.assertEqual(entries[1]["timestamp"], "20260918000000")
+
+    def test_rollback_bit_moves_current_aside_and_restores_backup(self):
+        from devmem_studio.core import SshSession
+        import paramiko
+        events = {"renames": []}
+
+        class FakeSFTP:
+            def stat(self, path):
+                from types import SimpleNamespace
+                basename = path.rsplit("/", 1)[-1]
+                if basename in ("sunny_fpga.bit", "sunny_fpga.bit_20260916000000"):
+                    return SimpleNamespace(st_size=400)
+                raise FileNotFoundError
+
+            def rename(self, src, dst):
+                events["renames"].append((src, dst))
+
+            def close(self):
+                pass
+
+        session = SshSession()
+        session.client = type("C", (), {"get_transport": lambda self: object()})()
+        session.chan = object()
+        original = paramiko.SFTPClient.from_transport
+        original_alive = type(session).alive
+        paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+        try:
+            type(session).alive = property(lambda s: True)
+            reps = []
+            session.rollback_bit("sunny_fpga.bit_20260916000000", timestamp="20260918010101",
+                                 progress=lambda done, total: reps.append((done, total)))
+        finally:
+            paramiko.SFTPClient.from_transport = original
+            type(session).alive = original_alive
+        sources = [src.rsplit("/", 1)[-1] for src, _ in events["renames"]]
+        targets = [dst.rsplit("/", 1)[-1] for _, dst in events["renames"]]
+        self.assertEqual(sources, ["sunny_fpga.bit", "sunny_fpga.bit_20260916000000"])
+        self.assertEqual(targets, ["sunny_fpga.bit_20260918010101", "sunny_fpga.bit"])   # aside then restore
+        self.assertEqual(reps[-1], (100, 100))
+
+    def test_rollback_rejects_live_bit_as_target(self):
+        from devmem_studio.core import SshSession
+        from devmem_studio.core import CommandError
+        import paramiko
+
+        class FakeSFTP:
+            def stat(self, path):
+                from types import SimpleNamespace
+                return SimpleNamespace(st_size=400)
+
+            def rename(self, src, dst):
+                pass
+
+            def close(self):
+                pass
+
+        session = SshSession()
+        session.client = type("C", (), {"get_transport": lambda self: object()})()
+        session.chan = object()
+        original = paramiko.SFTPClient.from_transport
+        original_alive = type(session).alive
+        paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+        try:
+            type(session).alive = property(lambda s: True)
+            with self.assertRaises(CommandError):
+                session.rollback_bit("sunny_fpga.bit")
+        finally:
+            paramiko.SFTPClient.from_transport = original
+            type(session).alive = original_alive
+
 
 class SshTests(BoardFixture, unittest.TestCase):
     def test_basic_component_registers_read_write_over_real_ssh(self):
