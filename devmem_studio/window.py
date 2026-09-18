@@ -271,7 +271,6 @@ class MainWindow(QMainWindow):
         layout.addStretch(0)  # no slack here: the component tree above absorbs it all
         self.side_state = label("○  会话未建立", "sideCaption")
         layout.addWidget(self.side_state)
-        layout.addWidget(label("SSH / LINUX / MMIO", "sideCaption"))
         scroll = _SidebarScroll()
         scroll.setWidget(side)
         return scroll

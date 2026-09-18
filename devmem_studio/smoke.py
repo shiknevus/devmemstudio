@@ -202,6 +202,7 @@ def run_smoke(app, directory: Path):
         window.access_filter.setCurrentIndex(0)
         settle()
         window.table.selectRow(row_of("A_TX_OT"))
+        window.format_combo.setCurrentIndex(0)   # HEX，与 4.0.0 起寄存器默认 DEC 显示无关
         window.write_input.setText("2A")
         window.format_combo.setCurrentIndex(1)
         check(window.write_input.text() == "42", "HEX to DEC conversion")
@@ -357,6 +358,7 @@ def run_smoke(app, directory: Path):
                                                 for reg in window.visible_regs),
               "Basic view shows the common component header")
         window.table.selectRow(row_of("EC_ID"))
+        window.format_combo.setCurrentIndex(0)   # HEX，否则 "2A" 按 DEC 解析无效
         window.write_input.setText("2A")
         window.write_button.click()
         settle(lambda: not window._busy)
