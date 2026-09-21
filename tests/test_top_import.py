@@ -168,7 +168,17 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(spindle["PARAM1"]["signal"], "rcfg_spd_max")
         self.assertEqual(spindle["PARAM64"]["signal"], "i_axis_limf")
         self.assertTrue(spindle["PARAM4"]["unwired"])
-        self.assertIsNone(spindle["PARAM31"].get("signal"))
+        # 最大/最小位置（软限位）与触摸速度：与速度/位置族一样带信号与有符号换算。
+        self.assertEqual(spindle["PARAM31"]["signal"], "rcfg_pos_max")
+        self.assertTrue(spindle["PARAM31"].get("signed"))
+        self.assertEqual(spindle["PARAM32"]["signal"], "rcfg_pos_min")
+        self.assertTrue(spindle["PARAM32"].get("signed"))
+        self.assertEqual(spindle["PARAM33"]["signal"], "rcfg_touch_spd")
+        # 目标/步进脉冲同属位置族：带信号且按补码显示。
+        self.assertEqual(spindle["PARAM36"]["signal"], "rserv_target_pulse")
+        self.assertTrue(spindle["PARAM36"].get("signed"))
+        self.assertEqual(spindle["PARAM37"]["signal"], "rserv_step_pulse")
+        self.assertTrue(spindle["PARAM37"].get("signed"))
         annotated = sum(1 for entry in catalog["types"].values() for item in entry["registers"]
                         if item["name"].startswith("PARAM"))
         self.assertTrue(annotated >= 300)  # every implemented PARAM carries a state

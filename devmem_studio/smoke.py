@@ -172,6 +172,8 @@ def run_smoke(app, directory: Path):
         window.view_buttons["task_a"].click()
         settle(lambda: not window._busy)
         window.table.selectRow(row_of("A_BHV_ID"))
+        window.write_mode.click()   # 选中默认在“解析与位状态”，预设（写设置）需切页
+        settle()
         check(window.preset_combo.isVisible() and window.preset_combo.itemText(1).strip() == "home   (1)",
               "Behavior presets harvested from RTL populate the trigger register")
         window.view_buttons["debug"].click()
@@ -327,6 +329,8 @@ def run_smoke(app, directory: Path):
         check(len(data) == len(window.regs) + 1 and data[1][0] == "离线演示", "CSV snapshot with honest demo provenance")
         (directory / "snapshot.csv").write_text(window.snapshot_csv(), encoding="utf-8-sig")
         window.resize(1280, 800)
+        settle()
+        window.write_mode.click()   # 默认选中落在“解析与位状态”，写编辑器需切到“写入设置”页
         settle()
         editor_position = window.write_input.mapTo(window.inspector_scroll.viewport(), window.write_input.rect().topLeft())
         editor_rect = window.write_input.rect().translated(editor_position)

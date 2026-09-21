@@ -26,6 +26,9 @@ from .catalog import DEFAULT_CATEGORIES, DEFAULT_TYPES, NAME_GROUPS, REGISTER_FI
 
 DEFAULT_LOG_PATH = "/run/media/sda/sunny.log"
 
+# 寄存器按批读：每批一条 shell 命令一次往返，批大小兼顾 PTY 行缓冲与进度粒度
+BATCH_READ_CHUNK = 32
+
 
 def application_dir() -> Path:
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
@@ -93,6 +96,15 @@ def write_command(address: int, width: int, value: int) -> str:
     return f"devmem 0x{address:08x} {width} 0x{value:x}"
 
 
+def _strip_shell_prompt(line: str) -> str:
+    """Remove a leading interactive prompt (root@host:~# , board# , $ , > …).
+
+    The interactive shell prints PS1 before each line of a multi-line batch, and
+    the batch's printf outputs no trailing newline, so prompt and value land on
+    the same line: ``root@host:~# __Rb01102dc 0x001E3660``."""
+    return re.sub(r"^(?:\S+@\S+:[^#\n]*|[^\s]*) ?[#$>]\s+", "", line, count=1)
+
+
 def parse_devmem_read_output(text, addr_val=None):
     """Accept a value line or 'Value at address (...) : / = value'; reject echoes/errors."""
     if not text:
@@ -100,7 +112,7 @@ def parse_devmem_read_output(text, addr_val=None):
     candidates = []
     number = r"(0[xX][0-9a-fA-F]+|[0-9]+)"
     for line in strip_ansi(text).splitlines():
-        line = line.strip()
+        line = _strip_shell_prompt(line.strip())
         match = re.fullmatch(number, line)
         if not match and re.search(r"\b(value|read|data)\b", line, re.I):
             match = re.search(r"[:=]\s*" + number + r"\s*$", line)
@@ -181,7 +193,7 @@ class ConfigStore:
         if cfg.get("last_category") not in DEFAULT_CATEGORIES:
             cfg["last_category"] = "axis"
         for field, fallback, low, high in (("port", 22, 1, 65535), ("connect_timeout", 2, 1, 120),
-                                            ("poll_interval", 1000, 250, 60000)):
+                                            ("poll_interval", 1000, 100, 120000)):
             val = parse_int(cfg.get(field))
             cfg[field] = val if val is not None and low <= val <= high else fallback
         for field in ("base", "last_address"):
@@ -382,7 +394,7 @@ class SshSession:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
 
-    def run(self, command: str, timeout=8):
+    def run(self, command: str, timeout=8, quiet=False):
         if not command.strip() or "\x00" in command:
             raise ValueError("命令不能为空或包含空字符。")
         with self._lock:
@@ -392,7 +404,8 @@ class SshSession:
             self.last_exit = None
             while channel.recv_ready():
                 channel.recv(65536)
-            self.log("CMD", command)
+            if not quiet:
+                self.log("CMD", command)
             marker = "__DM_" + uuid.uuid4().hex + "_"
             end_re = re.compile(r"(?:^|\n)" + re.escape(marker) + r"(\d+)__\s*(?:\n|$)")
             full = command.rstrip() + "\nprintf '\\n" + marker + "%s__\\n' \"$?\"\n"
@@ -412,11 +425,16 @@ class SshSession:
                     match = end_re.search(decoded)
                     if match:
                         self.last_exit = int(match.group(1))
-                        lines = decoded[:match.start()].splitlines()
-                        lines = [line for line in lines if marker not in line and line.strip() != command.strip()
-                                 and not re.fullmatch(r"[^\n]*[#$>]\s*", line)]
+                        lines = []
+                        for line in decoded[:match.start()].splitlines():
+                            line = _strip_shell_prompt(line)
+                            if (not line.strip() or marker in line
+                                    or line.strip() == command.strip()
+                                    or re.fullmatch(r"[^\n]*[#$>]\s*", line)):
+                                continue
+                            lines.append(line)
                         result = "\n".join(lines).strip()
-                        if result:
+                        if result and not quiet:
                             self.log("INFO" if self.last_exit == 0 else "ERROR", result)
                         if self.last_exit:
                             raise CommandError(f"命令退出码 {self.last_exit}：{result or command}")
@@ -428,18 +446,59 @@ class SshSession:
             self.close()
             raise TimeoutError(f"命令超过 {timeout:g} 秒未完成，连接已关闭，请重新连接。")
 
-    def read(self, address: int) -> int:
-        output = self.run(read_command(address))
+    def read(self, address: int, quiet=False) -> int:
+        output = self.run(read_command(address), quiet=quiet)
         value, _ = parse_devmem_read_output(output, address)
         if value is None:
             raise CommandError("未识别到寄存器数值：" + (output[:240] or "设备未返回数据"))
         return value
 
-    def write(self, address: int, width: int, value: int) -> int:
-        self.run(write_command(address, width, value))
+    def read_many(self, addresses):
+        """Batch read in one shell round trip; returns {address: (value, error)}.
+
+        Each address is echoed as a __Rxxxxxxxx tag right before its devmem value,
+        so a failing or silent devmem only marks its own register, never the batch.
+        The session log condenses a multi-register batch to one CMD + one result
+        line instead of echoing every printf/devmem pair."""
+        addresses = [validated_address(hex(address)) for address in addresses]
+        if not addresses:
+            return {}
+        if len(addresses) == 1:
+            try:
+                value = self.read(addresses[0])
+                return {addresses[0]: (value, None)}
+            except Exception as exc:
+                return {addresses[0]: (None, str(exc))}
+        lines = [f"printf '__R{a:08x} '; devmem 0x{a:08x} || true" for a in addresses]
+        address_list = " ".join(f"0x{a:08x}" for a in addresses)
+        self.log("CMD", f"读取 {len(addresses)} 个寄存器 {address_list}")
+        output = self.run("\n".join(lines), quiet=True)
+        found = {}
+        for line in output.splitlines():
+            match = re.search(r"__R([0-9a-fA-F]{8})\s*(.*)", line.strip())
+            if match:
+                found[int(match.group(1), 16)] = match.group(2).strip()
+        results = {}
+        for address in addresses:
+            text = found.get(address)
+            value, _ = parse_devmem_read_output(text, address) if text else (None, None)
+            if value is None:
+                results[address] = (None, "未识别到寄存器数值：" + (text[:240] if text else "设备未返回数据"))
+            else:
+                results[address] = (value, None)
+        failed = [f"0x{address:08X}" for address, (value, _) in results.items() if value is None]
+        if failed:
+            self.log("ERROR", f"读取 {len(results) - len(failed)}/{len(results)} 成功，失败：{'、'.join(failed)}")
+        else:
+            values = "  ".join(f"0x{address:08x}=0x{results[address][0]:08X}" for address in addresses)
+            self.log("INFO", values)
+        return results
+
+    def write(self, address: int, width: int, value: int, quiet=False) -> int:
+        self.run(write_command(address, width, value), quiet=quiet)
         # Readback is observed data; self-clearing/action registers need not equal the write value.
         try:
-            return self.read(address)
+            return self.read(address, quiet=quiet)
         except Exception as exc:
             raise ReadbackError(f"0x{address:08X} 写入已完成，但回读失败：{exc}") from exc
 
@@ -815,26 +874,54 @@ class DemoSession:
         time.sleep(0.08)
         self.alive = True
 
-    def read(self, address):
+    def read(self, address, quiet=False):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
-        self.log("CMD", read_command(address))
+        if not quiet:
+            self.log("CMD", read_command(address))
         time.sleep(0.008)
         if address not in self.memory:
             offset = address & 0x1FF
             self.memory[address] = {0: 0x00140201, 4: 0x08000000, 8: 1, 0x68: 0x03080100,
                                     0x90: 0x02040000, 0xB8: 0x01020000, 0x178: 125840}.get(offset, 0)
-        self.log("INFO", f"0x{self.memory[address]:08X}")
+        if not quiet:
+            self.log("INFO", f"0x{self.memory[address]:08X}")
         return self.memory[address]
 
-    def write(self, address, width, value):
+    def write(self, address, width, value, quiet=False):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
-        self.log("CMD", write_command(address, width, value))
+        if not quiet:
+            self.log("CMD", write_command(address, width, value))
         self.memory[address] = value
-        return self.read(address)
+        return self.read(address, quiet=quiet)
 
-    def run(self, command, timeout=8):
+    def read_many(self, addresses):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        addresses = list(addresses)
+        if not addresses:
+            return {}
+        batch = len(addresses) > 1
+        if batch:
+            address_list = " ".join(f"0x{a:08x}" for a in addresses)
+            self.log("CMD", f"读取 {len(addresses)} 个寄存器 {address_list}")
+        results = {}
+        for address in addresses:
+            try:
+                results[address] = (self.read(address, quiet=batch), None)
+            except Exception as exc:
+                results[address] = (None, str(exc))
+        if batch:
+            failed = [f"0x{a:08X}" for a, (value, error) in results.items() if error]
+            if failed:
+                self.log("ERROR", f"读取 {len(results) - len(failed)}/{len(results)} 成功，失败：{'、'.join(failed)}")
+            else:
+                values = "  ".join(f"0x{a:08x}=0x{results[a][0]:08X}" for a in addresses)
+                self.log("INFO", values)
+        return results
+
+    def run(self, command, timeout=8, quiet=False):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
         parts = command.strip().split()
@@ -842,11 +929,13 @@ class DemoSession:
             address = parse_int(parts[1])
             if address is None:
                 raise ValueError("地址格式无效。")
-            value = self.read(address) if len(parts) == 2 else self.write(address, int(parts[2]), parse_int(parts[3]))
+            value = self.read(address, quiet=quiet) if len(parts) == 2 else self.write(address, int(parts[2]), parse_int(parts[3]), quiet=quiet)
             return f"0x{value:08X}"
-        self.log("CMD", command)
+        if not quiet:
+            self.log("CMD", command)
         result = "[演示] 命令已接收；实际 shell 命令需连接设备后执行。"
-        self.log("INFO", result)
+        if not quiet:
+            self.log("INFO", result)
         return result
 
     def start_stream(self, path, output, stopped, cancel_event=None):
