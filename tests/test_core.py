@@ -85,6 +85,18 @@ class RegisterTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(parse_devmem_read_output(text, address), (None, None))
 
+    def test_devmem_output_with_interactive_prompt_prefix(self):
+        """The interactive PTY shell prints PS1 before each line; prompt and value
+        end up on the same line, so parsing must tolerate the prefix."""
+        address = 0xB0102208
+        for text, expected in (("root@xilinx-zcu102-2018_3:~# 0x0000002A", 42),
+                               ("board# 0x0000002A", 42),
+                               ("root@board:/root# 0x2A", 42),
+                               ("$ 0x2A", 42),
+                               ("root@xilinx-zcu102-2018_3:~# 0x0000002A\n", 42)):
+            with self.subTest(text=text):
+                self.assertEqual(parse_devmem_read_output(text, address)[0], expected)
+
     def test_irq_and_report_field_names_and_bit_layout(self):
         self.assertEqual(decode_fields("irq1", (0x1234 << 18) | (0x2AB << 8) | 0xCD),
                          {"ec_id": 4660, "sc_id": 683, "r_a_bhv_id": 205})
@@ -116,8 +128,8 @@ class RegisterTests(unittest.TestCase):
         session.read = Mock(side_effect=TimeoutError("read timeout"))
         with self.assertRaisesRegex(ReadbackError, "写入已完成，但回读失败"):
             session.write(0xB0102208, 32, 1)
-        session.run.assert_called_once_with("devmem 0xb0102208 32 0x1")
-        session.read.assert_called_once_with(0xB0102208)
+        session.run.assert_called_once_with("devmem 0xb0102208 32 0x1", quiet=False)
+        session.read.assert_called_once_with(0xB0102208, quiet=False)
 
     def test_failed_write_does_not_read_back_or_report_success(self):
         session = SshSession()

@@ -14,11 +14,17 @@ from devmem_studio.core import SshSession, CommandError, HostKeyChangedError, DE
 
 
 class BoardServer(paramiko.ServerInterface):
-    def __init__(self):
+    def __init__(self, prompt="board# "):
         self.memory = {}
         self.commands = []
         self.exec_commands = []
         self.auth_attempts = 0
+        # Interactive shells print PS1 before each line; the real device does this
+        # too, so mock responses emulate the prompt prefix on every line.
+        self.prompt = prompt
+
+    def echo_prompt(self, text):
+        return (self.prompt + text) if text else self.prompt
 
     def check_auth_password(self, username, password):
         self.auth_attempts += 1
@@ -54,6 +60,13 @@ class BoardServer(paramiko.ServerInterface):
                         channel.sendall(b"board# ")
                         continue
                     if hanging:
+                        continue
+                    batch = re.match(r"printf '__R[0-9a-fA-F]{8} '; devmem (0x[0-9a-fA-F]+) \|\| true$", text)
+                    if batch:
+                        self.commands.append(text)
+                        last_exit = 0   # `|| true` keeps one bad address from failing the batch
+                        address = int(batch.group(1), 16)
+                        channel.sendall(f"{self.echo_prompt(f'__R{address:08x} 0x{self.memory.get(address, 0x2A):08X}')}\r\n".encode())
                         continue
                     if text.startswith("printf "):
                         marker = re.search(r"__DM_[a-f0-9]+_", text).group(0)
@@ -396,6 +409,33 @@ class SshTests(BoardFixture, unittest.TestCase):
                 self.assertEqual(self.session.write(address, 32, value), value)
                 self.assertEqual(self.server.memory[address], value)
                 self.assertIn(f"devmem 0x{address:08x} 32 0x{value:x}", self.server.commands)
+
+    def test_batch_read_returns_all_values_in_one_command(self):
+        for index, address in enumerate((0xB0102200, 0xB0102204, 0xB0102208)):
+            self.server.memory[address] = 100 + index
+        results = self.session.read_many([0xB0102200, 0xB0102204, 0xB0102208])
+        self.assertEqual(results, {0xB0102200: (100, None), 0xB0102204: (101, None),
+                                   0xB0102208: (102, None)})
+        batch_lines = [c for c in self.server.commands if c.startswith("printf '__R")]
+        self.assertEqual(len(batch_lines), 3)
+        # 会话日志精简：CMD 一行列出全部地址，INFO 一行值，不再逐条回显 printf/devmem。
+        cmd_logs = [message for level, message in self.logs if level == "CMD" and message.startswith("读取 3 个寄存器")]
+        self.assertEqual(cmd_logs, ["读取 3 个寄存器 0xb0102200 0xb0102204 0xb0102208"])
+        info_logs = [message for level, message in self.logs if level == "INFO" and message.startswith("0xb0102200")]
+        self.assertEqual(info_logs, ["0xb0102200=0x00000064  0xb0102204=0x00000065  0xb0102208=0x00000066"])
+        self.assertFalse(any(message.startswith("printf '__R") for _, message in self.logs))   # 不再回显多行命令
+
+    def test_batch_read_tolerates_interactive_prompt_prefix(self):
+        """The interactive PTY shell prints PS1 before each line of the batch; the
+        batch's printf emits no trailing newline, so lines arrive as
+        ``board# __Rxxxxxxxx 0xNN`` and must still parse. (Regression for the
+        xilinx-zcu102 device where only the first register read succeeded.)"""
+        for index, address in enumerate((0xB0102200, 0xB0102204, 0xB0102208)):
+            self.server.memory[address] = 0x1000 + index
+        results = self.session.read_many([0xB0102200, 0xB0102204, 0xB0102208])
+        self.assertEqual(results, {0xB0102200: (0x1000, None), 0xB0102204: (0x1001, None),
+                                   0xB0102208: (0x1002, None)})
+        self.assertEqual(self.server.prompt, "board# ")
 
     def test_real_ssh_read_write_and_exit_codes(self):
         self.assertTrue(self.session.alive)

@@ -106,7 +106,7 @@ class UiTests(unittest.TestCase):
 
     def test_device_error_stops_polling_and_marks_failed_row(self):
         class FailedDevice(DemoSession):
-            def read(self, address):
+            def read(self, address, quiet=False):
                 raise RuntimeError("simulated device error")
         self.window.session.close()
         self.window.session = FailedDevice(self.window.bridge.message.emit)
@@ -179,7 +179,7 @@ class UiTests(unittest.TestCase):
 
     def test_failed_readback_counts_completed_write_and_stops_batch(self):
         class FailedReadback(DemoSession):
-            def write(self, address, width, value):
+            def write(self, address, width, value, quiet=False):
                 self.memory[address] = value
                 raise ReadbackError("写入已完成，但回读失败：模拟超时")
         self.window.session.close()
@@ -384,34 +384,134 @@ class UiTests(unittest.TestCase):
         self.settle(lambda: not self.window._busy)
         abspos = self.window.regs[self.row_of("PARAM51")]
         param4 = self.window.regs[self.row_of("PARAM4")]
-        self.assertTrue(self.window._pulse_abspos_reg(abspos))
-        self.assertFalse(self.window._pulse_abspos_reg(param4))
+        self.assertEqual(self.window._pulse_scaled_label(abspos), "实际值 (mm | °)")
+        self.assertIsNone(self.window._pulse_scaled_label(param4))
         # PARAM4 未读取 → 派生行显示 —.
         self.window.session.memory[abspos["_address"]] = 0xFFFFFF9C
         self.window.table.selectRow(abspos["_row"])
         self.window.bit_mode.click()
         self.window.read_selected()
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "—")
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (mm | °)"].text(), "—")
         # PARAM4=4, abspos=-100（0xFFFFFF9C 补码）→ -25.
         self.window.session.memory[param4["_address"]] = 4
         self.window.read_register(param4)
         self.settle(lambda: not self.window._busy)
         self.window.read_register(abspos)
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "-25")
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (mm | °)"].text(), "-25")
         # 正数不受补码分支影响：abspos=1000, param4=4 → 250.
         self.window.session.memory[abspos["_address"]] = 1000
         self.window.read_register(abspos)
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "250")
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (mm | °)"].text(), "250")
         # PARAM4=0 → 显示 —.
         self.window.session.memory[param4["_address"]] = 0
         self.window.read_register(param4)
         self.settle(lambda: not self.window._busy)
         self.window.read_register(abspos)
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window.decoded_view.field_values["实际值 (abspos/param4)"].text(), "—")
+        self.assertEqual(self.window.decoded_view.field_values["实际值 (mm | °)"].text(), "—")
+
+    def test_pul_axis_speed_accel_scaled_rows(self):
+        # 速度/加减速族同样按 /PARAM4 换算：spd→mm/s|°/s，acc/dec→mm/s²|°/s².
+        self.window.view_buttons["param"].click()
+        self.settle(lambda: not self.window._busy)
+        param4 = self.window.regs[self.row_of("PARAM4")]
+        self.window.session.memory[param4["_address"]] = 1000
+        self.window.read_register(param4)
+        self.settle(lambda: not self.window._busy)
+        self.window.bit_mode.click()
+        for name, label, expected in (("PARAM35", "实际值 (mm/s | °/s)", "12.5"),
+                                      ("PARAM33", "实际值 (mm/s | °/s)", "0.8"),
+                                      ("PARAM5", "实际值 (mm/s² | °/s²)", "25"),
+                                      ("PARAM2", "实际值 (mm/s² | °/s²)", "250"),
+                                      ("PARAM3", "实际值 (mm/s² | °/s²)", "2.5")):
+            with self.subTest(name=name):
+                reg = self.window.regs[self.row_of(name)]
+                self.assertEqual(self.window._pulse_scaled_label(reg), label)
+                self.window.session.memory[reg["_address"]] = int(float(expected) * 1000)
+                self.window.read_register(reg)
+                self.settle(lambda: not self.window._busy)
+                self.window.table.selectRow(reg["_row"])
+                self.assertEqual(self.window.decoded_view.field_values[label].text(), expected)
+
+    def test_pul_axis_soft_limit_positions_parse_like_position(self):
+        # 最大位置/最小位置（rcfg_pos_max/min，软限位）与目标脉冲/步进脉冲
+        # （rserv_target/step_pulse）都走 /PARAM4 的实际值换算，解析栏不再显示
+        # 位段：PARAM31/32/36/37 与 r_pf_abspos 同族。
+        self.window.view_buttons["param"].click()
+        self.settle(lambda: not self.window._busy)
+        param4 = self.window.regs[self.row_of("PARAM4")]
+        self.window.session.memory[param4["_address"]] = 4
+        self.window.read_register(param4)
+        self.settle(lambda: not self.window._busy)
+        self.window.bit_mode.click()
+        for name, raw, expected in (("PARAM31", 0xFFFFFF9C, "-25"),
+                                    ("PARAM32", 500, "125"),
+                                    ("PARAM36", 0xFFFFFF9C, "-25"),
+                                    ("PARAM37", 500, "125")):
+            with self.subTest(name=name):
+                reg = self.window.regs[self.row_of(name)]
+                self.assertEqual(self.window._pulse_scaled_label(reg), "实际值 (mm | °)")
+                # 有符号：-100 → -100/4=-25；正数：500 → 500/4=125.
+                self.window.session.memory[reg["_address"]] = raw
+                self.window.read_register(reg)
+                self.settle(lambda: not self.window._busy)
+                self.window.table.selectRow(reg["_row"])
+                values = self.window.decoded_view.field_values
+                self.assertEqual(list(values), ["实际值 (mm | °)"])   # 无位段
+                self.assertEqual(values["实际值 (mm | °)"].text(), expected)
+                # CSV 导出的“字段解析”同样只要实际值，不带位段。
+                row = next(item for item in csv.reader(io.StringIO(self.window.snapshot_csv()))
+                           if item[3].startswith(name))
+                self.assertEqual(row[12], f"实际值 (mm | °)={expected}")
+
+    def test_top_import_drops_stale_row_button_references(self):
+        # 回归：导入新 top 后 rebuild_registers 的空组件分支必须清掉旧行按钮引用，
+        # 否则 _refresh_controls 会对已销毁的 QPushButton 调 setEnabled 崩溃
+        # （libshiboken: Internal C++ object ... already deleted）。
+        self.window.view_buttons["all"].click()
+        self.settle(lambda: not self.window._busy)
+        self.assertTrue(self.window.row_buttons)
+        self.window.load_top(self.write_fixture_top("second-top.sv"))
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.row_buttons, [])
+        # 空组件分支后刷新控制不应崩溃。
+        self.window._refresh_controls()
+
+    def test_refresh_controls_skips_already_deleted_row_buttons(self):
+        # 回归：即使某个行按钮的 C++ 对象已被 Qt 销毁（setEnabled 抛
+        # RuntimeError），_refresh_controls 也必须跳过而不是继续崩溃，并把
+        # 失效按钮移出 row_buttons。
+        self.window.view_buttons["all"].click()
+        self.settle(lambda: not self.window._busy)
+        count = len(self.window.row_buttons)
+        stale = StaleDeletedButton()
+        self.window.row_buttons.append(stale)
+        self.window._refresh_controls()   # 不应抛异常
+        self.assertNotIn(stale, self.window.row_buttons)
+        self.assertEqual(len(self.window.row_buttons), count)   # 其余按钮保留
+
+    def test_selecting_any_register_defaults_to_bit_mode(self):
+        # 所有寄存器（含可写寄存器）选中后默认落在“解析与位状态”页签。
+        self.window.view_buttons["all"].click()
+        self.settle(lambda: not self.window._busy)
+        writable = [reg for reg in self.window.regs if not reg.get("readonly")]
+        readonly = [reg for reg in self.window.regs if reg.get("readonly")]
+        self.assertTrue(writable and readonly)
+        for selector, pool in (("可写", writable), ("只读", readonly)):
+            reg = pool[0]
+            self.window.table.selectRow(reg["_row"])
+            self.settle(lambda: not self.window._busy)
+            self.assertTrue(self.window.bit_mode.isChecked(), f"{selector}寄存器应默认选中解析与位状态")
+            self.assertFalse(self.window.write_mode.isChecked())
+
+
+class StaleDeletedButton:
+    """Mimics a PySide6 wrapper whose C++ QPushButton is already destroyed."""
+    def setEnabled(self, enabled):
+        raise RuntimeError("Internal C++ object (PySide6.QtWidgets.QPushButton) already deleted.")
 
 
 class TopImportUiTests(UiTests):
@@ -670,6 +770,8 @@ class TopImportUiTests(UiTests):
         self.window.view_buttons["task_a"].click()
         self.settle(lambda: not self.window._busy)
         self.window.table.selectRow(self.row_of("A_BHV_ID"))
+        # 选中默认落在“解析与位状态”，写设置（含预设）需切到“写入设置”页。
+        self.window.write_mode.click()
         self.assertEqual(self.window.preset_combo.itemText(1).strip(), "home   (1)")
         self.assertTrue(self.window.preset_combo.isVisible())
         self.assertIn("fwd limit", self.window.table.item(self.row_of("PARAM64"), 0).toolTip())
@@ -713,19 +815,42 @@ class TopImportUiTests(UiTests):
             self.assertEqual(self.window.top_info["path"], str(fresh))
             self.assertIn(str(fresh), self.window.top_summary.text())     # path shown for confirmation
 
-    def test_stop_button_slot_does_not_reflow_toolbar(self):
+    def test_toolbar_stable_during_task_and_cancel_still_works(self):
+        # 停止按钮已移除；工具栏在任务进行/结束时不再因按钮显隐而重排，
+        # 取消能力由 Esc / cancel_task 保留。
         idle = self.window.write_all_button.geometry()
-        self.assertTrue(self.window.stop_button.isVisibleTo(self.window))
-        self.assertFalse(self.window.stop_button.isEnabled())          # idle: visible but disabled
         self.window.read_all()
         self.assertTrue(self.window._busy)
-        self.assertTrue(self.window.stop_button.isEnabled())
         busy = self.window.write_all_button.geometry()
         self.assertEqual((idle.x(), idle.y()), (busy.x(), busy.y()))
         self.settle(lambda: not self.window._busy)
         after = self.window.write_all_button.geometry()
         self.assertEqual((idle.x(), idle.y()), (after.x(), after.y()))
-        self.assertFalse(self.window.stop_button.isEnabled())
+        # 任务运行期间取消请求仍被接受（Esc 快捷键仍绑定 cancel_task）。
+        self.window.read_all()
+        self.assertTrue(self.window._busy)
+        self.window.cancel_task()
+        self.assertTrue(self.window.cancel.is_set())
+        self.settle(lambda: not self.window._busy)
+
+    def test_poll_interval_editable_with_0_1s_minimum(self):
+        # 自动读取周期可直接输入，最快 0.1 s（100 ms）。
+        self.assertTrue(self.window.interval.isEditable())
+        presets = [self.window.interval.itemData(i) for i in range(self.window.interval.count())]
+        self.assertEqual(min(presets), 100)   # “0.1 s” 是可选预设
+        for text, expected in (("0.1", 100), ("0.3", 300), ("0.1 s", 100), ("0.5 s", 500),
+                               ("150ms", 150), ("150", 150), ("2", 2000)):
+            with self.subTest(text=text):
+                self.window.interval.setEditText(text)
+                self.assertEqual(self.window._poll_interval_ms(), expected)
+        # 下限钳制到 0.1 s，非数值退回默认 1 s。
+        self.window.interval.setEditText("0.01")
+        self.assertEqual(self.window._poll_interval_ms(), 100)
+        self.window.interval.setEditText("abc")
+        self.assertEqual(self.window._poll_interval_ms(), 1000)
+        # 键入的自定义周期立即生效（0.25 s → 250 ms）。
+        self.window.interval.setEditText("0.25")
+        self.assertEqual(self.window._poll_interval_ms(), 250)
 
     def test_import_component_updates_runtime_definition(self):
         from PySide6.QtWidgets import QMessageBox

@@ -14,7 +14,7 @@ import time
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
 from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
-                               QLineEdit, QSpinBox, QCheckBox, QLabel, QButtonGroup, QTableWidget,
+                               QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
                                QPlainTextEdit, QProgressBar, QMessageBox, QFileDialog, QApplication,
                                QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
@@ -22,9 +22,9 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxL
 from . import __version__
 from . import component_parse, top_import
 from .catalog import REGISTER_FIELDS
-from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
+from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
-                   resource_path, user_data_dir, session_logger)
+                   resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK)
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, CommandLine,
                       BitView, DecodedFieldsView, Worker, LogBridge)
@@ -305,24 +305,21 @@ class MainWindow(QMainWindow):
         self.poll_check = QCheckBox("自动读取")
         self.poll_check.toggled.connect(self._poll_toggled)
         self.interval = ComboBox()
-        for text, value in (("0.5 s", 500), ("1 s", 1000), ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
+        self.interval.setEditable(True)
+        self.interval.setInsertPolicy(QComboBox.NoInsert)
+        for text, value in (("0.1 s", 100), ("0.2 s", 200), ("0.5 s", 500), ("1 s", 1000),
+                            ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
             self.interval.addItem(text, value)
         self.interval.setFixedWidth(88)
+        self.interval.editTextChanged.connect(self._interval_edited)
+        self.interval.setToolTip("自动读取周期；可直接输入毫秒数或带小数的秒数（如 150 或 0.3），最快 0.1 s")
         self.read_all_button = button("读取全部", self.read_all, "primary", "read")
         self.write_all_button = button("批量写入", self.write_all, None, "write")
-        self.stop_button = button("停止", self.cancel_task, None, "stop")
-        self.stop_button.setEnabled(False)
-        # Reserve the stop button's cell so polling cycles never reflow the toolbar row.
-        stop_holder = QWidget()
-        stop_layout = QHBoxLayout(stop_holder)
-        stop_layout.setContentsMargins(0, 0, 0, 0)
-        stop_layout.addWidget(self.stop_button)
-        stop_holder.setFixedWidth(max(self.stop_button.sizeHint().width(), 48))
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
         self.module_badge = label("", "badge")
         self.export_button = button("导出快照", self.export_snapshot, None, "export")
         layout.addLayout(row(self.module_title, self.register_count, 1, self.module_badge, self.poll_check,
-                             self.interval, stop_holder, self.write_all_button, self.read_all_button,
+                             self.interval, self.write_all_button, self.read_all_button,
                              self.export_button, spacing=10))
         self.horizontal_split = QSplitter(Qt.Horizontal)
         self.horizontal_split.setHandleWidth(10)
@@ -572,8 +569,13 @@ class MainWindow(QMainWindow):
         self.timeout.setValue(self.cfg["connect_timeout"])
         self.remember.setChecked(bool(self.cfg["remember_password"]))
         self.base_field.setText(self.cfg["base"])
-        index = self.interval.findData(self.cfg.get("poll_interval", 1000))
-        self.interval.setCurrentIndex(max(index, 0))
+        saved = self.cfg.get("poll_interval", 1000)
+        index = self.interval.findData(saved)
+        if index >= 0:
+            self.interval.setCurrentIndex(index)
+        else:
+            # 自定义周期（如 150ms）：以文本形式回填，保留最接近的预设供选择。
+            self.interval.setEditText(f"{saved} ms" if saved < 1000 else f"{saved / 1000:g} s")
 
     def _shortcuts(self):
         for sequence, callback in (("F5", self.read_all), ("Ctrl+F", self.search.setFocus),
@@ -880,6 +882,7 @@ class MainWindow(QMainWindow):
             self.regs = []
             self.visible_regs = []
             self.selected = None
+            self.row_buttons = []   # drop stale read-button wrappers before the table drops them
             self.table.setRowCount(0)
             self.inspector.setEnabled(False)
             self.module_title.setText("寄存器映射")
@@ -930,8 +933,8 @@ class MainWindow(QMainWindow):
         cache = self.cfg.get("write_cache", {}).get(self.cache_key, {})
         if not isinstance(cache, dict):
             cache = {}
-        self.table.setRowCount(len(self.regs))
         self.row_buttons = []
+        self.table.setRowCount(len(self.regs))
         for index, reg in enumerate(self.regs):
             reg.update(_address=start + parse_addr(reg["offset"]), _value=None, _updated="", _error="", _readback_failed=False,
                        _row=index, _access_width=access_width(reg), _fmt="D", _source="未读取", _target="")
@@ -1014,12 +1017,21 @@ class MainWindow(QMainWindow):
         return str(value)
 
     @staticmethod
-    def _pulse_abspos_reg(reg):
-        """Pulse-motor absolute-position register (r_pf_abspos) shown with a derived row."""
-        if reg["name"] != "PARAM51":
-            return False
+    def _pulse_scaled_label(reg):
+        """Derived-row label for pulse-domain values: two's-complement value / PARAM4.
+
+        Position-family signals (r_pf_abspos, rserv_target/step_pulse, rcfg_pos_*)
+        show mm | °; speed/accel/decel config signals (rcfg_*spd/acc/dec) show
+        per-second scaled values."""
         signals = {part.split("[")[0] for part in reg.get("signal", "").split("/")}
-        return "r_pf_abspos" in signals
+        pulse_positions = {"r_pf_abspos", "rserv_target_pulse", "rserv_step_pulse"}
+        if any(s in pulse_positions or s.startswith("rcfg_pos") for s in signals):
+            return "实际值 (mm | °)"
+        scaled = [s for s in signals if s.startswith("rcfg_")
+                  and any(key in s for key in ("spd", "acc", "dec"))]
+        if not scaled:
+            return None
+        return "实际值 (mm/s² | °/s²)" if any("acc" in s or "dec" in s for s in scaled) else "实际值 (mm/s | °/s)"
 
     def _param4_value(self):
         """Scaled pulse count per unit; None when PARAM4 is unread or not present."""
@@ -1029,7 +1041,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _actual_value(self, reg, value):
-        """Actual position in units = two's-complement abspos / param4, or None."""
+        """Actual value in units = two's-complement register value / param4, or None."""
         divisor = self._param4_value()
         if divisor is None or divisor == 0:
             return None
@@ -1123,7 +1135,7 @@ class MainWindow(QMainWindow):
         self.access_badge.setText("只读" if reg.get("readonly") else "写-only" if reg.get("write_only")
                                   else "动作" if reg.get("action") else "读写")
         self.write_mode.setEnabled(not reg.get("readonly", False))
-        (self.bit_mode if reg.get("readonly") else self.write_mode).setChecked(True)
+        self.bit_mode.setChecked(True)   # 所有寄存器选中默认落在“解析与位状态”
         self.write_button.setVisible(not reg.get("readonly", False))
         self.readonly_note.setVisible(reg.get("readonly", False))
         self.width_combo.setCurrentText(str(reg["_access_width"]))
@@ -1197,8 +1209,9 @@ class MainWindow(QMainWindow):
         """Field decode for the inspector: per-bit layout parsed from the RTL concat
         hookup first, then the static table; DEBUG state history is excluded when the
         register is actually a bit snapshot."""
-        if self._pulse_abspos_reg(reg):
-            return (("实际值 (abspos/param4)", 0, 1, "DEC"),)   # high<low → derived row
+        scaled_label = self._pulse_scaled_label(reg)
+        if scaled_label:
+            return ((scaled_label, 0, 1, "DEC"),)   # high<low → derived row
         fields = reg.get("fields")
         if fields:
             return tuple((item["name"], item["low"] + item["width"] - 1, item["low"], "DEC")
@@ -1215,8 +1228,9 @@ class MainWindow(QMainWindow):
         """Live per-field values for the inspector (decimal unless a static HEX field)."""
         if value is None:
             return {}
-        if self._pulse_abspos_reg(reg):
-            return {"实际值 (abspos/param4)": self._format_actual(self._actual_value(reg, value))}
+        scaled_label = self._pulse_scaled_label(reg)
+        if scaled_label is not None:
+            return {scaled_label: self._format_actual(self._actual_value(reg, value))}
         static = format_decoded_fields(reg["name"], value) if not reg.get("fields") else {}
         values = {}
         for name, high, low, radix in definitions:
@@ -1324,7 +1338,14 @@ class MainWindow(QMainWindow):
     def _refresh_controls(self):
         enabled = self.connected and not self._busy and getattr(self, "address_valid", False)
         for control in self.remote_buttons + getattr(self, "row_buttons", []):
-            control.setEnabled(enabled)
+            try:
+                control.setEnabled(enabled)
+            except RuntimeError:
+                # 重建表格/切换组件后，旧行按钮的 C++ 对象可能已被 Qt 销毁；
+                # 跳过并把失效包装器从列表中清除，而不是让后续刷新崩溃。
+                stale = getattr(self, "row_buttons", [])
+                if control in stale:
+                    stale.remove(control)
         # Commands and the independent log stream do not depend on register addresses.
         for control in (self.send_button, self.reboot_button, self.bit_upload_button, self.bit_rollback_button,
                         self.log_download_button, self.hex_read_button, self.dec_read_button):
@@ -1493,8 +1514,7 @@ class MainWindow(QMainWindow):
 
         def finished():
             self._busy = False
-            self.stop_button.setEnabled(False)
-            self._next_poll = time.monotonic() + self.interval.currentData() / 1000
+            self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
             self._refresh_controls()
 
         worker = Worker(task)
@@ -1505,8 +1525,6 @@ class MainWindow(QMainWindow):
         self._active_worker = worker   # keep a reference or Qt may drop the queued signals
         self._busy = True
         self._task_kind = "upload"
-        self.stop_button.setEnabled(True)
-        self.stop_button.setVisible(True)
         self._refresh_controls()
         self.pool.start(worker)
 
@@ -1572,8 +1590,6 @@ class MainWindow(QMainWindow):
                 return
             self._busy = False
             self._active_worker = None
-            self.stop_button.setEnabled(False)
-            self.stop_button.setVisible(False)
             self._refresh_controls()
 
         worker = Worker(task)
@@ -1583,7 +1599,6 @@ class MainWindow(QMainWindow):
         self._active_worker = worker
         self._busy = True
         self._task_kind = "operation"
-        self.stop_button.setVisible(False)
         self._refresh_controls()
         self.pool.start(worker)
 
@@ -1630,8 +1645,6 @@ class MainWindow(QMainWindow):
                 return
             self._busy = False
             self._active_worker = None
-            self.stop_button.setEnabled(False)
-            self.stop_button.setVisible(False)
             self._refresh_controls()
             self._refresh_bit_backups()   # reload the list after a successful or failed rollback
 
@@ -1643,8 +1656,6 @@ class MainWindow(QMainWindow):
         self._active_worker = worker
         self._busy = True
         self._task_kind = "upload"
-        self.stop_button.setEnabled(True)
-        self.stop_button.setVisible(True)
         self._refresh_controls()
         self.pool.start(worker)
 
@@ -1693,7 +1704,6 @@ class MainWindow(QMainWindow):
         self.status_left.setText(description + "…")
         self.progress.setRange(0, 0)
         self.progress.show()
-        self.stop_button.setEnabled(kind in ("read", "write", "connect", "command", "download", "upload"))
         self._refresh_controls()
         worker = Worker(function)
         self._active_worker = worker
@@ -1750,8 +1760,7 @@ class MainWindow(QMainWindow):
         self._task_callback = None
         self._active_worker = None
         self.progress.hide()
-        self.stop_button.setEnabled(False)
-        self._next_poll = time.monotonic() + self.interval.currentData() / 1000
+        self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
         self.connect_button.setText("断开连接" if self.connected else "连接设备")
         self._refresh_controls()
         pending, self._pending_component = self._pending_component, None
@@ -1768,7 +1777,6 @@ class MainWindow(QMainWindow):
         if self._busy:
             self.cancel.set()
             self.poll_check.setChecked(False)
-            self.stop_button.setEnabled(False)
             if self._task_kind == "connect":
                 self.session.close()
             self.status_left.setText("正在停止；当前已发送的命令完成后结束。")
@@ -1784,16 +1792,32 @@ class MainWindow(QMainWindow):
         session = self.session
         def task(progress):
             completed = 0
-            for index, reg in enumerate(records, 1):
+            total = len(records)
+            first_error = None
+            for start in range(0, total, BATCH_READ_CHUNK):
                 if self.cancel.is_set():
                     break
+                part = records[start:start + BATCH_READ_CHUNK]
                 try:
-                    value = session.read(reg["_address"])
+                    # One shell round trip per chunk; per-address failures come back as errors.
+                    values = session.read_many([reg["_address"] for reg in part])
                 except Exception as exc:
-                    progress({"register": reg, "error": str(exc), "current": index, "total": len(records)})
+                    progress({"register": part[0], "error": str(exc), "current": start + 1, "total": total})
                     raise
-                progress({"register": reg, "value": value, "current": index, "total": len(records)})
-                completed += 1
+                for index, reg in enumerate(part, start + 1):
+                    value, error = values.get(reg["_address"], (None, "设备未返回数据"))
+                    if error:
+                        progress({"register": reg, "error": error, "current": index, "total": total})
+                        if first_error is None:
+                            first_error = (reg, error)
+                        continue
+                    progress({"register": reg, "value": value, "current": index, "total": total})
+                    completed += 1
+            # Sweep finished but some registers failed: fail the task so polling
+            # stops and the error counter/log reflect it, as single reads did.
+            if first_error is not None and not self.cancel.is_set():
+                reg, error = first_error
+                raise CommandError(f"0x{reg['_address']:08X} 读取失败：{error}")
             return completed
         def done(count):
             message = f"读取{'已停止' if self.cancel.is_set() else '完成'} · {count} / {len(records)} 项"
@@ -1823,13 +1847,17 @@ class MainWindow(QMainWindow):
         session = self.session
         # Snapshot values in the UI thread; worker threads never read GUI widgets.
         plans = [(reg, reg["_address"], reg["_access_width"], reg["_planned_value"]) for reg in records]
+        batch = len(plans) > 1
+        if batch:
+            address_list = " ".join(f"0x{address:08x}" for _, address, _, _ in plans)
+            session.log("CMD", f"写入 {len(plans)} 个寄存器 {address_list}")
         def task(progress):
             completed = 0
             for index, (reg, address, width, value) in enumerate(plans, 1):
                 if self.cancel.is_set():
                     break
                 try:
-                    measured = session.write(address, width, value)
+                    measured = session.write(address, width, value, quiet=batch)
                 except Exception as exc:
                     progress({"register": reg, "error": str(exc), "current": index, "total": len(plans),
                               "write": True, "written": isinstance(exc, ReadbackError)})
@@ -1874,6 +1902,33 @@ class MainWindow(QMainWindow):
         dialog = BatchDialog(records, self)
         if dialog.exec() == QDialog.Accepted:
             self._write_many(dialog.selected())
+
+    def _poll_interval_ms(self):
+        """Auto-read interval in milliseconds from the combo; accepts typed values.
+
+        Accepts "0.3" / "0.3 s" (seconds with decimals) or "300" / "300ms"
+        (milliseconds); clamps to the fastest 0.1 s and 60 s. The typed text wins
+        over the still-selected preset item so custom values take effect at once."""
+        text = str(self.interval.currentText()).strip().lower()
+        match = re.match(r"^(\d+(?:\.\d+)?)\s*(ms|s)?$", text)
+        if match:
+            number = float(match.group(1))
+            unit = match.group(2)
+            if unit == "ms":
+                ms = number
+            elif unit == "s":
+                ms = number * 1000
+            else:
+                ms = number * 1000 if number < 60 else number   # 无单位：按秒，>=60 按毫秒
+            return max(100, min(60000, int(ms)))
+        data = self.interval.currentData()
+        if data is not None:
+            return max(100, min(60000, int(data)))
+        return 1000
+
+    def _interval_edited(self, text):
+        if self._poll_interval_ms() != (self.interval.currentData() or 1000):
+            self._schedule_save()
 
     def _poll_toggled(self, checked):
         self._next_poll = 0
@@ -2084,7 +2139,9 @@ class MainWindow(QMainWindow):
         context = self.active_component["module_type"] if self.active_component else ""
         for reg in self.regs:
             value = reg["_value"]
-            fields = format_decoded_fields(reg["name"], value if not reg["_error"] else None)
+            # 与右侧“解析与位状态”一致：位置/速度族只出实际值，不导位段。
+            definitions = self._field_defs(reg)
+            fields = self._decoded_values(reg, value if not reg["_error"] else None, definitions)
             writer.writerow([reg["_source"], reg["_target"], context,
                              self._display_name(reg), register_group(reg), reg["offset"], f'0x{reg["_address"]:08X}',
                              "RO" if reg.get("readonly") else "ACT" if reg.get("action") else "RW", reg.get("width", 32),
@@ -2115,7 +2172,7 @@ class MainWindow(QMainWindow):
             return
         self.cfg.update(host=self.host.text().strip(), port=self.port.value(), username=self.user.text().strip(),
                         password=self.password.text(), remember_password=self.remember.isChecked(),
-                        connect_timeout=self.timeout.value(), poll_interval=self.interval.currentData())
+                        connect_timeout=self.timeout.value(), poll_interval=self._poll_interval_ms())
         self.cfg["window_size"] = [self.width(), self.height()]
         try:
             self.store.save(self.cfg)

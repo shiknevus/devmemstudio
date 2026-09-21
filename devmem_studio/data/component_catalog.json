@@ -13490,13 +13490,17 @@
           "offset": "0x150",
           "name": "PARAM31",
           "width": 32,
-          "readonly": false
+          "readonly": false,
+          "signal": "rcfg_pos_max",
+          "signed": true
         },
         {
           "offset": "0x154",
           "name": "PARAM32",
           "width": 32,
-          "readonly": false
+          "readonly": false,
+          "signal": "rcfg_pos_min",
+          "signed": true
         },
         {
           "offset": "0x158",
@@ -13524,14 +13528,16 @@
           "name": "PARAM36",
           "width": 32,
           "readonly": false,
-          "signal": "rserv_target_pulse"
+          "signal": "rserv_target_pulse",
+          "signed": true
         },
         {
           "offset": "0x168",
           "name": "PARAM37",
           "width": 32,
           "readonly": false,
-          "signal": "rserv_step_pulse"
+          "signal": "rserv_step_pulse",
+          "signed": true
         },
         {
           "offset": "0x178",
@@ -15603,14 +15609,16 @@
           "name": "PARAM31",
           "width": 32,
           "readonly": false,
-          "unwired": true
+          "signal": "rcfg_pos_max",
+          "signed": true
         },
         {
           "offset": "0x154",
           "name": "PARAM32",
           "width": 32,
           "readonly": false,
-          "unwired": true
+          "signal": "rcfg_pos_min",
+          "signed": true
         },
         {
           "offset": "0x158",
@@ -15638,14 +15646,16 @@
           "name": "PARAM36",
           "width": 32,
           "readonly": false,
-          "signal": "rserv_target_pulse"
+          "signal": "rserv_target_pulse",
+          "signed": true
         },
         {
           "offset": "0x168",
           "name": "PARAM37",
           "width": 32,
           "readonly": false,
-          "signal": "rserv_step_pulse"
+          "signal": "rserv_step_pulse",
+          "signed": true
         },
         {
           "offset": "0x178",
