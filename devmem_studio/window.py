@@ -666,6 +666,12 @@ class MainWindow(QMainWindow):
             self._last_context = None
             self.rebuild_registers()
 
+    @staticmethod
+    def _component_display_name(comp) -> str:
+        """Human-readable component name for the tree/title: the top label when
+        present, otherwise the instance name (never blank)."""
+        return str(comp.get("label") or comp.get("instance") or comp.get("module_type") or "")
+
     def _canonical_type_key(self, folder: Path) -> str:
         """Map an imported folder onto the catalog's type key (decode folders may rename types)."""
         if self.type_catalog:
@@ -787,7 +793,7 @@ class MainWindow(QMainWindow):
                 # Address lives in the tooltip and the title row; keep list items name-only.
                 # Leading spaces indent level-2 items without a branch column, so the
                 # selection bar still spans the full row (no torn selection).
-                item = QTreeWidgetItem(["        " + comp["label"]])
+                item = QTreeWidgetItem(["        " + self._component_display_name(comp)])
                 item.setData(0, Qt.UserRole, comp)
                 if comp["disabled"]:
                     item.setFlags(Qt.NoItemFlags)
@@ -840,12 +846,12 @@ class MainWindow(QMainWindow):
         if self._busy:
             # Queue the switch; applied when the running task finishes (see _task_finished).
             self._pending_component = comp
-            self.status_left.setText(f"当前任务完成后切换到 {comp['label']}。")
+            self.status_left.setText(f"当前任务完成后切换到 {self._component_display_name(comp)}。")
             return
         self.active_component = comp
         self._highlight_component()
         self.rebuild_registers()
-        self.append_log("SYSTEM", f"已选择组件 {comp['label']}（{comp['module_type']} @ {comp['address']}）。")
+        self.append_log("SYSTEM", f"已选择组件 {self._component_display_name(comp)}（{comp['module_type']} @ {comp['address']}）。")
         if self._can_operate():
             self.read_all()
 
@@ -916,7 +922,7 @@ class MainWindow(QMainWindow):
             restyle(self.base_field)
         self._module_start = start
         context = ("top", comp["module_type"], comp["bias"], base)
-        self.module_title.setText(f"{comp['label']} · 寄存器映射")
+        self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
         if context == self._last_context:

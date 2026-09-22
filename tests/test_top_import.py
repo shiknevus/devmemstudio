@@ -82,6 +82,180 @@ class ParseTopTests(unittest.TestCase):
         self.assertEqual(len(self.info["warnings"]), 1)
         self.assertIn("flow_comp_4", self.info["warnings"][0])
 
+    def test_label_after_dash_run_without_double_dash_separator(self):
+        """Template tops write the label directly after the dash run: -----标签."""
+        text = """// --- flow_comp_1 -----进料1
+    ec_siemens_cnc
+    #(
+         .REG_SPACE_BIAS     ( 20'd25600)
+    )
+    ec_siemens_cnc_1
+    (
+    );
+// --- flow_comp_2 -----河南思睿2#爪
+//    ec_slv_pul_axis
+//    #(
+//         .REG_SPACE_BIAS     ( 20'd26624)
+//    )
+//    ec_slv_pul_axis_2
+//    (
+//    );
+// --- flow_comp_3 -----
+//    ec_1di
+//    #(
+//         .REG_SPACE_BIAS     ( 20'd28160)
+//    )
+//    ec_1di_3
+//    (
+//    );
+"""
+        info = top_import.parse_top(text)
+        components = info["components"]
+        self.assertEqual(len(components), 3)
+        first = components[0]
+        self.assertEqual((first["seq"], first["label"], first["module_type"]),
+                         (1, "进料1", "ec_siemens_cnc"))
+        self.assertFalse(first["disabled"])
+        second = components[1]
+        self.assertEqual((second["label"], second["module_type"], second["disabled"]),
+                         ("河南思睿2#爪", "ec_slv_pul_axis", True))
+        third = components[2]
+        self.assertEqual((third["label"], third["disabled"]), ("ec_1di_3", True))
+        self.assertEqual([c["seq"] for c in components], [1, 2, 3])
+        self.assertEqual(info["warnings"], [])
+
+    def test_empty_header_label_falls_back_to_instance_name(self):
+        """A component whose header carries no label must not render as a blank row:
+        the parser fills the label with the instance name so every consumer
+        (tree, title, export) sees a non-empty name."""
+        text = """// --- flow_comp_32 -----
+//    ec_1di
+//    #(
+//         .REG_SPACE_BIAS     ( 20'd101888)
+//    )
+//    ec_1di_32
+//    (
+//    );
+// --- flow_comp_33 -----
+//    ec_2di
+//    #(
+//         .REG_SPACE_BIAS     ( 20'd102400)
+//    )
+//    ec_2di_33
+//    (
+//    );
+"""
+        info = top_import.parse_top(text)
+        components = info["components"]
+        self.assertEqual(len(components), 2)
+        self.assertEqual([c["label"] for c in components], ["ec_1di_32", "ec_2di_33"])
+        self.assertTrue(all(c["label"] for c in components))
+        self.assertEqual(components[0]["instance"], "ec_1di_32")
+        self.assertEqual(info["warnings"], [])
+
+    def test_double_comment_module_lines_are_still_disabled(self):
+        """Blocks whose module line is nested inside another comment (//    // ec_x) parse as disabled."""
+        text = """// --- flow_comp_125 -----EMCC60背板
+//    // ec_emcc60_board
+//    // #(
+//    //      .REG_SPACE_BIAS     (20'd100864)
+//    // )
+//    // ec_emcc60_board_125
+//    // (
+//    // );
+"""
+        info = top_import.parse_top(text)
+        components = info["components"]
+        self.assertEqual(len(components), 1)
+        comp = components[0]
+        self.assertEqual((comp["label"], comp["module_type"], comp["instance"], comp["disabled"]),
+                         ("EMCC60背板", "ec_emcc60_board", "ec_emcc60_board_125", True))
+        self.assertEqual(comp["bias"], 100864)
+        self.assertEqual(info["warnings"], [])
+
+    def test_stale_reference_name_does_not_shadow_real_ec_component(self):
+        """A nested comment reference (//    // ec_x) must not win over the real ec_* instantiation.
+
+        Template tops carry an outdated reference template followed by the actual
+        module below it; the ec_* declaration at the shallowest comment depth is
+        the real component."""
+        text = """// --- flow_comp_27 -----河南思睿1#爪RFID读写一
+//    // ec_sp_rfid
+//    // #(
+//    //      .REG_SPACE_BIAS     (20'd54272)
+//    // )
+//    // ec_sp_rfid_27
+//    // (
+//    // );
+//
+ec_superisys_485_modbus_rtu
+#(
+    //  .REG_SPACE_BIAS         (20'd54272                ), //寄存器地址
+    .REG_SPACE_BIAS         (20'h3000                 ), //寄存器地址
+    .REG_SPACE_SIZE         (\`REG_SPACE_SIZE          ), //地址偏移
+    .CLK_FREQ               (156250000                )
+)
+ec_superisys_485_modbus_rtu_27
+(
+    .clk_i                  ( clk                     ),
+    .rst                    ( reset                   ),
+    .ps_reg_clk             ( ps_reg_clk              ),
+    .ps_reg_reset           ( ps_reg_reset            ),
+    .i_st_wr_en             ( ps_reg_we               ),
+    .i_st_wr_addr           ( ps_reg_addr             ),
+    .i_st_rd_en             ( ps_reg_re               ),
+    .i_st_rd_addr           ( ps_reg_rd_addr          )
+);
+"""
+        info = top_import.parse_top(text)
+        components = info["components"]
+        self.assertEqual(len(components), 1)
+        comp = components[0]
+        self.assertEqual((comp["label"], comp["module_type"], comp["instance"], comp["disabled"]),
+                         ("河南思睿1#爪RFID读写一", "ec_superisys_485_modbus_rtu",
+                          "ec_superisys_485_modbus_rtu_27", False))
+        self.assertEqual(comp["bias"], 0x3000)
+        self.assertEqual(info["warnings"], [])
+
+    def test_hidden_comment_reference_only_block_stays_disabled(self):
+        """Reference-only blocks (nested // + real commented ec_* at depth 1) stay disabled
+        but still report the real ec_* module name instead of the stale reference."""
+        text = """// --- flow_comp_26 -----回库交换平台_RFID读写一
+//    // ec_sp_rfid
+//    // #(
+//    //      .REG_SPACE_BIAS     (20'd56320)
+//    // )
+//    // ec_sp_rfid_26
+//    // (
+//    // );
+//
+//ec_superisys_485_modbus_rtu
+//#(
+//        .REG_SPACE_BIAS         (20'd56320                ), //寄存器地址
+//        .REG_SPACE_SIZE         (\`REG_SPACE_SIZE          ),
+//        .CLK_FREQ               (156250000                )
+//)
+//ec_superisys_485_modbus_rtu_26
+//(
+//        .clk_i                  ( clk                     ),
+//        .rst                    ( reset                   ),
+//        .ps_reg_clk             ( ps_reg_clk              ),
+//        .ps_reg_reset           ( ps_reg_reset            ),
+//        .i_st_wr_en             ( ps_reg_we               ),
+//        .i_st_wr_addr           ( ps_reg_addr             ),
+//        .i_st_rd_en             ( ps_reg_re               ),
+//        .i_st_rd_addr           ( ps_reg_rd_addr          )
+//);
+"""
+        info = top_import.parse_top(text)
+        components = info["components"]
+        self.assertEqual(len(components), 1)
+        comp = components[0]
+        self.assertEqual((comp["module_type"], comp["instance"], comp["disabled"]),
+                         ("ec_superisys_485_modbus_rtu", "ec_superisys_485_modbus_rtu_26", True))
+        self.assertEqual(comp["bias"], 56320)
+        self.assertEqual(info["warnings"], [])
+
 
 class ComponentsParamTests(unittest.TestCase):
     def test_locates_param_file_and_base_address(self):

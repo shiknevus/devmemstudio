@@ -14,10 +14,10 @@ REG_GRID_START = 0x800
 REG_GRID_STEP = 0x200
 CATALOG_RELPATH = "devmem_studio/data/component_catalog.json"
 
-_HEADER = re.compile(r"^\s*//\s*(?:/\s*)*-{3,}\s*flow_comp_(\d+)\s*--(.*?)-{3,}\s*$", re.M)
+_HEADER = re.compile(r"^[ \t]*//[ \t]*(?:/[ \t]*)*-{3,}[ \t]*flow_comp_(\d+)(?:[ \t]+\-+)*[ \t]*(.*?)[ \t]*\-*[ \t\r]*$", re.M)
 _BIAS = re.compile(r"\.REG_SPACE_BIAS\s*\(\s*\d+'([dh])\s*([0-9a-fA-F_]+)")
 _BASE_ADDR = re.compile(r"PL_CFG_BASE_ADDR[^\n]*?32'h([0-9a-fA-F]+(?:_[0-9a-fA-F]+)*)")
-_IDENTIFIER = re.compile(r"^\s*(?://\s*)?([A-Za-z_]\w*)\s*$")
+_IDENTIFIER = re.compile(r"^\s*(?://\s*)*([A-Za-z_]\w*)\s*$")
 
 # Common header plus A/B/C channels; used when the type has no generated table.
 FALLBACK_REGISTERS = [
@@ -102,30 +102,74 @@ def _decode_verilog_number(radix: str, digits: str) -> int:
     return int(digits.replace("_", ""), 16 if radix == "h" else 10)
 
 
+def _comment_depth(line: str) -> int:
+    """Comment nesting depth: 0 = code, 1 = // line, 2 = // inside //, etc."""
+    depth = 0
+    rest = line.lstrip()
+    while rest.startswith("//"):
+        depth += 1
+        rest = rest[2:].lstrip()
+    return depth
+
+
 def parse_top(text: str) -> dict:
-    """Extract flow components from a mix-top source text."""
+    """Extract flow components from a mix-top source text.
+
+    Each flow_comp block may carry a nested comment reference template plus the
+    real ``ec_*`` instantiation below it. The component is the ``ec_*`` module
+    declaration at the shallowest comment depth (0 = active code, >0 = commented
+    reference), so stale reference names never shadow the real module type.
+    """
     components, warnings = [], []
     headers = list(_HEADER.finditer(text))
     for position, header in enumerate(headers):
-        end = headers[position + 1].start() if position + 1 < len(headers) else min(header.end() + 200, len(text))
+        if position + 1 < len(headers):
+            end = headers[position + 1].start()
+        else:
+            tail = text.find("endmodule", header.end())
+            end = min(tail if tail != -1 else len(text), header.end() + 4000)
         block = text[header.end():end]
         seq = int(header.group(1))
         label = header.group(2).strip()
-        module_type = instance = None
+        nonempty = [line for line in block.splitlines() if line.strip()]
+        by_depth: dict[int, list] = {}
+        for line in nonempty:
+            by_depth.setdefault(_comment_depth(line), []).append(line)
+        source = None
         disabled = False
+        for depth in sorted(by_depth):
+            identifiers = [match.group(1) for line in by_depth[depth]
+                           if (match := _IDENTIFIER.match(line)) and match.group(1).startswith("ec_")]
+            if identifiers:
+                source = by_depth[depth]
+                disabled = depth > 0
+                break
+        if source is None:
+            source = nonempty  # block without any ec_* declaration: report as-is
+        module_type = instance = None
         bias = None
-        for line in block.splitlines():
+        for line in source:
             if bias is None:
                 found = _BIAS.search(line)
                 if found:
                     bias = _decode_verilog_number(found.group(1), found.group(2))
             if module_type is None or instance is None:
                 candidate = _IDENTIFIER.match(line)
-                if candidate:
-                    commented = line.lstrip().startswith("//")
+                if candidate and candidate.group(1).startswith("ec_"):
                     if module_type is None:
-                        module_type, disabled = candidate.group(1), commented
+                        module_type = candidate.group(1)
                     else:
+                        instance = candidate.group(1)
+        if module_type is None:
+            # No ec_* name anywhere (e.g. only a bias line): fall back to any identifier.
+            for line in source:
+                if module_type is None:
+                    candidate = _IDENTIFIER.match(line)
+                    if candidate:
+                        module_type = candidate.group(1)
+                elif instance is None:
+                    candidate = _IDENTIFIER.match(line)
+                    if candidate:
                         instance = candidate.group(1)
         if module_type is None or bias is None:
             warnings.append(f"flow_comp_{seq} 结构不完整，已跳过。")
@@ -136,8 +180,11 @@ def parse_top(text: str) -> dict:
         else:
             warnings.append(f"flow_comp_{seq} 偏移 0x{bias:X} 不在 0x800+i*0x200 网格上。")
         code = label.split("_", 1)[0] if re.match(r"^[A-Z0-9]+_", label) else ""
+        instance = instance or f"{module_type}_{seq}"
+        if not label:
+            label = instance  # no header label: show the instance name instead of a blank row
         components.append({"seq": seq, "label": label, "code": code, "module_type": module_type,
-                           "instance": instance or f"{module_type}_{seq}", "bias": bias,
+                           "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index, "disabled": disabled,
                            "line": text.count("\n", 0, header.start()) + 1})
     return {"components": components, "warnings": warnings}
