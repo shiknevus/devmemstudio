@@ -142,6 +142,43 @@ class HarvestTests(unittest.TestCase):
         self.assertNotIn("PARAM4", result["signals"])    # commented-out connection
         self.assertNotIn("PARAM7", result["signals"])    # commented-out port
 
+    def test_pulse_target_signal_signed_without_signed_port(self):
+        # 电机的 rserv_target_pulse 端口虽未声明 input signed，但 RTL 内部按有符号
+        # 处理（s_move_tgt = rserv_target_pulse 转 signed），目录必须标记 signed。
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "include_files").mkdir(parents=True, exist_ok=True)
+            (root / "include_files/reg_addr_pl.vh").write_text(
+                "`define PARAM36 9'h164\n" + "`define PARAM37 9'h168\n", encoding="utf-8")
+            component = root / "emcc_ctrl" / "pl_exe_io" / "ec_uut"
+            component.mkdir(parents=True, exist_ok=True)
+            (component / "ps_rw_pl_reg_uut.sv").write_text(
+                "module ps_rw_pl_reg_uut #(parameter REG_SPACE_BIAS = 2000, parameter REG_SPACE_SIZE = 512)(\n"
+                "    input wr_task_vld, input [8:0] wr_task_addr, input [31:0] i_st_wr_data,\n"
+                "    input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+                "    reg [31:0] param36; reg [31:0] param37;\n"
+                "    always @(*) case (rd_addr_d2) `PARAM36: o_st_rd_data = param36;\n"
+                "        `PARAM37: o_st_rd_data = param37; default: o_st_rd_data = 32'd0; endcase\n"
+                "endmodule\n", encoding="utf-8")
+            (component / "ec_uut.sv").write_text(
+                "module ec_uut();\n"
+                "    ps_rw_pl_reg_uut u_reg(\n"
+                "        .param36 (param36)\n"
+                "        ,.param37 (param37)\n"
+                "    );\n"
+                "    slv_pul_axis u_axis(\n"
+                "        .rserv_target_pulse (param36)\n"
+                "        ,.rserv_step_pulse (param37)\n"
+                "    );\n"
+                "endmodule\n", encoding="utf-8")
+            # 无 input signed 端口：harvest_signed_signals 抓不到，需 PULSE_SIGNED_SIGNALS 兜底。
+            entry, info = gen.parse_component_folder(component)
+        names = {item["name"]: item for item in entry["registers"]}
+        self.assertEqual(names["PARAM36"]["signal"], "rserv_target_pulse")
+        self.assertTrue(names["PARAM36"]["signed"])
+        self.assertEqual(names["PARAM37"]["signal"], "rserv_step_pulse")
+        self.assertTrue(names["PARAM37"]["signed"])
+
     def test_find_top_file_matches_underscore_variants(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -283,7 +283,7 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
             item["signal"] = signal
             # A register fed by a signed wire displays as two's complement in DEC.
             roots = [part.split("[")[0] for part in signal.split("/")]
-            if any(root in signed_names for root in roots):
+            if any(root in signed_names or root in PULSE_SIGNED_SIGNALS for root in roots):
                 item["signed"] = True
         elif item["name"].startswith("PARAM") and item["name"][5:] not in wired:
             item["unwired"] = True
@@ -305,6 +305,9 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
 
 
 SIGNED_PORT = re.compile(r"\b(?:input|output)\s+(?:wire|reg)?\s*signed\s*\[[^\]]*\]\s*([A-Za-z_]\w*)")
+# 脉冲域位置族信号：RTL 内部按有符号处理（如 s_move_tgt = rserv_target_pulse
+# 转 signed），即使端口声明省略 signed 关键字也应按补码显示。
+PULSE_SIGNED_SIGNALS = {"rserv_target_pulse", "rserv_step_pulse"}
 
 
 def harvest_signed_signals(folder: Path) -> set[str]:

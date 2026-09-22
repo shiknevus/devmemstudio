@@ -1482,8 +1482,20 @@ class MainWindow(QMainWindow):
     def _start_bit_upload(self, local_path, remote_dir):
         if self._closing or self._busy or not self.connected:
             return
+        if not str(local_path).lower().endswith(".bit"):
+            QMessageBox.warning(self.bit_dialog, "文件类型错误", "选中文件不是bit文件，请选择 .bit 文件。")
+            return
         if not Path(local_path).is_file():
             QMessageBox.warning(self.bit_dialog, "上传失败", f"找不到文件：{local_path}")
+            return
+        try:
+            bit_date = datetime.fromtimestamp(Path(local_path).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except OSError:
+            bit_date = "未知"
+        answer = QMessageBox.question(self.bit_dialog, "确认上传bit",
+                                      f"{local_path}\n文件日期：{bit_date}\n\n确定上传？",
+                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
             return
         self.bit_dialog.upload_button.setEnabled(False)
         self.bit_dialog.set_reset()

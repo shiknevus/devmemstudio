@@ -986,6 +986,80 @@ class TopImportUiTests(UiTests):
         self.assertEqual(dialog.status.text(), "")
         self.window.close()
 
+    def test_bit_upload_set_path_rejects_non_bit(self):
+        # Strict suffix check: a non-.bit file must be rejected with a warning.
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        bad = Path(self.temp.name) / "firmware.bin"
+        bad.write_bytes(b"\x00" * 64)
+        with patch("devmem_studio.dialogs.QMessageBox.warning") as warn:
+            dialog.set_path(str(bad))
+        self.assertEqual(dialog._local_path, None)
+        self.assertEqual(dialog.path_label.text(), "未选择文件")
+        self.assertEqual(warn.call_args.args[1], "文件类型错误")
+        self.assertIn("选中文件不是bit文件", warn.call_args.args[2])
+        # Case-insensitive: uppercase .BIT still accepted.
+        good = Path(self.temp.name) / "fw.BIT"
+        good.write_bytes(b"\x00" * 64)
+        dialog.set_path(str(good))
+        self.assertEqual(dialog._local_path, str(good))
+        self.window.close()
+
+    def test_bit_upload_start_upload_rejects_non_bit(self):
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        bad = Path(self.temp.name) / "firmware.bin"
+        bad.write_bytes(b"\x00" * 64)
+        dialog._local_path = str(bad)
+        with patch("devmem_studio.dialogs.QMessageBox.warning") as warn:
+            with patch.object(dialog, "upload_requested") as emitted:
+                dialog.start_upload()
+        self.assertEqual(warn.call_args.args[1], "文件类型错误")
+        self.assertIn("选中文件不是bit文件", warn.call_args.args[2])
+        emitted.emit.assert_not_called()
+        self.window.close()
+
+    def test_bit_upload_confirms_path_and_date_before_start(self):
+        # Clicking 上传 asks 确认上传bit with the path + local file date; No cancels.
+        bit = Path(self.temp.name) / "confirm.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        dialog.set_path(str(bit))
+        from datetime import datetime
+        mtime = datetime.fromtimestamp(bit.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        with patch("devmem_studio.window.QMessageBox.question",
+                   return_value=QMessageBox.No) as question, \
+             patch.object(self.window.session, "upload_bitfile") as upload:
+            dialog.start_upload()
+        self.assertEqual(question.call_args.args[1], "确认上传bit")
+        self.assertIn(str(bit), question.call_args.args[2])
+        self.assertIn(mtime, question.call_args.args[2])
+        self.assertIn("确定上传", question.call_args.args[2])
+        upload.assert_not_called()
+        self.assertFalse(self.window._busy)   # cancelled, no worker started
+        self.window.close()
+
+    def test_bit_upload_proceeds_after_confirm_yes(self):
+        bit = Path(self.temp.name) / "confirm_yes.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        dialog = self.window.bit_dialog
+        dialog.set_path(str(bit))
+        with patch("devmem_studio.window.QMessageBox.question",
+                   return_value=QMessageBox.Yes), \
+             patch.object(self.window.session, "upload_bitfile") as upload:
+            dialog.start_upload()
+            self.settle(lambda: not self.window._busy)
+        upload.assert_called_once()
+        self.assertEqual(upload.call_args.args[0], str(bit))
+        self.assertTrue(dialog.upload_button.isEnabled())
+        self.window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
