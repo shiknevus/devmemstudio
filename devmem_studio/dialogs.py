@@ -350,6 +350,10 @@ class BitUploadDialog(QDialog):
         self.progress.setValue(0)
 
     def set_path(self, path):
+        """Accept a selected/dropped/pasted bit path. Strictly requires the .bit suffix."""
+        if not str(path).lower().endswith(".bit"):
+            QMessageBox.warning(self, "文件类型错误", "选中文件不是bit文件，请选择 .bit 文件。")
+            return
         self._local_path = path
         self.path_label.setText(path)
         self.path_label.setToolTip(path)
@@ -412,8 +416,12 @@ class BitUploadDialog(QDialog):
                 break
 
     def start_upload(self):
-        if self._local_path:
-            self.upload_requested.emit(self._local_path, self.remote_dir.text().strip() or "/run/media/sda")
+        if not self._local_path:
+            return
+        if not str(self._local_path).lower().endswith(".bit"):
+            QMessageBox.warning(self, "文件类型错误", "选中文件不是bit文件，请选择 .bit 文件。")
+            return
+        self.upload_requested.emit(self._local_path, self.remote_dir.text().strip() or "/run/media/sda")
 
 
 class BitRollbackDialog(QDialog):
