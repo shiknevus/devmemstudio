@@ -27,7 +27,7 @@ def main():
         for filename in ('msyh.ttc', 'msyhbd.ttc', 'consola.ttf', 'consolab.ttf', 'bahnschrift.ttf', 'seguisym.ttf'):
             if (fonts / filename).exists():
                 QFontDatabase.addApplicationFont(str(fonts / filename))
-    app.setApplicationName('寄存器调试工作台')
+    app.setApplicationName('DevmemStudio')
     app.setApplicationVersion(__version__)
     app.setOrganizationName('DevmemStudio')
     app.setStyle('Fusion')

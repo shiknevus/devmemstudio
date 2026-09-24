@@ -11,6 +11,7 @@ COLORS = {"chassis": "#142635", "surface": "#FFFFFF", "alloy": "#EFF3F7",
 PATHS = {
     "chip": '<rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4M9 14v-4h6v4"/>',
     "connect": '<path d="M8 3v4m8-4v4M6 7h12v3a6 6 0 0 1-12 0V7zm6 9v5"/>',
+    "disconnect": '<path d="M8 3v4m8-4v4M6 7h12v3a6 6 0 0 1-12 0V7zm6 9v5"/><path d="m4 4 16 16"/>',
     "axis": '<path d="M5 19V5m0 14h14M2 8l3-3 3 3m8 8 3 3-3 3M9 15l4-7 3 4 5-7"/>',
     "io": '<path d="M3 7h18M3 17h18"/><circle cx="8" cy="7" r="3" fill="{color}"/><circle cx="16" cy="17" r="3" fill="{color}"/>',
     "bus": '<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><path d="M6 9v9h9m3-3V6H9"/>',
@@ -29,6 +30,7 @@ PATHS = {
     "up": '<path d="m5 15 7-7 7 7"/>',
     "down": '<path d="m5 9 7 7 7-7"/>',
     "eye": '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+    "eyeOff": '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="m4 4 16 16"/>',
 }
 
 
@@ -54,9 +56,20 @@ QScrollArea#sidebarScroll QScrollBar::handle:vertical { background: #3A5468; }
 QWidget#sidebar QLabel { color: #ACBCCB; background: transparent; }
 QWidget#sidebar QLabel#brand { color: white; font-family: "Microsoft YaHei UI"; font-size: 20px; font-weight: 600; }
 QWidget#sidebar QLabel#sideCaption { color: #8097AA; font-size: 11px; }
-QWidget#sidebar QLineEdit, QWidget#sidebar QSpinBox { background: #203747; color: #EBF1F8; border: 1px solid #365061; border-radius: 5px; min-height: 30px; padding: 0 9px; selection-background-color: #2463DC; }
+QWidget#sidebar QLineEdit, QWidget#sidebar QSpinBox { background: #203747; color: #EBF1F8; border: 1px solid #365061; border-radius: 5px; min-height: 30px; max-height: 30px; padding: 0 9px; selection-background-color: #2463DC; }
 QWidget#sidebar QLineEdit:focus, QWidget#sidebar QSpinBox:focus { border-color: #74A7F5; }
 QWidget#sidebar QLineEdit:disabled, QWidget#sidebar QSpinBox:disabled { color: #839AAB; background: #1C303F; }
+/* The IP-address group: one bordered box wrapping four octets and dots.
+   Match the sidebar QLineEdit height (30px) so the field lines up with its peers. */
+QWidget#sidebar IpAddressField { background: #203747; border: 1px solid #365061; border-radius: 5px; min-height: 30px; max-height: 30px; padding: 0; }
+QWidget#sidebar IpAddressField[focused="true"] { border-color: #74A7F5; }
+QWidget#sidebar IpAddressField:disabled { background: #1C303F; }
+QWidget#sidebar QLineEdit#ipOctet { background: transparent; border: none; min-height: 22px; max-height: 22px; padding: 0; }
+QWidget#sidebar QLabel#ipDot { background: transparent; color: #ACBCCB; font-size: 13px; }
+/* Sidebar combos keep the light combo form; their embedded edit must not pick
+   up the dark sidebar QLineEdit style (the id selector would otherwise win). */
+QWidget#sidebar QComboBox QLineEdit { background: transparent; border: none; padding: 0; min-height: 0; color: #23374A; }
+QWidget#sidebar QComboBox QLineEdit:disabled { color: #91A0B0; }
 QWidget#sidebar QCheckBox { color: #ACBCCB; font-size: 11px; }
 QWidget#sidebar QPushButton#demo { background: transparent; color: #ACBDD0; border: 1px solid #3B5264; }
 QWidget#sidebar QPushButton#demo:hover { background: #233D50; color: white; }
@@ -89,9 +102,13 @@ QLineEdit:disabled, QSpinBox:disabled, QComboBox:disabled { background: #F1F4F7;
 QLineEdit[invalid="true"] { border-color: #C44848; background: #FFF7F7; }
 QLineEdit:read-only { background: #F7F9FC; color: #5E7387; }
 QComboBox { padding-right: 22px; }
+/* Editable combos: the embedded QLineEdit must not draw its own box, or the
+   combo looks like a field nested inside a field. Same form as the plain ones. */
+QComboBox QLineEdit { background: transparent; border: none; padding: 0; min-height: 0; selection-background-color: #DCE9FF; }
 QComboBox::drop-down { width: 22px; border: none; }
 QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #7B8EA0; width: 0; height: 0; }
 QComboBox QAbstractItemView { background: white; selection-background-color: #E5EEFC; selection-color: #2463DC; border: 1px solid #D5DEE7; padding: 4px; }
+QComboBox QAbstractItemView::item { padding: 2px 8px; min-height: 19px; }
 QSpinBox::up-button, QSpinBox::down-button { width: 0; }
 QPushButton { background: white; border: 1px solid #D5DEE7; border-radius: 5px; min-height: 30px; padding: 0 12px; font-weight: 500; }
 QPushButton:hover { border-color: #94B4E9; background: #F1F6FF; color: #2463DC; }
@@ -104,6 +121,7 @@ QPushButton#primary:pressed { background: #1748A7; }
 QPushButton#primary:disabled { background: #A7BFEB; border-color: #A7BFEB; color: #F8FAFF; }
 QPushButton#danger { color: #B64242; border-color: #E8C3C3; background: #FFF8F8; }
 QPushButton#danger:hover { background: #FBE7E7; }
+QPushButton#danger:pressed { background: #F5D8D8; }
 QPushButton#flat { background: transparent; border: 1px solid transparent; color: #657C91; min-height: 26px; padding: 0 8px; }
 QPushButton#flat:hover { background: #E9F0FA; color: #2463DC; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #718397; min-height: 28px; padding: 0 11px; }
@@ -135,8 +153,11 @@ QProgressBar#bitProgress { max-height: 4px; }
 QProgressBar#bitProgress::chunk { border-radius: 2px; }
 QCheckBox { spacing: 6px; }
 QCheckBox::indicator { width: 13px; height: 13px; border: 1px solid #A6B6C6; border-radius: 3px; background: white; }
-QCheckBox::indicator:checked { background: #2463DC; border: 3px solid #B0CCF8; }
+QCheckBox::indicator:checked { background: #2463DC; border: 1px solid #2463DC; }
 QCheckBox::indicator:disabled { background: #E5EBF2; border-color: #CAD5E0; }
+/* Checked-while-disabled (fields lock during a connection): keep a muted-blue
+   fill so the stored check state stays visible instead of looking cleared. */
+QCheckBox::indicator:checked:disabled { background: #A7BFEB; border: 1px solid #A7BFEB; }
 QStatusBar { background: white; color: #738598; border-top: 1px solid #DEE5EC; min-height: 27px; }
 QStatusBar::item { border: none; }
 QStatusBar QLabel { color: #738598; font-size: 11px; }

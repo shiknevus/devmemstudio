@@ -85,7 +85,7 @@ def run_smoke(app, directory: Path):
         check(not window.connected and not window.read_all_button.isEnabled(), "Offline controls disabled")
         check(not window.component_mode and window.regs == [], "Empty register state before a component is chosen")
         window.grab().save(str(directory / "offline.png"))
-        window.session = DemoSession(window.bridge.message.emit)
+        window.session = DemoSession(window._log_emit("ssh"))
         window.session.connect()
         window._set_connection(True)
         settle()
@@ -99,7 +99,8 @@ def run_smoke(app, directory: Path):
         check(window.component_tree.topLevelItemCount() == 3, "Imported components grouped by module type")
         check(not window.component_mode, "Import alone does not select a component")
         window.read_all()
-        check("选择组件" in window.status_left.text(), "Reading without a component gives a hint")
+        check(any("选择组件" in text for _, _, text in window.log_records_system),
+              "Reading without a component gives a hint in the system terminal")
         check(window.base_field.isEnabled() and window.base_field.text().lower() == "0xb0100000",
               "Base address stays editable and defaults sanely without components_param.vh")
         target = next(item for item in window.top_info["components"] if not item["disabled"]
@@ -237,10 +238,10 @@ def run_smoke(app, directory: Path):
         settle(lambda: not window._busy and window.cache_key == old_key)
         check(next(r for r in window.regs if r["name"] == "A_TX_OT")["_draft"] == "2A",
               "Per-component write cache restored")
-        window.command.setText("b0100800")
-        window.hex_read_button.click()
+        window.send_command("devmem 0xb0100800")
         settle(lambda: not window._busy)
-        check(window.command.text() == "devmem 0xb0100800", "Quick HEX read")
+        check(any(message == "devmem 0xb0100800" for _, _, message in window.log_records_ssh),
+              "Terminal command read (devmem 0xb0100800) runs over SSH")
         before = window.read_count
         window.poll_check.setChecked(True)
         settle(lambda: window.read_count > before and not window._busy)
@@ -250,80 +251,50 @@ def run_smoke(app, directory: Path):
         window.cancel_task()
         settle(lambda: not window._busy)
         check(window.cancel.is_set(), "Batch cancellation")
-        window.board_log_button.click()
-        check(window.board_log.isVisible() and window.board_log.windowModality() == Qt.NonModal
-              and bool(window.board_log.windowFlags() & Qt.Window),
-              "One click opens a nonmodal log window with minimize and maximize")
-        check(not window._busy and window.read_all_button.isEnabled(), "Log startup leaves register controls available")
-        settle(lambda: window._stream_state == "running" and "DEMO" in window.board_log.text.toPlainText())
+        # No auto-jump: the console stays on system after connecting; sunny.log
+        # auto-tails in the background regardless of the visible source.
+        check(window.console_source == "system" and window._stream_state == "running",
+              "Console stays on system after connect while sunny.log auto-tails")
+        window._set_console_source("log")
+        settle(lambda: "DEMO" in window.console.toPlainText())
         check(any(level == "CMD" and message == "tail -f /run/media/sda/sunny.log"
                   for _, level, message in window.log_records), "Print logs sends the exact tail command automatically")
+        check(not window._busy and window.read_all_button.isEnabled(), "Log startup leaves register controls available")
         window.read_selected()
         settle(lambda: not window._busy)
-        check("DEMO" in window.board_log.text.toPlainText(), "Concurrent register reads and board log stream")
-        board_log = window.board_log
-        error_block = board_log.text.document().findBlockByNumber(4)
-        check("ERROR" in error_block.text() and any(span.format.foreground().color().name() == "#ff8e94"
-              for span in error_block.layout().formats()), "Live log error severity is highlighted")
-        check(board_log.wrap.isChecked() and board_log.show_line_numbers.isChecked()
-              and board_log.text.lineWrapMode() == QPlainTextEdit.WidgetWidth
-              and board_log.text.line_numbers.isVisible(), "Log wrapping and line numbers are enabled by default")
-        board_log.search.setText("axis")
-        settle(lambda: not board_log.search_timer.isActive() and board_log.text.current_match.hasSelection())
-        first_match = board_log.text.current_match.selectionStart()
-        board_log.next_button.click()
-        check(board_log.text.current_match.selectionStart() > first_match, "Log search jumps to next match")
-        board_log.previous_button.click()
-        check(board_log.text.current_match.selectionStart() == first_match, "Log search jumps to previous match")
-        check(not board_log.follow.isChecked(), "Searching live logs pauses scrolling while continuing to receive")
+        check("DEMO" in window.console.toPlainText(), "Concurrent register reads and board log stream")
+        check(window.log_wrap.isChecked() and window.console.lineWrapMode() == QPlainTextEdit.WidgetWidth,
+              "Log wrapping is enabled by default")
+        window.log_search.setText("axis")
+        window._find_in_log(forward=True)
+        settle(lambda: window.console.textCursor().hasSelection())
+        check("axis" in window.console.textCursor().selectedText(), "Log search finds and selects the query")
+        first_match = window.console.textCursor().selectionStart()
+        window._find_in_log(forward=True)
+        settle(lambda: window.console.textCursor().selectionStart() > first_match)
+        check(window.console.textCursor().selectionStart() > first_match, "Log search jumps to next match")
+        window._find_in_log(forward=False)
+        check(window.console.textCursor().selectionStart() == first_match, "Log search jumps to previous match")
         long_line = "INFO [DEMO] axis 长日志自动换行演示 · 连续采样数据 payload=0x" + "A17B23CC" * 40 + " · 查询期间仍在接收日志"
-        long_line_number = board_log.text.blockCount()
-        board_log.append(long_line + "\n")
-        settle(lambda: not board_log.text._count_timer.isActive())
-        check(board_log.text.current_match.selectionStart() == first_match, "Incoming log data preserves the current match")
-        long_block = board_log.text.document().findBlockByNumber(long_line_number - 1)
-        check(long_block.text() == long_line and long_block.layout().lineCount() > 1
-              and board_log.text.horizontalScrollBar().maximum() == 0,
-              "Long unbroken payload wraps without changing original log lines")
-        board_log.wrap.setChecked(False)
+        window._append_log_stream(long_line + "\n")
+        settle(lambda: not window._busy)
+        # Locate the just-appended long block by its payload marker; its block number
+        # shifts as setMaximumBlockCount trims, so search rather than index.
+        doc = window.console.document()
+        long_block = doc.begin()
+        while long_block.isValid() and "payload=0x" not in long_block.text():
+            long_block = long_block.next()
+        check(long_block.isValid() and long_block.layout().lineCount() > 1
+              and window.console.horizontalScrollBar().maximum() == 0,
+              "Long unbroken payload wraps without a horizontal scrollbar")
+        window.log_wrap.setChecked(False)
         settle()
-        check(long_block.layout().lineCount() == 1 and board_log.text.horizontalScrollBar().maximum() > 0
-              and board_log.text.current_match.selectionStart() == first_match and not board_log.follow.isChecked(),
-              "Disabling log wrap preserves the current search and follow state")
-        board_log.wrap.setChecked(True)
-        board_log.show_line_numbers.setChecked(False)
-        settle()
-        hidden_margin = board_log.text.viewportMargins().left()
-        board_log.show_line_numbers.setChecked(True)
-        settle()
-        check(hidden_margin == 0 and board_log.text.line_numbers.isVisible()
-              and board_log.text.viewportMargins().left() == board_log.text.line_numbers.width()
-              and board_log.text.current_match.selectionStart() == first_match,
-              "Line number toggle restores the gutter without changing search")
-        board_log.line_number.setValue(long_line_number)
-        board_log.jump_button.click()
-        check(board_log.text.textCursor().block().text() == long_line,
-              "Line jump locates a wrapped log by its original line number")
-        board_log.line_number.setValue(3)
-        board_log.jump_button.click()
-        check(board_log.text.textCursor().blockNumber() == 2, "Log line number jump")
-        board_log.next_button.click()
-        window.board_log.grab().save(str(directory / "board-log.png"))
-        board_log.resize(940, 540)
-        settle()
-        check(all(board_log.rect().contains(control.mapTo(board_log, control.rect().bottomRight()))
-                  for control in (board_log.search, board_log.next_button, board_log.jump_button, board_log.line_count,
-                                  board_log.wrap, board_log.show_line_numbers)),
-              "Compact log window keeps search, navigation and display controls visible")
-        check(board_log.text.line_numbers.geometry().right() + 1 == board_log.text.viewport().geometry().left()
-              and board_log.text.line_numbers.geometry().top() == board_log.text.viewport().geometry().top()
-              and board_log.text.line_numbers.height() == board_log.text.viewport().height(),
-              "Line number gutter stays aligned with the log viewport after resizing")
-        board_log.grab().save(str(directory / "board-log-compact.png"))
-        board_log.latest_button.click()
-        check(board_log.follow.isChecked() and board_log.text.verticalScrollBar().value() == board_log.text.verticalScrollBar().maximum(),
-              "Return to latest resumes live log following")
-        window.board_log.close()
+        check(long_block.layout().lineCount() == 1 and window.console.horizontalScrollBar().maximum() > 0,
+              "Disabling log wrap exposes the horizontal scrollbar")
+        window.log_wrap.setChecked(True)
+        window.console.grab().save(str(directory / "board-log.png"))
+        window._stop_stream()
+        settle(lambda: window._stream_state == "stopped")
         check(window.session.alive and window.read_all_button.isEnabled(), "Closing logs preserves the register session")
         data = list(csv.reader(io.StringIO(window.snapshot_csv())))
         check(len(data) == len(window.regs) + 1 and data[1][0] == "离线演示", "CSV snapshot with honest demo provenance")
