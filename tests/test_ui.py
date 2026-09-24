@@ -178,9 +178,13 @@ class UiTests(unittest.TestCase):
             self.settle(lambda: self.window._serial_busy)
             self.assertTrue(self.window.progress.isVisible())
             self.assertEqual(self.window.progress.maximum(), 0)   # 0..0 = indeterminate
+            self.assertIn("连接中", self.window.com_badge.text())
+            self.assertEqual(self.window.com_badge.property("state"), "connecting")
             release.set()
             self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
         self.assertTrue(self.window.progress.isHidden())
+        self.assertIn("已连接", self.window.com_badge.text())
+        self.assertEqual(self.window.com_badge.property("state"), "connected")
 
     def test_irq_report_inspector_tooltips_and_export_use_requested_formats(self):
         samples = {

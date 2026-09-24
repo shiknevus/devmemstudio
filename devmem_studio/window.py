@@ -184,7 +184,6 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(main)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        main_layout.addWidget(self._build_header())
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(22, 18, 22, 14)
@@ -322,38 +321,6 @@ class MainWindow(QMainWindow):
         scroll.setWidget(side)
         return scroll
 
-    def _build_header(self):
-        header = QFrame()
-        header.setObjectName("header")
-        header.setFixedHeight(64)
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(24, 12, 24, 12)
-        layout.addStretch()
-        self.target_label = label("等待建立设备会话", "muted")
-        layout.addWidget(self.target_label)
-        layout.addSpacing(10)
-        # Two independent status badges so each connection's state is visible at a glance.
-        self.ssh_badge = label("", "badge")
-        layout.addWidget(self.ssh_badge)
-        self.com_badge = label("", "badge")
-        layout.addWidget(self.com_badge)
-        # Freeze each badge at its widest state text so 离线/已连接 toggles never
-        # change the badge size (which would shift the header layout).
-        ssh_variants = [self._badge_dot(s) + t for s, t in
-                        (("offline", "SSH 离线"), ("connected", "SSH 已连接"),
-                         ("demo", "SSH 演示"), ("connecting", "SSH 连接中"))]
-        com_variants = [self._badge_dot("offline") + "serial 离线",
-                        self._badge_dot("connected") + "serial 已连接"]
-        for badge, variants in ((self.ssh_badge, ssh_variants), (self.com_badge, com_variants)):
-            for text in variants:
-                badge.setText(text)
-                badge.setMinimumWidth(max(badge.minimumWidth(), badge.sizeHint().width()))
-            badge.setFixedWidth(badge.minimumWidth())
-        self._update_connection_badge()
-        layout.addSpacing(8)
-        layout.addWidget(button("使用指南", lambda: show_help(self), "flat", "help"))
-        return header
-
     def _build_register_area(self):
         panel = QWidget()
         panel.setMinimumHeight(290)
@@ -376,9 +343,36 @@ class MainWindow(QMainWindow):
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
         self.module_badge = label("", "badge")
         self.export_button = button("导出快照", self.export_snapshot, None, "export")
-        layout.addLayout(row(self.module_title, self.register_count, 1, self.module_badge, self.poll_check,
-                             self.interval, self.write_all_button, self.read_all_button,
-                             self.export_button, spacing=10))
+        self.help_button = button("使用指南", lambda: show_help(self), "flat", "help")
+        # Session state (formerly a top-right header bar): summary + SSH/serial badges
+        # parked left of 自动读取; the guide button sits right of 导出快照.
+        self.target_label = label("等待建立设备会话", "muted")
+        self.ssh_badge = label("", "badge")
+        self.com_badge = label("", "badge")
+        # Freeze each badge at its widest state text so 离线/已连接 toggles never
+        # change the badge size (which would shift the row layout).
+        ssh_variants = [self._badge_dot(s) + t for s, t in
+                        (("offline", "SSH 离线"), ("connected", "SSH 已连接"),
+                         ("demo", "SSH 演示"), ("connecting", "SSH 连接中"))]
+        com_variants = [self._badge_dot("offline") + "serial 离线",
+                        self._badge_dot("connected") + "serial 已连接",
+                        self._badge_dot("connecting") + "serial 连接中"]
+        for badge, variants in ((self.ssh_badge, ssh_variants), (self.com_badge, com_variants)):
+            for text in variants:
+                badge.setText(text)
+                badge.setMinimumWidth(max(badge.minimumWidth(), badge.sizeHint().width()))
+            badge.setFixedWidth(badge.minimumWidth())
+        self._update_connection_badge()
+        # 13px inner padding + the card's 1px border: the two section titles
+        # (寄存器映射 / 会话终端) share a left edge; the cards below keep their
+        # own full-width alignment.
+        title_row = row(self.module_title, self.register_count, 1, self.module_badge,
+                        self.target_label, self.ssh_badge, self.com_badge,
+                        self.poll_check, self.interval, self.write_all_button,
+                        self.read_all_button, self.export_button, self.help_button,
+                        spacing=10)
+        title_row.setContentsMargins(14, 0, 14, 0)
+        layout.addLayout(title_row)
         self.horizontal_split = QSplitter(Qt.Horizontal)
         self.horizontal_split.setHandleWidth(10)
         self.horizontal_split.setChildrenCollapsible(False)
@@ -1548,7 +1542,6 @@ class MainWindow(QMainWindow):
         self.save_settings()
         # The button becomes a red 'cancel' control while the handshake runs.
         self._style_session_button(self.connect_button, True, "取消连接", "SSH连接")
-        self.ssh_badge.setText(self._badge_dot("connecting") + "SSH 连接中")
         self.append_log("SYSTEM", f"正在连接 {user}@{host}:{port}。")
         def connect(progress):
             if approved_change:
@@ -1567,6 +1560,7 @@ class MainWindow(QMainWindow):
             self._set_connection(True)
             self.append_log("SUCCESS", "SSH 连接成功。")
         self._run_task(connect, done, "SSH连接", "connect")
+        self._update_connection_badge()   # _busy+kind set → SSH 连接中
 
     def _confirm_host_key_change(self, change, request):
         if self._closing or self._busy or self.connected or self.cancel.is_set():
@@ -1646,6 +1640,7 @@ class MainWindow(QMainWindow):
         for control in (self.serial_port, self.serial_baud, self.serial_user,
                         self.serial_password, self.serial_remember):
             control.setEnabled(False)
+        self._update_connection_badge()   # _serial_busy set → serial 连接中
         self.append_log("SYSTEM", f"正在连接 serial {port} @ {baud} bps。")
         def connect(progress):
             session.connect(port, baud, user, password, timeout)
@@ -1724,13 +1719,20 @@ class MainWindow(QMainWindow):
             ssh_text, ssh_state = "SSH 演示", "demo"
         elif self.connected:
             ssh_text, ssh_state = "SSH 已连接", "connected"
+        elif self._busy and self._task_kind == "connect":
+            ssh_text, ssh_state = "SSH 连接中", "connecting"
         else:
             ssh_text, ssh_state = "SSH 离线", "offline"
         self.ssh_badge.setText(self._badge_dot(ssh_state) + ssh_text)
         self.ssh_badge.setProperty("state", ssh_state)
         restyle(self.ssh_badge)
-        com_state = "connected" if self.serial_connected else "offline"
-        self.com_badge.setText(self._badge_dot(com_state) + ("serial 已连接" if self.serial_connected else "serial 离线"))
+        if self.serial_connected:
+            com_state, com_text = "connected", "serial 已连接"
+        elif self._serial_busy:
+            com_state, com_text = "connecting", "serial 连接中"
+        else:
+            com_state, com_text = "offline", "serial 离线"
+        self.com_badge.setText(self._badge_dot(com_state) + com_text)
         self.com_badge.setProperty("state", com_state)
         restyle(self.com_badge)
 
@@ -2049,6 +2051,9 @@ class MainWindow(QMainWindow):
         self._task_callback = None
         self._active_worker = None
         self._update_progress()
+        # A finished connect (e.g. waiting on the host-key dialog) must not keep
+        # the badge stuck on 连接中.
+        self._update_connection_badge()
         self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
         self._style_session_button(self.connect_button, self.connected, "断开SSH", "SSH连接")
         self._refresh_controls()

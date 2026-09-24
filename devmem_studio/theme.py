@@ -93,7 +93,9 @@ QLabel#fieldValue { font-family: "Consolas"; font-size: 13px; font-weight: 600; 
 QLabel#registerName { font-family: "Bahnschrift"; font-size: 24px; color: #23374A; }
 QLabel#value { font-family: "Consolas"; font-size: 29px; color: #2463DC; font-weight: 600; }
 QLabel#badge { background: #EDF2F7; color: #61778B; padding: 5px 9px; border-radius: 4px; font-size: 11px; }
-QLabel#badge[state="connected"] { background: #E6F4EF; color: #157767; }
+QLabel#badge[state="offline"] { background: #DCE6F0; }
+QLabel#badge[state="connected"] { background: #D0ECE1; color: #157767; }
+QLabel#badge[state="connecting"] { background: #DCE6F0; color: #2463DC; }
 QLabel#badge[state="demo"] { background: #FFF1D9; color: #9A661D; }
 QLabel#badge[state="error"] { background: #FBECEC; color: #B14040; }
 QLineEdit, QSpinBox, QComboBox { background: white; border: 1px solid #D5DEE7; border-radius: 5px; min-height: 30px; padding: 0 9px; selection-background-color: #DCE9FF; selection-color: #213F73; }
@@ -122,7 +124,7 @@ QPushButton#primary:disabled { background: #A7BFEB; border-color: #A7BFEB; color
 QPushButton#danger { color: #B64242; border-color: #E8C3C3; background: #FFF8F8; }
 QPushButton#danger:hover { background: #FBE7E7; }
 QPushButton#danger:pressed { background: #F5D8D8; }
-QPushButton#flat { background: transparent; border: 1px solid transparent; color: #657C91; min-height: 26px; padding: 0 8px; }
+QPushButton#flat { background: transparent; border: 1px solid transparent; color: #657C91; min-height: 30px; padding: 0 8px; }
 QPushButton#flat:hover { background: #E9F0FA; color: #2463DC; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #718397; min-height: 28px; padding: 0 11px; }
 QPushButton#tab:checked { background: #E4EDFC; color: #245DC4; border: 1px solid #D2E1FA; }
