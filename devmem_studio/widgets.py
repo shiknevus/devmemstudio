@@ -11,7 +11,7 @@ def label(text, name=None):
     if name:
         item.setObjectName(name)
     if name == "badge":
-        item.setFixedHeight(27)
+        item.setFixedHeight(32)   # matches QPushButton/QComboBox: min-height 30 + 1px border
     return item
 
 
