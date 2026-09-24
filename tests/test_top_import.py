@@ -72,6 +72,52 @@ class ParseTopTests(unittest.TestCase):
         self.assertTrue(second["disabled"])
         self.assertEqual((second["module_type"], second["bias"]), ("ec_disabled_uut", 0x6800))
 
+    def test_unheaded_ec_instances_fall_back_directly(self):
+        """Mix-top sources without flow_comp_N headers still yield components:
+        each active ``ec_*`` instantiation is matched and its REG_SPACE_BIAS
+        taken as the grid address. CRLF line endings must be tolerated."""
+        text = ("// The following is the flow components\r\n"
+                "ec_superisys_485_modbus_rtu\r\n"
+                "#(\r\n"
+                "        .REG_SPACE_BIAS         (20'h3000                 ), //地址\r\n"
+                "        .REG_SPACE_SIZE         (`REG_SPACE_SIZE          )\r\n"
+                ")\r\n"
+                "ec_superisys_485_modbus_rtu_27\r\n"
+                "(\r\n"
+                "        .o_st_rd_data           ( sub_comp_rd_dat[20]    ),\r\n"
+                "        .o_st_rd_vld            ( sub_comp_rd_vld[20]    ),\r\n"
+                "        .o_intr_irq             ( map_irq[20]            )\r\n"
+                ");\r\n")
+        info = top_import.parse_top(text)
+        self.assertEqual(len(info["components"]), 1)
+        comp = info["components"][0]
+        self.assertEqual((comp["module_type"], comp["instance"], comp["label"]),
+                         ("ec_superisys_485_modbus_rtu", "ec_superisys_485_modbus_rtu_27",
+                          "ec_superisys_485_modbus_rtu_27"))
+        self.assertEqual(comp["bias"], 0x3000)
+        self.assertEqual((comp["address"], comp["index"], comp["seq"]), ("0x3000", 20, 27))
+        self.assertFalse(comp["disabled"])
+        self.assertEqual(info["warnings"], [])
+
+    def test_unheaded_skips_non_ec_instances(self):
+        """Loose instances that do not start with ``ec_`` are left out."""
+        text = """slave_rs485_arbiter
+#(
+        .REG_SPACE_BIAS         ( 20'h3000)
+)
+u_slave_rs485_arbiter
+(
+        .o_st_rd_data           ( sub_comp_rd_dat[0]    )
+);
+"""
+        info = top_import.parse_top(text)
+        self.assertEqual(len(info["components"]), 0)
+        self.assertEqual(info["warnings"], [])
+
+        second = self.info["components"][1]
+        self.assertTrue(second["disabled"])
+        self.assertEqual((second["module_type"], second["bias"]), ("ec_disabled_uut", 0x6800))
+
     def test_hex_bias_and_missing_code(self):
         third = self.info["components"][2]
         self.assertEqual((third["bias"], third["address"], third["code"]), (0x6600, "0x6600", ""))

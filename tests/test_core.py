@@ -190,13 +190,13 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_numeric_config_recovers(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registers.json"
-            path.write_text(json.dumps({"port": "wrong", "connect_timeout": -1, "base": None,
+            path.write_text(json.dumps({"port": "wrong", "base": None,
                                         "last_category": "missing", "write_cache": []}), encoding="utf-8")
             cfg = ConfigStore(path).load()
             self.assertEqual(cfg["port"], 22)
-            self.assertEqual(cfg["connect_timeout"], 2)
             self.assertEqual(cfg["last_category"], "axis")
             self.assertEqual(cfg["write_cache"], {})
+            self.assertNotIn("connect_timeout", cfg)
 
 
 if __name__ == "__main__":

@@ -119,9 +119,14 @@ def parse_top(text: str) -> dict:
     real ``ec_*`` instantiation below it. The component is the ``ec_*`` module
     declaration at the shallowest comment depth (0 = active code, >0 = commented
     reference), so stale reference names never shadow the real module type.
+
+    Mix-top sources without ``flow_comp_N`` headers (loose ``ec_*`` instances)
+    fall back to matching each ``ec_*`` instantiation directly.
     """
     components, warnings = [], []
     headers = list(_HEADER.finditer(text))
+    if not headers:
+        return _parse_unheaded(text)
     for position, header in enumerate(headers):
         if position + 1 < len(headers):
             end = headers[position + 1].start()
@@ -187,6 +192,62 @@ def parse_top(text: str) -> dict:
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index, "disabled": disabled,
                            "line": text.count("\n", 0, header.start()) + 1})
+    return {"components": components, "warnings": warnings}
+
+
+_EC_INSTANCE = re.compile(
+    r"^[ \t]*([A-Za-z_]\w*)[ \t]*\r?\n"
+    r"[ \t]*#[ \t]*\([ \t]*\r?\n"
+    r"([^\n]*(?:\r?\n[^\n]*)*?)[ \t]*\r?\n"
+    r"[ \t]*\)[ \t]*\r?\n"
+    r"^[ \t]*([A-Za-z_]\w*)[ \t]*\r?\n",
+    re.M)
+"""Loose ``ec_*`` instantiation: module header, #(...) params, instance name.
+
+Each part sits on its own line and the file may use CRLF line endings; the
+params body is one line or many. ``re.M`` anchors ``^``/``$`` per line so
+surrounding code can't bleed into the match.
+"""
+
+
+def _instance_seq(instance: str) -> int:
+    """Trailing number from an instance name (``ec_x_27`` -> 27), else -1."""
+    match = re.search(r"_(\d+)$", instance)
+    return int(match.group(1)) if match else -1
+
+
+def _parse_unheaded(text: str) -> dict:
+    """Components for mix-top sources without flow_comp_N headers.
+
+    Matches each active ``ec_*`` module instantiation in the code and takes its
+    ``REG_SPACE_BIAS`` as the register-space bias (grid address semantics, the
+    same 0x800 + i*0x200 convention the headed path uses).
+    """
+    components, warnings = [], []
+    for match in _EC_INSTANCE.finditer(text):
+        module_type, params, instance = match.group(1), match.group(2), match.group(3)
+        if not (module_type.startswith("ec_") and instance.startswith("ec_")):
+            continue
+        bias = None
+        found = _BIAS.search(params)
+        if found:
+            bias = _decode_verilog_number(found.group(1), found.group(2))
+        if bias is None:
+            warnings.append(f"{instance} 缺少 .REG_SPACE_BIAS，已跳过。")
+            continue
+        index = None
+        if bias >= REG_GRID_START and (bias - REG_GRID_START) % REG_GRID_STEP == 0:
+            index = (bias - REG_GRID_START) // REG_GRID_STEP
+        else:
+            warnings.append(f"{instance} 偏移 0x{bias:X} 不在 0x800+i*0x200 网格上。")
+        seq = _instance_seq(instance)
+        label = instance
+        line = text.count("\n", 0, match.start()) + 1
+        components.append({"seq": seq if seq >= 0 else len(components) + 1,
+                           "label": label, "code": "", "module_type": module_type,
+                           "instance": instance, "bias": bias,
+                           "address": f"0x{bias:04x}", "index": index,
+                           "disabled": False, "line": line})
     return {"components": components, "warnings": warnings}
 
 

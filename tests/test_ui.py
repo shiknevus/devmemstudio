@@ -81,7 +81,7 @@ class UiTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.window = MainWindow(ConfigStore(Path(self.temp.name) / "settings.json"), persist=False)
         self.window.show()
-        self.window.session = DemoSession(self.window.bridge.message.emit)
+        self.window.session = DemoSession(self.window._log_emit("ssh"))
         self.window.session.connect()
         self.window._set_connection(True)
         self.window.load_top(self.write_fixture_top())
@@ -109,13 +109,78 @@ class UiTests(unittest.TestCase):
             def read(self, address, quiet=False):
                 raise RuntimeError("simulated device error")
         self.window.session.close()
-        self.window.session = FailedDevice(self.window.bridge.message.emit)
+        self.window.session = FailedDevice(self.window._log_emit("ssh"))
         self.window.session.connect()
         self.window.poll_check.setChecked(True)
         self.settle(lambda: self.window.error_count > 0 and not self.window._busy)
         self.assertFalse(self.window.poll_check.isChecked())
         self.assertIn("simulated device error", self.window.regs[0]["_error"])
         self.assertEqual(self.window.table.item(0, 3).text(), "读取错误")
+
+    def test_serial_connect_flow_and_command_routing(self):
+        """串口连接按钮、字段禁用逻辑、命令目标下拉路由串口命令。"""
+        from devmem_studio.serial_session import SerialSession
+        connected_serial = {}
+        class FakeSerialSession(SerialSession):
+            def connect(self, port, baud, username, password, timeout):
+                connected_serial.update(port=port, baud=baud, username=username, password=password)
+            def run(self, command, timeout=8, quiet=False):
+                self.last_command = command
+                return "out:" + command
+            def close(self):
+                pass
+            @property
+            def alive(self):
+                return True
+        with patch("devmem_studio.window.SerialSession", FakeSerialSession):
+            # 下拉不可编辑：模拟枚举出 COM9 后选中它。
+            self.window.serial_port.addItem("USB Serial Port (COM9)", "COM9")
+            self.window.serial_port.setCurrentIndex(self.window.serial_port.findData("COM9"))
+            index = self.window.serial_baud.findText("115200")
+            self.window.serial_baud.setCurrentIndex(index)
+            self.window.serial_user.setText("root")
+            self.window.serial_password.setText("secret")
+            self.window._toggle_serial()
+            self.settle(lambda: self.window.serial_connected and not self.window._busy)
+        self.assertTrue(self.window.serial_connected)
+        self.assertEqual(connected_serial, {"port": "COM9", "baud": 115200,
+                                            "username": "root", "password": "secret"})
+        self.assertEqual(self.window.serial_connect_button.text(), "断开连接")
+        # 终端来源=serial 时终端提示符可输入、命令走串口会话。
+        idx = self.window.console_source_combo.findData("com")
+        self.window.console_source_combo.setCurrentIndex(idx)
+        self.settle(lambda: self.window.console_source == "com")
+        self.assertTrue(self.window.console.is_interactive())
+        self.window.send_command("ls /")
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.serial.last_command, "ls /")
+        # 断开串口后字段恢复可编辑
+        self.window.disconnect_serial()
+        self.assertFalse(self.window.serial_connected)
+        self.assertTrue(self.window.serial_port.isEnabled())
+
+    def test_serial_connect_shows_shared_progress_bar(self):
+        """serial 握手期间显示与 SSH 连接相同的 3px 不定进度条，结束后收回。"""
+        from devmem_studio.serial_session import SerialSession
+        release = threading.Event()
+
+        class SlowSerial(SerialSession):
+            def connect(self, port, baud, username, password, timeout):
+                release.wait(5)   # hold the handshake open so the busy state is observable
+
+            def close(self):
+                pass
+
+        with patch("devmem_studio.window.SerialSession", SlowSerial):
+            self.window.serial_port.addItem("USB Serial Port (COM9)", "COM9")
+            self.window.serial_port.setCurrentIndex(self.window.serial_port.findData("COM9"))
+            self.window._toggle_serial()
+            self.settle(lambda: self.window._serial_busy)
+            self.assertTrue(self.window.progress.isVisible())
+            self.assertEqual(self.window.progress.maximum(), 0)   # 0..0 = indeterminate
+            release.set()
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
+        self.assertTrue(self.window.progress.isHidden())
 
     def test_irq_report_inspector_tooltips_and_export_use_requested_formats(self):
         samples = {
@@ -183,7 +248,7 @@ class UiTests(unittest.TestCase):
                 self.memory[address] = value
                 raise ReadbackError("写入已完成，但回读失败：模拟超时")
         self.window.session.close()
-        self.window.session = FailedReadback(self.window.bridge.message.emit)
+        self.window.session = FailedReadback(self.window._log_emit("ssh"))
         self.window.session.connect()
         plans = [reg for reg in self.window.visible_regs if not reg.get("readonly")][:2]
         for reg in plans:
@@ -211,7 +276,6 @@ class UiTests(unittest.TestCase):
         self.window._base_edited()
         self.settle()
         self.assertFalse(self.window.read_all_button.isEnabled())
-        self.assertTrue(self.window.send_button.isEnabled())
         previous = self.window.read_count
         self.window.read_all()
         self.assertEqual(previous, self.window.read_count)
@@ -239,17 +303,18 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.window.preset_combo.currentData(), 21)
 
     def test_previous_stream_callback_does_not_stop_new_stream(self):
-        self.window.open_board_log()
+        # Connect landed the console on the ssh view and started the demo stream in the background.
         self.settle(lambda: self.window._stream_state == "running")
         previous = self.window._stream_epoch
         self.window._stop_stream()
         self.window._start_stream("/tmp/second.log")
         self.settle(lambda: self.window._stream_state == "running")
+        # Stale callbacks from the previous epoch must not flip the new stream's state.
         self.window.bridge.stream_stopped.emit(previous)
         self.window.bridge.stream_ready.emit(previous, False)
         self.window.bridge.stream_failed.emit(previous, "cancelled old request")
         self.app.processEvents()
-        self.assertTrue(self.window.board_log.stop_button.isEnabled())
+        self.assertEqual(self.window._stream_state, "running")
         self.window._stop_stream()
 
     def test_one_click_log_start_does_not_block_read_write_and_can_be_cancelled(self):
@@ -261,24 +326,24 @@ class UiTests(unittest.TestCase):
                 entered.set()
                 cancel_event.wait(3)
                 return super().start_stream(path, output, stopped, cancel_event=cancel_event)
+        # Stop the auto-started demo stream, swap in the slow device, then restart inline.
+        self.window._stop_stream()
         self.window.session.close()
-        self.window.session = SlowLogDevice(self.window.bridge.message.emit)
+        self.window.session = SlowLogDevice(self.window._log_emit("ssh"))
         self.window.session.connect()
+        # No auto-jump on connect: the console stays on system until switched manually.
+        self.assertEqual(self.window.console_source, "system")
+        self.assertFalse(self.window.console.is_interactive())
         self.window.read_all()
         self.assertTrue(self.window._busy)
-        self.assertTrue(self.window.board_log_button.isEnabled())
-        self.window.board_log_button.click()
+        # Log start does not block register reads: the read task is queued alongside.
+        self.window._ensure_log_stream()
         self.assertEqual(self.window._task_kind, "read")
         self.settle(entered.is_set)
-        dialog = self.window.board_log
-        self.assertTrue(dialog.isVisible())
-        self.assertEqual(dialog.windowModality(), Qt.NonModal)
+        self.assertEqual(self.window._stream_state, "starting")
         self.assertEqual(paths, [DEFAULT_LOG_PATH])
-        self.window.board_log_button.click()
-        self.assertIs(self.window.board_log, dialog)
         self.assertEqual(len(self.window._stream_workers), 1)
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window._stream_state, "starting")
         self.assertTrue(self.window.read_all_button.isEnabled())
         self.window.table.selectRow(self.row_of("A_TX_OT"))
         self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "37" parses as decimal
@@ -286,7 +351,7 @@ class UiTests(unittest.TestCase):
         self.window.write_button.click()
         self.settle(lambda: not self.window._busy)
         self.assertEqual(self.window.selected["_value"], 0x37)
-        dialog.close()
+        self.window._stop_stream()
         self.settle(lambda: not self.window._stream_workers)
         self.assertEqual(self.window._stream_state, "stopped")
         self.assertTrue(self.window.session.alive)
@@ -296,13 +361,16 @@ class UiTests(unittest.TestCase):
         class FailedLogDevice(DemoSession):
             def start_stream(self, path, output, stopped, cancel_event=None):
                 raise OSError("simulated log channel failure")
+        # Stop the auto-started demo stream, swap in the failing device, restart inline.
+        self.window._stop_stream()
         self.window.session.close()
-        self.window.session = FailedLogDevice(self.window.bridge.message.emit)
+        self.window.session = FailedLogDevice(self.window._log_emit("ssh"))
         self.window.session.connect()
         self.window.poll_check.setChecked(True)
-        self.window.board_log_button.click()
+        self.window._ensure_log_stream()
         self.settle(lambda: not self.window._stream_workers)
-        self.assertIn("simulated log channel failure", self.window.board_log.text.toPlainText())
+        # The failure message is software bookkeeping: it lands in the system log.
+        self.assertTrue(any("simulated log channel failure" in m for _, _, m in self.window.log_records_system))
         self.assertTrue(self.window.poll_check.isChecked())
         self.assertTrue(self.window.connected and self.window.session.alive)
         self.window.poll_check.setChecked(False)
@@ -310,28 +378,31 @@ class UiTests(unittest.TestCase):
         self.assertTrue(self.window.read_all_button.isEnabled())
 
     def test_log_find_shortcut_and_live_search_leave_main_register_write_available(self):
-        self.window.board_log_button.click()
-        self.settle(lambda: self.window._stream_state == "running" and "axis" in self.window.board_log.text.toPlainText())
-        dialog = self.window.board_log
-        dialog.activateWindow()
-        dialog.text.setFocus()
+        # The console starts on system; switch to the log source to see the stream.
+        self.settle(lambda: self.window._stream_state == "running")
+        self.window._set_console_source("log")
+        self.settle(lambda: "axis" in self.window.console.toPlainText())
+        self.assertEqual(self.window.console_source, "log")
+        self.window.log_search.setFocus()
         self.app.processEvents()
-        QTest.keyClick(dialog.text, Qt.Key_F, Qt.ControlModifier)
-        self.assertTrue(dialog.search.hasFocus())
+        QTest.keyClick(self.window.console, Qt.Key_F, Qt.ControlModifier)
+        self.assertTrue(self.window.log_search.hasFocus())
         self.assertFalse(self.window.search.hasFocus())
-        dialog.search.setText("axis")
-        self.settle(lambda: not dialog.search_timer.isActive() and dialog.text.current_match.hasSelection())
-        position = dialog.text.current_match.selectionStart()
+        self.window.log_search.setText("axis")
+        self.window._find_in_log(forward=True)
+        cursor = self.window.console.textCursor()
+        self.assertTrue(cursor.hasSelection())
+        self.assertIn("axis", cursor.selectedText())
+        position = cursor.selectionStart()
         self.window.table.selectRow(self.row_of("A_TX_OT"))
         self.window.format_combo.setCurrentIndex(0)   # HEX, otherwise "39" parses as decimal
         self.window.write_input.setText("39")
         self.window.write_button.click()
-        dialog.append("INFO [DEMO] axis new data\n" * 300)
+        self.window._append_log_stream("INFO [DEMO] axis new data\n" * 300)
         self.settle(lambda: not self.window._busy)
         self.assertEqual(self.window.selected["_value"], 0x39)
-        self.assertEqual(dialog.text.current_match.selectionStart(), position)
-        self.assertFalse(dialog.follow.isChecked())
-        self.assertTrue(dialog.stop_button.isEnabled())
+        # The match position survives appended log text (cursor stays at the match).
+        self.assertEqual(self.window.console.textCursor().selectionStart(), position)
         self.assertTrue(self.window.session.alive)
 
     def exercise_host_key_dialog(self, decision):
@@ -375,7 +446,7 @@ class UiTests(unittest.TestCase):
 
     def test_host_key_cancellation_preserves_trust_and_stays_disconnected(self):
         self.exercise_host_key_dialog(QDialog.Rejected)
-        self.assertIn("已取消连接", self.window.status_left.text())
+        self.assertTrue(any("已取消主机密钥更新" in text for _, _, text in self.window.log_records_system))
         self.assertFalse(self.window.read_all_button.isEnabled())
 
     def test_pul_axis_abspos_actual_value_row(self):
@@ -658,8 +729,8 @@ class TopImportUiTests(UiTests):
         self.assertTrue(self.window.empty_label.isVisibleTo(self.window.table.parentWidget()))
         self.assertIn("没有寄存器", self.window.empty_label.text())
         self.window.read_all()
-        self.assertIn("没有可读取", self.window.status_left.text())
-        self.assertTrue(any("通用回退" in message for _, _, message in self.window.log_records))
+        self.assertTrue(any("没有可读取" in text for _, _, text in self.window.log_records_system))
+        self.assertTrue(any("通用回退" in message for _, _, message in self.window.log_records_system))
 
     def test_upload_download_available_without_selected_component(self):
         # Connected but no component chosen: upload/download must stay usable.
@@ -708,7 +779,7 @@ class TopImportUiTests(UiTests):
         self.assertTrue(any(p.name.startswith("sunny_fpga.bit_") for p in sda.iterdir()
                             if p.name not in ("sunny_fpga.bit_20260916000000",
                                               "sunny_fpga.bit_20260918000000")))   # new aside backup
-        self.assertIn("回退完成", " ".join(message for _, _, message in self.window.log_records))
+        self.assertIn("回退完成", " ".join(message for _, _, message in self.window.log_records_system))
 
     def test_bit_rollback_cancel_leaves_files_untouched(self):
         sda = self.window.session.remote_root / "run" / "media" / "sda"
@@ -738,13 +809,13 @@ class TopImportUiTests(UiTests):
             self.assertEqual(window.regs, [])
             self.assertTrue(window.empty_label.isVisibleTo(window.table.parentWidget()))
             window.read_all()
-            self.assertIn("选择组件", window.status_left.text())
+            self.assertTrue(any("选择组件" in text for _, _, text in window.log_records_system))
             self.assertFalse(window.read_all_button.isEnabled() or window.poll_check.isEnabled())
-            window.session = DemoSession(window.bridge.message.emit)
+            window.session = DemoSession(window._log_emit("ssh"))
             window.session.connect()
             window._set_connection(True)
             window.read_all()
-            self.assertIn("选择组件", window.status_left.text())
+            self.assertTrue(any("选择组件" in text for _, _, text in window.log_records_system))
         finally:
             window.close()
             self.settle(lambda: not window._busy and not window.isVisible())
@@ -833,24 +904,23 @@ class TopImportUiTests(UiTests):
         self.assertTrue(self.window.cancel.is_set())
         self.settle(lambda: not self.window._busy)
 
-    def test_poll_interval_editable_with_0_1s_minimum(self):
-        # 自动读取周期可直接输入，最快 0.1 s（100 ms）。
-        self.assertTrue(self.window.interval.isEditable())
+    def test_poll_interval_presets_and_clamp(self):
+        # 自动读取周期只能选预设（下拉不可编辑），最快 0.1 s（100 ms）。
+        self.assertFalse(self.window.interval.isEditable())
         presets = [self.window.interval.itemData(i) for i in range(self.window.interval.count())]
         self.assertEqual(min(presets), 100)   # “0.1 s” 是可选预设
-        for text, expected in (("0.1", 100), ("0.3", 300), ("0.1 s", 100), ("0.5 s", 500),
-                               ("150ms", 150), ("150", 150), ("2", 2000)):
-            with self.subTest(text=text):
-                self.window.interval.setEditText(text)
+        for i, expected in enumerate(presets):
+            with self.subTest(preset=expected):
+                self.window.interval.setCurrentIndex(i)
                 self.assertEqual(self.window._poll_interval_ms(), expected)
-        # 下限钳制到 0.1 s，非数值退回默认 1 s。
-        self.window.interval.setEditText("0.01")
-        self.assertEqual(self.window._poll_interval_ms(), 100)
-        self.window.interval.setEditText("abc")
-        self.assertEqual(self.window._poll_interval_ms(), 1000)
-        # 键入的自定义周期立即生效（0.25 s → 250 ms）。
-        self.window.interval.setEditText("0.25")
-        self.assertEqual(self.window._poll_interval_ms(), 250)
+        # 旧配置里的自定义周期回填到最接近的预设（300 → 200）。
+        cfg = self.window.cfg
+        cfg["poll_interval"] = 300
+        self.window._load_config_fields()
+        self.assertEqual(self.window._poll_interval_ms(), 200)
+        cfg["poll_interval"] = 7000
+        self.window._load_config_fields()
+        self.assertEqual(self.window._poll_interval_ms(), 5000)
 
     def test_import_component_updates_runtime_definition(self):
         from PySide6.QtWidgets import QMessageBox
@@ -911,7 +981,7 @@ class TopImportUiTests(UiTests):
         reloaded = MainWindow(store, persist=False)
         try:
             self.assertEqual(reloaded.component_tree.topLevelItemCount(), 3)
-            self.assertIn("已重新加载 top", " ".join(message for _, _, message in reloaded.log_records))
+            self.assertIn("已重新加载 top", " ".join(message for _, _, message in reloaded.log_records_system))
             self.assertFalse(reloaded.component_mode)
         finally:
             reloaded.close()
@@ -921,7 +991,7 @@ class TopImportUiTests(UiTests):
         fresh = MainWindow(missing, persist=False)
         try:
             self.assertEqual(fresh.component_tree.topLevelItemCount(), 0)
-            self.assertTrue(any("不存在" in message for _, _, message in fresh.log_records))
+            self.assertTrue(any("不存在" in message for _, _, message in fresh.log_records_system))
         finally:
             fresh.close()
             self.settle(lambda: not fresh._busy and not fresh.isVisible())

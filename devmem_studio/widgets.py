@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-from PySide6.QtCore import Qt, QRectF, Signal, QObject, QRunnable
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtCore import QEvent, Qt, QRectF, Signal, QObject, QRunnable
+from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
                                QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy)
 from .theme import icon
@@ -21,7 +21,7 @@ def button(text, slot=None, name=None, glyph=None):
     if name:
         item.setObjectName(name)
     if glyph:
-        item.setIcon(icon(glyph, "#FFFFFF" if name == "primary" else "#718397"))
+        item.setIcon(icon(glyph, "#FFFFFF" if name == "primary" else "#B64242" if name == "danger" else "#718397"))
     if slot:
         item.clicked.connect(slot)
     return item
@@ -49,6 +49,103 @@ def field(title, widget):
     if widget.minimumWidth() == widget.maximumWidth():
         box.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
     return box
+
+
+class IpAddressField(QWidget):
+    """Four 0-255 octets separated by dots; each octet is its own input.
+
+    Typing into one octet moves the caret to the next when it fills, and the
+    surrounding QSS treats the whole group as one input (the rounded border
+    wraps all four octets with the dots between them)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Plain QWidget subclasses don't paint their QSS box (border/background)
+        # unless this attribute is set — without it the field has no visible frame.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.octets = []
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(9, 0, 9, 0)
+        lay.setSpacing(2)
+        for i in range(4):
+            edit = QLineEdit()
+            edit.setObjectName("ipOctet")
+            edit.setMaxLength(3)
+            edit.setFixedWidth(30)
+            edit.setAlignment(Qt.AlignCenter)
+            edit.setValidator(QIntValidator(0, 255))
+            edit.textEdited.connect(lambda text, idx=i: self._on_edited(idx, text))
+            # QSS has no :focus-within; toggle a dynamic property on group focus so
+            # the whole field highlights like a plain QLineEdit.
+            edit.installEventFilter(self)
+            lay.addWidget(edit)
+            self.octets.append(edit)
+            if i < 3:
+                dot = QLabel("·")
+                dot.setObjectName("ipDot")
+                dot.setFixedWidth(5)
+                dot.setAlignment(Qt.AlignCenter)
+                lay.addWidget(dot)
+        self.setFocusProxy(self.octets[0])
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+            focused = any(edit.hasFocus() for edit in self.octets)
+            if focused != bool(self.property("focused")):
+                self.setProperty("focused", focused)
+                restyle(self)
+        return super().eventFilter(watched, event)
+
+    def _on_edited(self, idx, text):
+        # Auto-advance to the next octet once this one is full (3 digits).
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) >= 3 and idx < 3:
+            self.octets[idx + 1].setFocus()
+            self.octets[idx + 1].setCursorPosition(0)
+
+    def text(self):
+        parts = [edit.text().strip() for edit in self.octets]
+        if not any(parts):
+            return ""
+        return ".".join(parts)
+
+    def setText(self, value):
+        value = value or ""
+        parts = value.split(".") if value else ["", "", "", ""]
+        while len(parts) < 4:
+            parts.append("")
+        for edit, part in zip(self.octets, parts[:4]):
+            edit.setText(part.strip())
+
+    def clear(self):
+        for edit in self.octets:
+            edit.clear()
+
+    def setFocus(self):
+        self.octets[0].setFocus()
+
+
+def password_field(title, echo=QLineEdit.Password):
+    """QLineEdit with the eyes action drawn inside the field's trailing edge.
+
+    addAction renders the icon inside the input box (integrated, not an attached
+    button); clicking it toggles mask/plain and swaps the icon for feedback."""
+    container = QWidget()
+    outer = QVBoxLayout(container)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(5)
+    outer.addWidget(label(title, "muted"))
+    edit = QLineEdit()
+    edit.setEchoMode(echo)
+    reveal = edit.addAction(icon("eye", "#9DB3C5", 17), QLineEdit.TrailingPosition)
+    reveal.setToolTip("显示 / 隐藏密码")
+
+    def toggle():
+        show = edit.echoMode() == QLineEdit.Password
+        edit.setEchoMode(QLineEdit.Normal if show else QLineEdit.Password)
+        reveal.setIcon(icon("eyeOff" if show else "eye", "#9DB3C5", 17))
+    reveal.triggered.connect(toggle)
+    outer.addWidget(edit)
+    return edit, container
 
 
 def divider():
@@ -140,6 +237,137 @@ class CommandLine(QLineEdit):
         super().keyPressEvent(event)
 
 
+class TerminalView(QPlainTextEdit):
+    """Log view whose trailing line is an editable shell prompt.
+
+    Everything above the prompt is history: selectable but not editable — any
+    typed key is redirected into the prompt line. Enter submits the line to the
+    `execute` callback; Up/Down walk the command history. Non-session views
+    (tail log / system) stay plain read-only via set_interactive(False)."""
+    PROMPT = "❯ "
+
+    def __init__(self, execute, parent=None):
+        super().__init__(parent)
+        self._execute = execute
+        self._interactive = False
+        self._history = []
+        self._history_index = 0
+        self.setReadOnly(True)   # read-only until a session view turns it interactive
+
+    # -- state ---------------------------------------------------------------
+    def set_interactive(self, on):
+        self._interactive = on
+        self.setReadOnly(not on)
+        if on:
+            self.ensure_prompt()
+
+    def is_interactive(self):
+        return self._interactive
+
+    def ensure_prompt(self):
+        if not self._prompt_present():
+            cursor = QTextCursor(self.document())
+            cursor.movePosition(QTextCursor.End)
+            if cursor.block().length() > 1:
+                cursor.insertBlock()
+            cursor.insertText(self.PROMPT)
+
+    def _prompt_present(self):
+        return self.document().lastBlock().text().startswith(self.PROMPT)
+
+    def _prompt_start(self):
+        return self.document().lastBlock().position() + len(self.PROMPT)
+
+    def _force_cursor_to_prompt(self):
+        cursor = self.textCursor()
+        cursor.clearSelection()
+        cursor.movePosition(QTextCursor.End)   # caret lands after any typed input
+        self.setTextCursor(cursor)
+
+    # -- output --------------------------------------------------------------
+    def append_before_prompt(self, text, fmt=None):
+        """Insert log output above the prompt line (prompt stays last)."""
+        block = self.document().lastBlock()
+        cursor = QTextCursor(block)
+        cursor.beginEditBlock()
+        cursor.insertBlock()   # split: output block lands above the prompt text
+        if fmt is not None:
+            cursor.insertText(text, fmt)
+        else:
+            cursor.insertText(text)
+        cursor.endEditBlock()
+        self.ensure_prompt()
+
+    # -- input ---------------------------------------------------------------
+    def _prompt_input(self):
+        return self.document().lastBlock().text()[len(self.PROMPT):]
+
+    def _set_prompt_input(self, text):
+        cursor = QTextCursor(self.document().lastBlock())
+        cursor.select(QTextCursor.LineUnderCursor)
+        cursor.insertText(self.PROMPT + text)
+
+    def _submit(self):
+        text = self._prompt_input().strip()
+        if text:
+            if not self._history or self._history[-1] != text:
+                self._history.append(text)
+                self._history = self._history[-100:]
+            self._history_index = len(self._history)
+        self._set_prompt_input("")
+        self._execute(text)
+
+    def _history_step(self, up):
+        if not self._history:
+            return
+        if up:
+            self._history_index = max(0, self._history_index - 1)
+        else:
+            self._history_index = min(len(self._history), self._history_index + 1)
+        self._set_prompt_input(self._history[self._history_index]
+                               if self._history_index < len(self._history) else "")
+
+    def keyPressEvent(self, event):
+        if not self._interactive:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        if event.modifiers() == Qt.ControlModifier and key == Qt.Key_C:
+            super().keyPressEvent(event)   # copy from history stays available
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self._submit()
+            return
+        if key in (Qt.Key_Up, Qt.Key_Down):
+            self._history_step(key == Qt.Key_Up)
+            return
+        # Everything else edits the prompt line only.
+        self._force_cursor_to_prompt()
+        if key == Qt.Key_Backspace:
+            cursor = self.textCursor()
+            if not cursor.hasSelection() and cursor.position() <= self._prompt_start():
+                return   # keep the prompt marker intact
+        if key == Qt.Key_Home:
+            cursor = self.textCursor()
+            cursor.clearSelection()
+            cursor.setPosition(self._prompt_start())
+            self.setTextCursor(cursor)
+            return
+        super().keyPressEvent(event)
+        if not self._prompt_present():
+            self.ensure_prompt()
+
+    def insertFromMimeData(self, source):
+        """Paste lands in the prompt as a single line (history stays intact)."""
+        if not self._interactive:
+            return
+        text = source.text().replace(" ", " ").replace("\r", " ").replace("\n", " ")
+        if not text:
+            return
+        self._force_cursor_to_prompt()
+        self.textCursor().insertText(text)
+
+
 class BitView(QWidget):
     """Thirty-two measured bits, grouped into bytes, with no fabricated empty-state values."""
     def __init__(self):
@@ -196,7 +424,9 @@ class Worker(QRunnable):
 
 
 class LogBridge(QObject):
-    message = Signal(str, str)
+    # (level, text, source): the source travels with the signal so cross-thread
+    # queued emissions can never pick up another session's tag.
+    message = Signal(str, str, str)
     stream = Signal(int, str)
     stream_stopped = Signal(int)
     stream_ready = Signal(int, bool)

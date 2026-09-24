@@ -12,7 +12,7 @@ import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
-from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
@@ -25,10 +25,15 @@ from .catalog import REGISTER_FIELDS
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK)
+from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
-from .widgets import (label, button, row, field, divider, restyle, ComboBox, CommandLine,
-                      BitView, DecodedFieldsView, Worker, LogBridge)
-from .dialogs import BatchDialog, BoardLogDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
+from .widgets import (label, button, row, field, divider, restyle, ComboBox,
+                      BitView, DecodedFieldsView, Worker, LogBridge, password_field, IpAddressField, TerminalView)
+from .dialogs import BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
+
+# Fixed connect timeout for both SSH and serial: impatient users hit the red
+# cancel button instead of tuning a number.
+CONNECT_TIMEOUT = 8
 
 VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "basic": "身份、模块状态与安全链（公共寄存器头）",
@@ -41,15 +46,16 @@ VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
 
 
 class _SidebarScroll(QScrollArea):
-    """Fixed-width sidebar whose content can never widen past the viewport.
+    """Sidebar rail whose width comes from the side splitter; content can never
+    widen past the viewport.
 
     widgetResizable(True) alone lets a single wide child (a non-wrapping
-    path label, for example) stretch the content past the fixed sidebar
-    width with the horizontal scrollbar off, clipping the rest."""
+    path label, for example) stretch the content past the sidebar width with
+    the horizontal scrollbar off, clipping the rest."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("sidebarScroll")
-        self.setFixedWidth(360)
+        self.setMinimumWidth(320)
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
@@ -62,7 +68,7 @@ class _SidebarScroll(QScrollArea):
 class MainWindow(QMainWindow):
     def __init__(self, store=None, persist=True):
         super().__init__()
-        self.setWindowTitle("寄存器调试工作台")
+        self.setWindowTitle("DevmemStudio  Auth: szzhang/cgliu/bxli")
         self.setWindowIcon(QIcon(str(resource_path("assets/logo.svg"))))
         self.resize(1540, 960)
         self.setMinimumSize(1180, 740)
@@ -77,6 +83,7 @@ class MainWindow(QMainWindow):
         self._active_worker = None
         self._task_callback = None
         self._task_kind = ""
+        self._task_serial = None
         self._pending_host_key_change = None
         self._last_context = None
         self._last_fmt = "D"
@@ -103,13 +110,26 @@ class MainWindow(QMainWindow):
         self.bridge.stream_ready.connect(self._stream_ready)
         self.bridge.stream_failed.connect(self._stream_failed)
         self.bridge.stream_worker_finished.connect(self._stream_worker_finished)
-        self.session = SshSession(self.bridge.message.emit)
-        self.board_log = None
+        self.session = SshSession(self._log_emit("ssh"))
+        self.serial = SerialSession(self._log_emit("com"))
+        self.serial_connected = False
+        self._serial_device = None
+        self._serial_busy = False   # serial connect runs outside the global task gate
+        self._serial_worker = None
+        self._serial_cancel_requested = False
         self.bit_dialog = None
         self.bit_rollback_dialog = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
+        # Per-source log buffers: console renders whichever the source selector points at.
+        # log_records aliases the SSH buffer (the historically flat list tests read).
         self.log_records = []
+        self.log_records_ssh = self.log_records
+        self.log_records_com = []
+        self.log_records_log = []
+        self.log_records_system = []
+        self.console_source = "system"
+        self._log_search_cursor = 0
         self.read_count = 0
         self.write_count = 0
         self.error_count = 0
@@ -156,9 +176,11 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_sidebar())
         main = QWidget()
         main.setObjectName("workspace")
+        # Explicit floor replaces the toolbar row's ~1400px layout hint: the area
+        # already compresses gracefully below it (window min 1180 - sidebar 320).
+        main.setMinimumWidth(840)
         main_layout = QVBoxLayout(main)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -178,9 +200,19 @@ class MainWindow(QMainWindow):
         self.vertical_split.splitterMoved.connect(lambda: QTimer.singleShot(0, self._reveal_inspector))
         body_layout.addWidget(self.vertical_split, 1)
         main_layout.addWidget(body, 1)
-        root.addWidget(main, 1)
-        self.status_left = label("●  未连接设备")
-        self.statusBar().addWidget(self.status_left, 1)
+        # Sidebar width is drag-resizable, same affordance as the registers/console divider.
+        self.side_split = QSplitter(Qt.Horizontal)
+        self.side_split.setStyleSheet("QSplitter { background: #EFF3F7; }")
+        self.side_split.setHandleWidth(9)
+        self.side_split.setChildrenCollapsible(False)
+        self.side_split.addWidget(self._build_sidebar())
+        self.side_split.addWidget(main)
+        self.side_split.setStretchFactor(0, 0)
+        self.side_split.setStretchFactor(1, 1)
+        self.side_split.setSizes([360, 1180])
+        root.addWidget(self.side_split)
+        # No left-corner notice label: former status-bar messages go to the
+        # system terminal (see _status); only counters and the version remain.
         self.counter_label = label("读取 0     写入 0     错误 0")
         self.statusBar().addPermanentWidget(self.counter_label)
         self.statusBar().addPermanentWidget(label(f"   版本 {__version__}   "))
@@ -201,39 +233,56 @@ class MainWindow(QMainWindow):
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(0, 0, 0, 0)
         brand_layout.setSpacing(0)
-        brand_layout.addWidget(label("Auth：szzhang / cgliu / bxli", "brand"))
+        brand_layout.addWidget(label("DevmemStudio", "brand"))
         layout.addLayout(row(logo, brand, 1, spacing=9))
         layout.addSpacing(12)
-        layout.addWidget(label("目标设备", "sideCaption"))
-        self.host = QLineEdit()
-        self.host.setPlaceholderText("设备 IP 或主机名")
+        self.host = IpAddressField()
         self.host.setAccessibleName("设备主机")
-        layout.addWidget(field("主机地址", self.host))
         self.port = QSpinBox()
         self.port.setRange(1, 65535)
-        self.port.setFixedWidth(69)
+        self.port.setFixedWidth(110)
+        layout.addLayout(row(field("主板地址", self.host), field("端口", self.port)))
         self.user = QLineEdit()
-        layout.addLayout(row(field("用户名", self.user), field("端口", self.port)))
-        self.password = QLineEdit()
-        self.password.setEchoMode(QLineEdit.Password)
+        self.user.setAccessibleName("用户名")
+        self.password, password_box = password_field("密码")
         self.password.setPlaceholderText("SSH 登录密码")
         self.password.setAccessibleName("SSH 密码")
-        reveal = self.password.addAction(icon("eye", "#9DB3C5", 17), QLineEdit.TrailingPosition)
-        reveal.setToolTip("显示 / 隐藏密码")
-        reveal.triggered.connect(lambda: self.password.setEchoMode(
-            QLineEdit.Normal if self.password.echoMode() == QLineEdit.Password else QLineEdit.Password))
-        layout.addWidget(field("密码", self.password))
+        layout.addLayout(row(field("用户名", self.user), password_box))
         self.remember = QCheckBox("记住密码")
         self.remember.setToolTip("将登录密码保存在本机 registers.json 中。")
-        self.timeout = QSpinBox()
-        self.timeout.setRange(1, 120)
-        self.timeout.setSuffix(" s")
-        self.timeout.setFixedWidth(52)
-        self.timeout.setToolTip("SSH 连接超时（秒）")
-        layout.addLayout(row(self.remember, 1, label("超时"), self.timeout, spacing=4))
-        self.connect_button = button("连接设备", self.toggle_connection, "primary", "connect")
+        self.remember.setMinimumHeight(30)
+        layout.addWidget(self.remember)
+        self.connect_button = button("SSH连接", self.toggle_connection, "primary", "connect")
         self.connect_button.setMinimumHeight(35)
         layout.addWidget(self.connect_button)
+        layout.addWidget(divider())
+        layout.addSpacing(2)
+        self.serial_port = ComboBox()
+        self.serial_port.setAccessibleName("本机端口")
+        self.serial_port.setMinimumWidth(140)
+        self._serial_devices = []
+        for device, description in list_serial_ports():
+            self.serial_port.addItem(self._serial_port_label(device, description), device)
+            self._serial_devices.append(device)
+        self.serial_baud = ComboBox()
+        for baud in ("115200", "57600", "38400", "19200", "9600"):
+            self.serial_baud.addItem(baud)
+        self.serial_baud.setFixedWidth(110)
+        layout.addLayout(row(field("本机端口", self.serial_port), field("波特率", self.serial_baud)))
+        self.serial_user = QLineEdit()
+        self.serial_user.setPlaceholderText("留空自动登录")
+        self.serial_user.setAccessibleName("用户名")
+        self.serial_password, serial_password_box = password_field("密码")
+        self.serial_password.setPlaceholderText("留空无需密码")
+        self.serial_password.setAccessibleName("密码")
+        layout.addLayout(row(field("用户名", self.serial_user), serial_password_box))
+        self.serial_remember = QCheckBox("记住密码")
+        self.serial_remember.setToolTip("将串口登录密码保存在本机 registers.json 中。")
+        self.serial_remember.setMinimumHeight(30)
+        layout.addWidget(self.serial_remember)
+        self.serial_connect_button = button("serial连接", self._toggle_serial, "primary", "connect")
+        self.serial_connect_button.setMinimumHeight(35)
+        layout.addWidget(self.serial_connect_button)
         layout.addSpacing(16)
         self.import_button = button("导入 top", self.import_top, "demo", "export")
         self.import_button.setToolTip("解析 emcc mix top 文件，按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
@@ -269,8 +318,6 @@ class MainWindow(QMainWindow):
         self.base_field.setToolTip("未找到 components_param.vh；可手动修改基地址（十六进制）。")
         layout.addLayout(row(label("基地址", "sideCaption"), 1, self.base_field))
         layout.addStretch(0)  # no slack here: the component tree above absorbs it all
-        self.side_state = label("○  会话未建立", "sideCaption")
-        layout.addWidget(self.side_state)
         scroll = _SidebarScroll()
         scroll.setWidget(side)
         return scroll
@@ -281,15 +328,28 @@ class MainWindow(QMainWindow):
         header.setFixedHeight(64)
         layout = QHBoxLayout(header)
         layout.setContentsMargins(24, 12, 24, 12)
-        title = QVBoxLayout()
-        title.setSpacing(3)
-        title.addWidget(label("寄存器调试工作台", "title"))
-        layout.addLayout(title)
         layout.addStretch()
         self.target_label = label("等待建立设备会话", "muted")
         layout.addWidget(self.target_label)
-        self.connection_badge = label("●  离线", "badge")
-        layout.addWidget(self.connection_badge)
+        layout.addSpacing(10)
+        # Two independent status badges so each connection's state is visible at a glance.
+        self.ssh_badge = label("", "badge")
+        layout.addWidget(self.ssh_badge)
+        self.com_badge = label("", "badge")
+        layout.addWidget(self.com_badge)
+        # Freeze each badge at its widest state text so 离线/已连接 toggles never
+        # change the badge size (which would shift the header layout).
+        ssh_variants = [self._badge_dot(s) + t for s, t in
+                        (("offline", "SSH 离线"), ("connected", "SSH 已连接"),
+                         ("demo", "SSH 演示"), ("connecting", "SSH 连接中"))]
+        com_variants = [self._badge_dot("offline") + "serial 离线",
+                        self._badge_dot("connected") + "serial 已连接"]
+        for badge, variants in ((self.ssh_badge, ssh_variants), (self.com_badge, com_variants)):
+            for text in variants:
+                badge.setText(text)
+                badge.setMinimumWidth(max(badge.minimumWidth(), badge.sizeHint().width()))
+            badge.setFixedWidth(badge.minimumWidth())
+        self._update_connection_badge()
         layout.addSpacing(8)
         layout.addWidget(button("使用指南", lambda: show_help(self), "flat", "help"))
         return header
@@ -305,14 +365,12 @@ class MainWindow(QMainWindow):
         self.poll_check = QCheckBox("自动读取")
         self.poll_check.toggled.connect(self._poll_toggled)
         self.interval = ComboBox()
-        self.interval.setEditable(True)
-        self.interval.setInsertPolicy(QComboBox.NoInsert)
         for text, value in (("0.1 s", 100), ("0.2 s", 200), ("0.5 s", 500), ("1 s", 1000),
                             ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
             self.interval.addItem(text, value)
         self.interval.setFixedWidth(88)
-        self.interval.editTextChanged.connect(self._interval_edited)
-        self.interval.setToolTip("自动读取周期；可直接输入毫秒数或带小数的秒数（如 150 或 0.3），最快 0.1 s")
+        self.interval.currentIndexChanged.connect(lambda _i: self._interval_edited())
+        self.interval.setToolTip("自动读取周期")
         self.read_all_button = button("读取全部", self.read_all, "primary", "read")
         self.write_all_button = button("批量写入", self.write_all, None, "write")
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
@@ -348,7 +406,7 @@ class MainWindow(QMainWindow):
         filters_layout.addStretch()
         self.access_filter = ComboBox()
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
-        self.access_filter.setFixedWidth(96)
+        self.access_filter.setFixedWidth(112)
         self.access_filter.currentIndexChanged.connect(self.filter_rows)
         filters_layout.addWidget(self.access_filter)
         self.search = QLineEdit()
@@ -526,8 +584,33 @@ class MainWindow(QMainWindow):
         self.log_filter.currentIndexChanged.connect(self._render_logs)
         self.follow_log = QCheckBox("跟随")
         self.follow_log.setChecked(True)
-        self.board_log_button = button("打印日志", self.open_board_log, "flat", "terminal")
-        self.board_log_button.setToolTip("新窗口打印 tail -f /run/media/sda/sunny.log，主窗口可继续读写寄存器。")
+        # Terminal source selector: log=板端 sunny.log 流, ssh=SSH 命令日志,
+        # serial=串口命令日志, system=软件自身运行日志.
+        self.console_source_combo = ComboBox()
+        for key, text in (("log", "tail log"), ("ssh", "ssh"), ("com", "serial"), ("system", "system")):
+            self.console_source_combo.addItem(text, key)
+        self.console_source_combo.setFixedWidth(118)
+        self.console_source_combo.setToolTip("终端来源：tail log=板端 sunny.log 流（SSH tail），ssh=SSH 会话日志，serial=串口会话日志，system=软件运行日志。")
+        self.console_source_combo.currentIndexChanged.connect(self._change_console_source)
+        self.log_search = QLineEdit()
+        self.log_search.setPlaceholderText("查找日志…")
+        self.log_search.setClearButtonEnabled(True)
+        self.log_search.setMinimumWidth(240)
+        self.log_search.setMaximumWidth(280)
+        self.log_search.addAction(icon("search", size=16), QLineEdit.LeadingPosition)
+        self.log_search.returnPressed.connect(lambda: self._find_in_log(forward=True))
+        # Match counter right of the search box: current match / total matches.
+        self.log_match_count = label("", "muted")
+        self.log_match_count.setMinimumWidth(46)
+        self.log_match_count.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
+        self.log_search.textChanged.connect(self._log_search_changed)
+        self.log_prev = button("", lambda: self._find_in_log(forward=False), "flat", "up")
+        self.log_prev.setToolTip("上一个匹配")
+        self.log_next = button("", lambda: self._find_in_log(forward=True), "flat", "down")
+        self.log_next.setToolTip("下一个匹配")
+        self.log_wrap = QCheckBox("换行")
+        self.log_wrap.setChecked(True)
+        self.log_wrap.toggled.connect(lambda on: self.console.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap))
         self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "export")
         self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；原文件备份为 sunny_fpga.bit_时间戳。")
         self.bit_rollback_button = button("回退bit", self.open_bit_rollback, "flat", "refresh")
@@ -536,29 +619,23 @@ class MainWindow(QMainWindow):
         self.log_download_button.setToolTip("下载板端 /run/media/sda/sunny.log 到本地（选择保存位置）。")
         self.reboot_button = button("重启设备", self.reboot, "flat", "refresh")
         # upload/download/reboot need only a live session, not a selected register component
-        layout.addLayout(row(label("会话终端", "sectionTitle"), self.log_filter, self.follow_log, 1,
-                             self.board_log_button, self.bit_upload_button, self.bit_rollback_button,
+        layout.addLayout(row(label("会话终端", "sectionTitle"),
+                             self.log_filter, self.console_source_combo,
+                             self.log_search, self.log_match_count,
+                             self.log_prev, self.log_next,
+                             self.log_wrap, self.follow_log, 1,
+                             self.bit_upload_button, self.bit_rollback_button,
                              self.log_download_button,
                              self.reboot_button,
                              button("导出", self.export_logs, "flat", "export"),
                              button("清空", self.clear_logs, "flat"), spacing=6))
-        self.console = QPlainTextEdit()
-        self.console.setReadOnly(True)
+        # The console itself is the shell: session views (ssh/serial) expose an
+        # editable prompt line at the bottom; tail log / system stay read-only.
+        self.console = TerminalView(self.send_command)
         self.console.setObjectName("console")
         self.console.setMaximumBlockCount(3000)
-        self.console.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.console.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         layout.addWidget(self.console, 1)
-        self.command = CommandLine()
-        self.command.setObjectName("mono")
-        self.command.setPlaceholderText("输入 shell 命令或地址…    Enter 发送    ↑ ↓ 历史")
-        self.command.returnPressed.connect(self.send_command)
-        self.send_button = button("发送", self.send_command, "primary", "chevron")
-        self.hex_read_button = button("读 HEX", lambda: self.quick_read(True))
-        self.dec_read_button = button("读 DEC", lambda: self.quick_read(False))
-        self.hex_read_button.setToolTip("把输入框中的十六进制地址转换为 devmem 读取。")
-        self.dec_read_button.setToolTip("把输入框中的十进制地址转换为 devmem 读取。")
-        self.remote_buttons.extend([self.send_button, self.hex_read_button, self.dec_read_button])
-        layout.addLayout(row(label("❯", "mono"), self.command, self.hex_read_button, self.dec_read_button, self.send_button))
         return card
 
     def _load_config_fields(self):
@@ -566,22 +643,46 @@ class MainWindow(QMainWindow):
         self.port.setValue(self.cfg["port"])
         self.user.setText(self.cfg["username"])
         self.password.setText(self.cfg["password"])
-        self.timeout.setValue(self.cfg["connect_timeout"])
         self.remember.setChecked(bool(self.cfg["remember_password"]))
         self.base_field.setText(self.cfg["base"])
+        # 串口字段：下拉不可编辑，仅能选枚举项；波特率选预置值。
+        index = self.serial_port.findData(self.cfg.get("serial_port", ""))
+        if index >= 0:
+            self.serial_port.setCurrentIndex(index)
+        index = self.serial_baud.findText(str(self.cfg.get("serial_baud", 115200)))
+        if index >= 0:
+            self.serial_baud.setCurrentIndex(index)
+        self.serial_user.setText(self.cfg.get("serial_username", ""))
+        self.serial_password.setText(self.cfg.get("serial_password", ""))
+        self.serial_remember.setChecked(bool(self.cfg.get("remember_serial_password", False)))
+        # 终端来源不记忆：每次打开固定在 system，仅本次会话内手动切换。
+        idx = self.console_source_combo.findData("system")
+        self.console_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.console_source = self.console_source_combo.currentData() or "system"
         saved = self.cfg.get("poll_interval", 1000)
         index = self.interval.findData(saved)
-        if index >= 0:
-            self.interval.setCurrentIndex(index)
-        else:
-            # 自定义周期（如 150ms）：以文本形式回填，保留最接近的预设供选择。
-            self.interval.setEditText(f"{saved} ms" if saved < 1000 else f"{saved / 1000:g} s")
+        if index < 0:
+            # 旧配置里的自定义周期：选最接近的预设。
+            presets = [self.interval.itemData(i) for i in range(self.interval.count())]
+            index = min(range(len(presets)), key=lambda i: abs(presets[i] - saved), default=0)
+        self.interval.setCurrentIndex(index)
 
     def _shortcuts(self):
-        for sequence, callback in (("F5", self.read_all), ("Ctrl+F", self.search.setFocus),
-                                   ("Ctrl+L", self.command.setFocus), ("Ctrl+Shift+S", self.export_snapshot),
+        for sequence, callback in (("F5", self.read_all), ("Ctrl+F", self._focus_log_search),
+                                   ("Ctrl+L", self.console.setFocus), ("Ctrl+Shift+S", self.export_snapshot),
                                    ("Esc", self.cancel_task)):
             QShortcut(QKeySequence(sequence), self, activated=callback)
+
+    def _focus_log_search(self):
+        """Ctrl+F: seed the search box with the terminal's current selection."""
+        cursor = self.console.textCursor()
+        if cursor.hasSelection():
+            # selectedText uses U+2020 for newlines; first line only, trimmed.
+            text = cursor.selectedText().split("†")[0].strip()
+            if text:
+                self.log_search.setText(text)   # find-as-you-type picks it up
+        self.log_search.setFocus()
+        self.log_search.selectAll()
 
     def import_top(self):
         if self._closing or self._busy or self.connected:
@@ -755,7 +856,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             self.base_field.setProperty("invalid", True)
             restyle(self.base_field)
-            self.status_left.setText("基地址须为 0x00000000–0xFFFFFFFF 的十六进制数。")
+            self._status("基地址须为 0x00000000–0xFFFFFFFF 的十六进制数。")
             self.address_valid = False
             self.poll_check.setChecked(False)
             self._refresh_controls()
@@ -846,7 +947,7 @@ class MainWindow(QMainWindow):
         if self._busy:
             # Queue the switch; applied when the running task finishes (see _task_finished).
             self._pending_component = comp
-            self.status_left.setText(f"当前任务完成后切换到 {self._component_display_name(comp)}。")
+            self._status(f"当前任务完成后切换到 {self._component_display_name(comp)}。")
             return
         self.active_component = comp
         self._highlight_component()
@@ -912,7 +1013,7 @@ class MainWindow(QMainWindow):
             self.address_valid = False
             self.base_field.setProperty("invalid", True)
             restyle(self.base_field)
-            self.status_left.setText(str(exc))
+            self._status(str(exc))
             self.poll_check.setChecked(False)
             self._refresh_controls()
             return
@@ -1315,7 +1416,7 @@ class MainWindow(QMainWindow):
             self._updating = True
             self.format_combo.setCurrentIndex(0 if self._last_fmt == "H" else 1)
             self._updating = False
-            self.status_left.setText("请先修正写入值，再切换进制。")
+            self._status("请先修正写入值，再切换进制。")
             return
         self._last_fmt = new
         self.write_input.setText(f"{value:X}" if new == "H" else str(value))
@@ -1339,7 +1440,7 @@ class MainWindow(QMainWindow):
     def copy_address(self):
         if self.selected:
             QApplication.clipboard().setText(f'0x{self.selected["_address"]:08X}')
-            self.status_left.setText("寄存器地址已复制。")
+            self._status("寄存器地址已复制。")
 
     def _refresh_controls(self):
         enabled = self.connected and not self._busy and getattr(self, "address_valid", False)
@@ -1353,12 +1454,19 @@ class MainWindow(QMainWindow):
                 if control in stale:
                     stale.remove(control)
         # Commands and the independent log stream do not depend on register addresses.
-        for control in (self.send_button, self.reboot_button, self.bit_upload_button, self.bit_rollback_button,
-                        self.log_download_button, self.hex_read_button, self.dec_read_button):
+        # Terminal input lives in the console itself; availability follows the source:
+        # serial views need the serial link, everything else rides the SSH session.
+        for control in (self.reboot_button, self.bit_upload_button, self.bit_rollback_button,
+                        self.log_download_button):
             control.setEnabled(self.connected and not self._busy and not self._closing)
-        self.board_log_button.setEnabled(self.connected and not self._closing)
-        for control in (self.host, self.port, self.user, self.password, self.timeout, self.remember):
+        for control in (self.host, self.port, self.user, self.password, self.remember):
             control.setEnabled(not self.connected and not self._busy)
+        # Serial side is fully independent: its fields follow _serial_busy only,
+        # so SSH tasks never lock the serial connection UI (and vice versa).
+        for control in (self.serial_port, self.serial_baud, self.serial_user, self.serial_password,
+                        self.serial_remember):
+            control.setEnabled(not self.serial_connected and not self._serial_busy)
+        self.serial_connect_button.setEnabled(not self._serial_busy)
         for control in (self.component_tree, self.component_search, self.import_component_button,
                         self.access_filter, self.search, *self.view_buttons.values()):
             control.setEnabled(not self._busy and not self._closing)
@@ -1366,7 +1474,7 @@ class MainWindow(QMainWindow):
         self.import_button.setEnabled(not self._busy and not self._closing and not self.connected)
         if self.rtl_base is None:
             self.base_field.setEnabled(not self._busy and not self._closing)
-        self.connect_button.setEnabled(not self._busy)
+        self.connect_button.setEnabled(not self._busy or self._task_kind == "connect")
         self.poll_check.setEnabled(self.connected and getattr(self, "address_valid", False))
         self.editor_panel.setEnabled(not self._busy and getattr(self, "address_valid", False))
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers if self._busy else
@@ -1375,25 +1483,29 @@ class MainWindow(QMainWindow):
         if self.selected:
             self._update_command_preview()
 
+    def _style_session_button(self, btn, connected, on_text, off_text):
+        """Connect buttons: blue 'connect' while offline, red 'disconnect' once linked."""
+        btn.setText(on_text if connected else off_text)
+        btn.setObjectName("danger" if connected else "primary")
+        btn.setIcon(icon("disconnect", "#B64242") if connected else icon("connect", "#FFFFFF"))
+        restyle(btn)
+
     def _set_connection(self, connected):
         self.connected = connected
         # DemoSession is an internal simulator used by tests and offline acceptance.
         self.demo = isinstance(self.session, DemoSession)
-        state = "demo" if connected and self.demo else "connected" if connected else "offline"
-        self.connection_badge.setProperty("state", state)
-        self.connection_badge.setText("●  演示数据" if connected and self.demo else "●  已连接" if connected else "●  离线")
-        restyle(self.connection_badge)
-        self.target_label.setText("本地模拟设备 · 不连接硬件" if connected and self.demo else
-                                  f"{self.user.text()}@{self.host.text()}:{self.port.value()}" if connected else "等待建立设备会话")
-        self.connect_button.setText("断开连接" if connected else "连接设备")
-        self.side_state.setText("●  演示会话运行中" if connected and self.demo else "●  SSH 会话已建立" if connected else "○  会话未建立")
-        self.status_left.setText("演示模式 · 当前数据来自本地模拟" if connected and self.demo else
-                                 "设备已连接 · 就绪" if connected else "●  未连接设备")
+        self._update_connection_badge()
+        self._refresh_target_label()
+        self._style_session_button(self.connect_button, connected, "断开SSH", "SSH连接")
+        if connected and self.demo:
+            self._status("演示模式 · 当前数据来自本地模拟")
         if not connected:
             self.poll_check.setChecked(False)
             self._stop_stream()
-        if self.board_log:
-            self.board_log.set_connected(connected)
+        else:
+            # SSH just came up: tail sunny.log into the log buffer (background,
+            # regardless of the visible source).
+            self._ensure_log_stream()
         self._show_measurement()
         self._refresh_controls()
 
@@ -1407,16 +1519,20 @@ class MainWindow(QMainWindow):
 
     def toggle_connection(self):
         if self._busy:
+            # A connect in flight: the same button doubles as the cancel control.
+            if self._task_kind == "connect":
+                self.append_log("SYSTEM", "已请求取消 SSH 连接。")
+                self.session.close()   # closes the handshake socket → connect raises at once
             return
         if self.connected:
             self.disconnect()
             return
         if not self.host.text().strip() or not self.user.text().strip():
-            self.status_left.setText("请填写设备主机地址和用户名。")
+            self._status("请填写设备主机地址和用户名。")
             self.host.setFocus()
             return
         request = (self.host.text().strip(), self.port.value(), self.user.text().strip(),
-                   self.password.text(), self.timeout.value())
+                   self.password.text(), CONNECT_TIMEOUT)
         self._connect_device(request)
 
     def _connect_device(self, request, approved_change=None):
@@ -1427,12 +1543,13 @@ class MainWindow(QMainWindow):
             raise ValueError("确认的主机密钥与连接目标不一致。")
         self._pending_host_key_change = None
         self.session.close()
-        self.session = session = SshSession(self.bridge.message.emit)
+        self.session = session = SshSession(self._log_emit("ssh"))
         self._reset_measurements()
         self.save_settings()
-        self.connect_button.setText("正在连接…")
-        self.connection_badge.setText("●  连接中")
-        self.append_log("SYSTEM", f"正在连接 {user}@{host}:{port}，超时 {timeout} 秒。")
+        # The button becomes a red 'cancel' control while the handshake runs.
+        self._style_session_button(self.connect_button, True, "取消连接", "SSH连接")
+        self.ssh_badge.setText(self._badge_dot("connecting") + "SSH 连接中")
+        self.append_log("SYSTEM", f"正在连接 {user}@{host}:{port}。")
         def connect(progress):
             if approved_change:
                 session.replace_host_key(approved_change)
@@ -1445,12 +1562,11 @@ class MainWindow(QMainWindow):
             if isinstance(result, HostKeyChangedError):
                 self._set_connection(False)
                 self.append_log("ERROR", str(result))
-                self.status_left.setText("主机密钥已变化，等待核对指纹。")
                 self._pending_host_key_change = (result, request)
                 return
             self._set_connection(True)
             self.append_log("SUCCESS", "SSH 连接成功。")
-        self._run_task(connect, done, "连接设备", "connect")
+        self._run_task(connect, done, "SSH连接", "connect")
 
     def _confirm_host_key_change(self, change, request):
         if self._closing or self._busy or self.connected or self.cancel.is_set():
@@ -1462,7 +1578,6 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted and not self._closing:
             self._connect_device(request, approved_change=change)
         elif not self._closing:
-            self.status_left.setText("已取消连接，保留原主机密钥记录。")
             self.append_log("SYSTEM", "已取消主机密钥更新。")
 
     def disconnect(self):
@@ -1471,6 +1586,159 @@ class MainWindow(QMainWindow):
         self._set_connection(False)
         self._pending_component = None
         self.append_log("SYSTEM", "会话已断开。当前显示保留为最近一次读取结果。")
+
+    def _serial_baud_value(self):
+        text = str(self.serial_baud.currentText()).strip()
+        try:
+            return max(1200, min(10000000, int(float(text))))
+        except ValueError:
+            return 115200
+
+    def _toggle_serial(self):
+        if self._serial_busy:
+            # A connect in flight: the same button doubles as the cancel control.
+            self._serial_cancel_requested = True
+            self.append_log("SYSTEM", "已请求取消 serial 连接。")
+            if self._task_serial:
+                self._task_serial.cancel_connect()
+            return
+        if self.serial_connected:
+            self.disconnect_serial()
+            return
+        port = self._selected_serial_port()
+        if not port:
+            self._status("请选择 serial 端口。")
+            self.serial_port.setFocus()
+            return
+        request = (port, self._serial_baud_value(), self.serial_user.text().strip(),
+                   self.serial_password.text(), CONNECT_TIMEOUT)
+        self._connect_serial(request)
+
+    def _serial_port_label(self, device, description):
+        """Pick text for a listed serial entry: the full board name (e.g.
+        ``USB Serial Port (COM6)``), falling back to the device when Windows
+        gives no description. The device stays as the item data for the
+        actual connection."""
+        return (description or "").strip() or device
+
+    def _selected_serial_port(self):
+        """The device name for the picked port: the combo's data (COMx) when a
+        listed entry is chosen, else the typed text."""
+        data = self.serial_port.currentData()
+        return (data if isinstance(data, str) and data else self.serial_port.currentText()).strip()
+
+    def _connect_serial(self, request):
+        """Connect serial on its own worker, outside the global busy gate:
+        SSH (and register tasks) stay fully usable while serial handshakes."""
+        if self._serial_busy or self._closing:
+            return
+        port, baud, user, password, timeout = request
+        self.serial.close()
+        session = SerialSession(self._log_emit("com"))
+        self._task_serial = session
+        self.save_settings()
+        self._serial_busy = True
+        # Same 3px indeterminate bar as the SSH handshake (see _update_progress).
+        self.progress.setRange(0, 0)
+        self.progress.show()
+        # The button becomes a red 'cancel' control while the handshake runs.
+        self._style_session_button(self.serial_connect_button, True, "取消连接", "serial连接")
+        for control in (self.serial_port, self.serial_baud, self.serial_user,
+                        self.serial_password, self.serial_remember):
+            control.setEnabled(False)
+        self.append_log("SYSTEM", f"正在连接 serial {port} @ {baud} bps。")
+        def connect(progress):
+            session.connect(port, baud, user, password, timeout)
+            return True
+        def done(result):
+            if self._closing:
+                return
+            self._serial_busy = False
+            self._task_serial = None
+            self.serial = session
+            self.serial_connected = True
+            self._serial_device = port
+            self._reflect_serial(True)
+            self.append_log("SUCCESS", "serial 连接成功。")
+        def failed(message):
+            if self._closing:
+                return
+            self._serial_busy = False
+            if self._task_serial:
+                self._task_serial.close()
+                self._task_serial = None
+            self.serial_connected = False
+            self._serial_device = None
+            self._reflect_serial(False)
+            cancelled = self._serial_cancel_requested
+            self._serial_cancel_requested = False
+            self.append_log("SYSTEM" if cancelled else "ERROR", message)
+        worker = Worker(connect)
+        self._serial_worker = worker   # keep the reference: pool.start alone lets GC drop it
+        worker.signals.result.connect(done)
+        worker.signals.failed.connect(failed)
+        worker.signals.finished.connect(self._serial_worker_finished)
+        self.pool.start(worker)
+
+    def _serial_worker_finished(self):
+        self._serial_busy = False
+        self._serial_worker = None
+        if self._closing:
+            QTimer.singleShot(0, self.close)
+        else:
+            self._update_progress()
+
+    def disconnect_serial(self):
+        self.serial.close()
+        self.serial_connected = False
+        self._serial_device = None
+        self._reflect_serial(False)
+        self.append_log("SYSTEM", "serial 会话已断开。")
+
+    def _reflect_serial(self, connected):
+        self.serial_connected = connected
+        self._style_session_button(self.serial_connect_button, connected, "断开连接", "serial连接")
+        self._update_connection_badge()
+        self._refresh_target_label()
+        self._refresh_controls()
+
+    def _refresh_target_label(self):
+        """Top-right SSH session summary; the serial state lives in the badges.
+        The waiting hint only shows when nothing at all is connected."""
+        if self.connected and self.demo:
+            text = "本地模拟设备"
+        elif self.connected:
+            text = f"SSH {self.user.text()}@{self.host.text()}:{self.port.value()}"
+        elif self.serial_connected:
+            text = ""
+        else:
+            text = "等待建立设备会话"
+        self.target_label.setText(text)
+
+    def _update_connection_badge(self):
+        """Refresh the two independent SSH/serial status badges in the top-right.
+        Each shows its own connection state so neither hides the other. The dot
+        is a fixed-size rich-text glyph whose color alone changes, so it renders
+        the same size in every state."""
+        if self.connected and self.demo:
+            ssh_text, ssh_state = "SSH 演示", "demo"
+        elif self.connected:
+            ssh_text, ssh_state = "SSH 已连接", "connected"
+        else:
+            ssh_text, ssh_state = "SSH 离线", "offline"
+        self.ssh_badge.setText(self._badge_dot(ssh_state) + ssh_text)
+        self.ssh_badge.setProperty("state", ssh_state)
+        restyle(self.ssh_badge)
+        com_state = "connected" if self.serial_connected else "offline"
+        self.com_badge.setText(self._badge_dot(com_state) + ("serial 已连接" if self.serial_connected else "serial 离线"))
+        self.com_badge.setProperty("state", com_state)
+        restyle(self.com_badge)
+
+    @staticmethod
+    def _badge_dot(state):
+        """Fixed-size status dot (rich-text span; only the color varies by state)."""
+        colors = {"connected": "#157767", "demo": "#B57518", "connecting": "#2463DC", "offline": "#8395A8"}
+        return f'<span style="color:{colors.get(state, "#8395A8")};font-size:13px">●</span>&nbsp;&nbsp;'
 
     def open_bit_upload(self):
         if self._closing or not self.connected or self._busy:
@@ -1520,7 +1788,6 @@ class MainWindow(QMainWindow):
             stamp = datetime.now().strftime("%Y%m%d%H%M%S")
             self.bit_dialog.status.setText(f"已上传为 {remote_dir}/sunny_fpga.bit；原文件备份为 sunny_fpga.bit_{stamp}。")
             self.bit_dialog.upload_button.setEnabled(True)
-            self.status_left.setText("bit file 上传完成。")
             self.append_log("SUCCESS", f"bit file 上传完成：{Path(local_path).name} -> {remote_dir}/sunny_fpga.bit")
 
         def failed(message):
@@ -1528,7 +1795,6 @@ class MainWindow(QMainWindow):
             self.bit_dialog.status.setText("上传失败：" + message)
             self.bit_dialog.upload_button.setEnabled(True)
             self.append_log("ERROR", f"bit file 上传失败：{message}")
-            self.status_left.setText(message[:150])
 
         def finished():
             self._busy = False
@@ -1559,7 +1825,6 @@ class MainWindow(QMainWindow):
             return
         self._bit_last_paint = now
         self.bit_dialog.set_percent(percent)
-        self.status_left.setText(f"上传bit file {percent}% ({current:,} / {total:,} 字节)")
 
     def open_bit_rollback(self):
         if self._closing or not self.connected or self._busy:
@@ -1646,7 +1911,6 @@ class MainWindow(QMainWindow):
                 return
             dialog.set_done()
             dialog.status.setText(f"已回退：{name} 恢复为 sunny_fpga.bit（原当前版本已备份）。")
-            self.status_left.setText("bit 回退完成。")
             self.append_log("SUCCESS", f"bit 回退完成：{name} -> sunny_fpga.bit")
 
         def failed(message):
@@ -1656,7 +1920,6 @@ class MainWindow(QMainWindow):
             dialog.set_busy(False)
             dialog.status.setText("回退失败：" + message)
             self.append_log("ERROR", f"bit 回退失败：{message}")
-            self.status_left.setText(message[:150])
 
         def finished():
             if self._closing:
@@ -1684,7 +1947,6 @@ class MainWindow(QMainWindow):
         current, total = data.get("current", 0), data.get("total", 100)
         percent = min(100, int(current * 100 / total)) if total > 0 else 0
         self.bit_rollback_dialog.set_percent(percent)
-        self.status_left.setText(f"bit 回退 {percent}%")
 
     def download_board_log(self):
         if self._closing or not self.connected or self._busy:
@@ -1703,12 +1965,10 @@ class MainWindow(QMainWindow):
             return path
 
         def done(result):
-            self.status_left.setText("板端日志已下载：" + result)
             self.append_log("SUCCESS", f"板端日志已下载：{remote_path} -> {result}")
 
         def failed(message):
             self.append_log("ERROR", f"板端日志下载失败：{message}")
-            self.status_left.setText(message[:150])
 
         self._run_task(task, done, "下载板端日志", "download")
 
@@ -1719,7 +1979,6 @@ class MainWindow(QMainWindow):
         self._busy = True
         self._task_kind = kind
         self._task_callback = callback
-        self.status_left.setText(description + "…")
         self.progress.setRange(0, 0)
         self.progress.show()
         self._refresh_controls()
@@ -1741,11 +2000,12 @@ class MainWindow(QMainWindow):
     def _task_failed(self, message):
         if self._closing:
             return
-        self.append_log("ERROR", message)
+        # Task failures are software-level events: they land in the system log;
+        # user-initiated cancels are not errors.
+        self.append_log("SYSTEM" if "已取消" in message else "ERROR", message)
         self.poll_check.setChecked(False)
         if not self.session.alive:
             self._set_connection(False)
-        self.status_left.setText(message[:150])
 
     @Slot(object)
     def _task_progress(self, data):
@@ -1770,16 +2030,27 @@ class MainWindow(QMainWindow):
         current, total = data.get("current", 0), data.get("total", 1)
         self.progress.setRange(0, total)
         self.progress.setValue(current)
-        self.status_left.setText(f'{"写入并回读" if data.get("write") else "读取"} {current} / {total}')
+
+    def _update_progress(self):
+        """The 3px bar is shared by SSH tasks and the serial handshake: it stays
+        visible while either runs. A running task owns range/value; the serial
+        handshake alone gets the indeterminate reset here."""
+        if self._busy:
+            return
+        if self._serial_busy:
+            self.progress.setRange(0, 0)
+            self.progress.show()
+        else:
+            self.progress.hide()
 
     @Slot()
     def _task_finished(self):
         self._busy = False
         self._task_callback = None
         self._active_worker = None
-        self.progress.hide()
+        self._update_progress()
         self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
-        self.connect_button.setText("断开连接" if self.connected else "连接设备")
+        self._style_session_button(self.connect_button, self.connected, "断开SSH", "SSH连接")
         self._refresh_controls()
         pending, self._pending_component = self._pending_component, None
         if self._closing:
@@ -1797,7 +2068,9 @@ class MainWindow(QMainWindow):
             self.poll_check.setChecked(False)
             if self._task_kind == "connect":
                 self.session.close()
-            self.status_left.setText("正在停止；当前已发送的命令完成后结束。")
+            elif self._task_kind == "serial":
+                self._task_serial.close()
+                self._task_serial = None
             self.append_log("SYSTEM", "已请求停止后续操作。")
 
     def _can_operate(self):
@@ -1839,15 +2112,14 @@ class MainWindow(QMainWindow):
             return completed
         def done(count):
             message = f"读取{'已停止' if self.cancel.is_set() else '完成'} · {count} / {len(records)} 项"
-            self.status_left.setText(message)
             if not quiet or self.cancel.is_set():
                 self.append_log("SUCCESS" if not self.cancel.is_set() else "SYSTEM", message)
         self._run_task(task, done, "读取寄存器", "read")
 
     def read_all(self):
         if not self.visible_regs:
-            self.status_left.setText("当前视图没有可读取的寄存器。" if self.active_component
-                                     else "请先在左侧组件目录中选择组件。")
+            self._status("当前视图没有可读取的寄存器。" if self.active_component
+                         else "请先在左侧组件目录中选择组件。")
             return
         self._read_many(self.visible_regs)
 
@@ -1885,7 +2157,6 @@ class MainWindow(QMainWindow):
             return completed
         def done(count):
             message = f"写入并回读{'已停止' if self.cancel.is_set() else '完成'} · {count} / {len(plans)} 项"
-            self.status_left.setText(message)
             self.append_log("SUCCESS" if not self.cancel.is_set() else "SYSTEM", message)
         self._run_task(task, done, "写入寄存器", "write")
 
@@ -1904,7 +2175,6 @@ class MainWindow(QMainWindow):
             self._write_many([self.selected])
         except ValueError as exc:
             self.append_log("ERROR", str(exc))
-            self.status_left.setText(str(exc))
 
     def write_all(self):
         if not self._can_operate():
@@ -1944,14 +2214,13 @@ class MainWindow(QMainWindow):
             return max(100, min(60000, int(data)))
         return 1000
 
-    def _interval_edited(self, text):
-        if self._poll_interval_ms() != (self.interval.currentData() or 1000):
-            self._schedule_save()
+    def _interval_edited(self):
+        self._schedule_save()
 
     def _poll_toggled(self, checked):
         self._next_poll = 0
         if checked:
-            self.status_left.setText("自动读取已开启 · 每次读取完成后等待所选间隔")
+            self._status("自动读取已开启 · 每次读取完成后等待所选间隔")
 
     def _poll(self):
         if self.poll_check.isChecked() and not self._closing and self._can_operate() and time.monotonic() >= self._next_poll:
@@ -1962,31 +2231,56 @@ class MainWindow(QMainWindow):
             self.session.close()
             self._set_connection(False)
             self.append_log("ERROR", "设备连接已中断，请检查网络或设备状态后重新连接。")
+        if self.serial_connected and not self._busy and not self.serial.alive:
+            self.serial.close()
+            self.serial_connected = False
+            self._reflect_serial(False)
+            self.append_log("ERROR", "serial 连接已中断，请检查串口线缆后重新连接。")
+        self._refresh_serial_ports()
 
-    def send_command(self):
-        if not self.connected or self._busy:
+    def _refresh_serial_ports(self):
+        """Rescan attached COM ports: pick up hot-plugs and drop the connected
+        port when its device disappears from the system."""
+        if self._closing or self._busy:
             return
-        text = self.command.text().strip()
+        devices = [device for device, _ in list_serial_ports()]
+        if self.serial_connected and self._serial_device and self._serial_device not in devices:
+            # The plugged-in port was unplugged: drop the session cleanly.
+            self.serial.close()
+            self.serial_connected = False
+            self._reflect_serial(False)
+            self.append_log("ERROR", f"serial {self._serial_device} 已拔出，连接已断开。")
+        if devices != self._serial_devices:
+            current = self.serial_port.currentData()
+            self.serial_port.blockSignals(True)
+            self.serial_port.clear()
+            for device, description in list_serial_ports():
+                self.serial_port.addItem(self._serial_port_label(device, description), device)
+            self._serial_devices = devices
+            if current is not None and current in devices:
+                self.serial_port.setCurrentIndex(self.serial_port.findData(current))
+            self.serial_port.blockSignals(False)
+
+    def send_command(self, text=""):
+        """Run a shell command typed in the terminal prompt (routes by source)."""
+        if self._busy:
+            return
+        text = (text or "").strip()
         if not text:
             return
-        self.command.remember(text)
+        if self.console_source == "com":
+            if not self.serial_connected:
+                self._status("serial 未连接，请先连接 serial。")
+                return
+            session = self.serial
+        else:  # ssh / log / system 视图的输入都走 SSH
+            if not self.connected:
+                self._status("SSH 未连接，请先连接 SSH。")
+                return
+            session = self.session
         def done(result):
-            self.status_left.setText("命令执行完成。")
-        self._run_task(lambda progress: self.session.run(text), done, "执行命令", "command")
-
-    def quick_read(self, hexadecimal):
-        if not self.connected or self._busy:
-            return
-        text = self.command.text().strip()
-        try:
-            value = int(text, 16 if hexadecimal else 10)
-            address = validated_address(hex(value))
-        except ValueError:
-            self.status_left.setText("请输入有效的" + ("十六进制" if hexadecimal else "十进制") + "地址。")
-            self.command.setFocus()
-            return
-        self.command.setText(f"devmem 0x{address:08x}")
-        self.send_command()
+            self._status("命令执行完成。")
+        self._run_task(lambda progress: session.run(text), done, "执行命令", "command")
 
     def reboot(self):
         if not self.connected or self._busy:
@@ -2006,29 +2300,17 @@ class MainWindow(QMainWindow):
             self.append_log("SYSTEM", "reboot 命令已发送，请等待设备重启后重新连接。")
         self._run_task(task, done, "重启设备", "reboot")
 
-    def open_board_log(self):
-        if self._closing or not self.connected:
+    def _ensure_log_stream(self):
+        """Start tailing sunny.log whenever SSH is up (regardless of the visible
+        view): the live log flows into the log buffer in the background, and the
+        log source view shows it on demand. Called on SSH connect and when the
+        log view is selected while the stream has died."""
+        if self._closing or not self.connected or self._stream_state != "stopped":
             return
-        if self.board_log is None:
-            self.board_log = BoardLogDialog(DEFAULT_LOG_PATH, self)
-            self.board_log.start_requested.connect(self._start_stream)
-            self.board_log.stop_requested.connect(self._stop_stream)
-        self.board_log.set_connected(True)
-        if self.board_log.isMinimized():
-            self.board_log.showNormal()
-        else:
-            self.board_log.show()
-        self.board_log.raise_()
-        self.board_log.activateWindow()
-        if self.board_log.path.text() != DEFAULT_LOG_PATH:
-            self._stop_stream()
-            self.board_log.path.setText(DEFAULT_LOG_PATH)
-        if self._stream_state == "stopped":
-            self.board_log.path.setText(DEFAULT_LOG_PATH)
-            self._start_stream(DEFAULT_LOG_PATH)
+        self._start_stream(DEFAULT_LOG_PATH)
 
     def _start_stream(self, path):
-        if self._closing or not self.connected or self.board_log is None or self._stream_state != "stopped":
+        if self._closing or not self.connected or self._stream_state != "stopped":
             return
         self.cfg["log_path"] = path
         self._schedule_save()
@@ -2036,7 +2318,6 @@ class MainWindow(QMainWindow):
         token = self._stream_epoch
         self._stream_cancel = stop = threading.Event()
         self._stream_state = "starting"
-        self.board_log.set_streaming(False, starting=True)
         session = self.session
         def task(progress):
             return session.start_stream(path, lambda text: self.bridge.stream.emit(token, text),
@@ -2051,25 +2332,26 @@ class MainWindow(QMainWindow):
     def _stop_stream(self):
         self._stream_epoch += 1
         self._stream_cancel.set()
-        self.session.stop_stream()
+        try:
+            self.session.stop_stream()
+        except Exception:
+            pass
         self._stream_state = "stopped"
-        if self.board_log:
-            self.board_log.set_streaming(False)
 
     @Slot(int, bool)
     def _stream_ready(self, token, active):
-        if self.board_log and not self._closing and token == self._stream_epoch:
+        if not self._closing and token == self._stream_epoch:
             active = active and self._stream_finished_epoch != token
             self._stream_state = "running" if active else "stopped"
-            self.board_log.set_streaming(active)
+            if active and self.console_source != "log":
+                self._status("sunny.log 正在打印（切到 tail log 查看）。")
 
     @Slot(int, str)
     def _stream_failed(self, token, message):
-        if self.board_log and not self._closing and token == self._stream_epoch:
+        if not self._closing and token == self._stream_epoch:
             self._stream_state = "stopped"
-            self.board_log.set_streaming(False)
-            self.board_log.append(f"\n启动日志失败：{message}\n")
-            self.board_log.state.setText("启动失败 · 可重试，主窗口可继续读写")
+            # Show the failure in the log view (where sunny.log would render) and the SSH log.
+            self._append_log_stream(f"\n启动日志失败：{message}\n")
             self.append_log("ERROR", "打印日志启动失败：" + message)
 
     @Slot(int)
@@ -2080,72 +2362,199 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str)
     def _stream_output(self, token, text):
-        if self.board_log and not self._closing and token == self._stream_epoch:
-            self.board_log.append(text)
+        if not self._closing and token == self._stream_epoch:
+            self._append_log_stream(text)
 
     @Slot(int)
     def _stream_stopped(self, token):
-        if self.board_log and not self._closing and token == self._stream_epoch:
+        if not self._closing and token == self._stream_epoch:
             self._stream_finished_epoch = token
             self._stream_state = "stopped"
-            self.board_log.set_streaming(False)
 
     def _update_counts(self):
         self.counter_label.setText(f"读取 {self.read_count}     写入 {self.write_count}     错误 {self.error_count}")
 
-    @Slot(str, str)
-    def append_log(self, level, text):
+    def _status(self, text):
+        """Notices that used to live in the status bar's left corner; they now
+        land in the system terminal."""
+        self.append_log("SYSTEM", text)
+
+    @Slot(str, str, str)
+    def append_log(self, level, text, source="system"):
         if self._closing:
             return
+        # source rides with the signal (sessions) or is passed explicitly by
+        # direct callers. Direct calls default to the software's own log
+        # ("system"): session output, the sunny.log stream and software
+        # bookkeeping (handshake, imports, bit ops) each stay in their terminal.
         stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         text = str(text)
         record = (stamp, level, text)
-        self.log_records.append(record)
-        if len(self.log_records) > 3000:
-            self.log_records = self.log_records[-3000:]
+        buf = self._records_for(source)
+        buf.append(record)
+        if len(buf) > 3000:
+            del buf[:-3000]
+            if source == "ssh":
+                self.log_records = buf
         if level == "ERROR":
             self.error_count += 1
             self._update_counts()
         if self.file_logger:
             self.file_logger.info("[%s] %s", level, text)
-        if self._log_visible(level):
+        if source == self.console_source and self._log_visible(level):
             self._append_log_record(record)
 
+    def _log_emit(self, source):
+        """Per-session log callback: the session calls log(level, text); the
+        adapter attaches this session's source. SYSTEM-level records (session
+        handshake bookkeeping like 串口已打开/控制台已就绪) go to the system log."""
+        def emit(level, text):
+            self.bridge.message.emit(level, text, "system" if level == "SYSTEM" else source)
+        return emit
+
+    def _records_for(self, source):
+        return {"ssh": self.log_records_ssh, "com": self.log_records_com,
+                "log": self.log_records_log, "system": self.log_records_system}.get(source, self.log_records_ssh)
+
     def _log_visible(self, level):
+        # log stream has no levels; only the level filter applies to ssh/com.
+        if self.console_source == "log":
+            return True
         mode = self.log_filter.currentIndex()
         return mode == 0 or mode == 1 and level == "ERROR" or mode == 2 and level == "CMD"
 
     def _append_log_record(self, record):
         stamp, level, text = record
         colors = {"ERROR": "#FFAAAA", "SUCCESS": "#80D7C2", "CMD": "#87B8FF", "SYSTEM": "#9CAFBD", "INFO": "#C8D7E5"}
-        cursor = QTextCursor(self.console.document())
-        cursor.movePosition(QTextCursor.End)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(colors.get(level, "#C8D7E5")))
         lines = text.rstrip("\n").splitlines() or [""]
         rendered = f"{stamp}  {level:<7} {lines[0]}\n" + "".join(f"                     {line}\n" for line in lines[1:])
-        cursor.insertText(rendered, fmt)
+        if self.console.is_interactive():
+            # Session view: new records land above the prompt line.
+            self.console.append_before_prompt(rendered, fmt)
+        else:
+            cursor = QTextCursor(self.console.document())
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(rendered, fmt)
         if self.follow_log.isChecked():
             self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+    def _append_log_stream(self, text):
+        """Append raw sunny.log text to the log buffer/console (no stamp/level)."""
+        if not text:
+            return
+        self.log_records_log.append(text)
+        if len(self.log_records_log) > 5000:
+            del self.log_records_log[:-5000]
+        if self.console_source == "log":
+            cursor = QTextCursor(self.console.document())
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(text)
+            if self.follow_log.isChecked():
+                self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
 
     def _render_logs(self, *args):
         if not hasattr(self, "console"):
             return
         self.console.clear()
-        for record in self.log_records:
-            if self._log_visible(record[1]):
-                self._append_log_record(record)
+        if self.console_source == "log":
+            cursor = QTextCursor(self.console.document())
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText("".join(self.log_records_log))
+            if self.follow_log.isChecked():
+                self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+        else:
+            for record in self._records_for(self.console_source):
+                if self._log_visible(record[1]):
+                    self._append_log_record(record)
+        # Session terminals are interactive (prompt at the bottom); log/system views are plain.
+        self.console.set_interactive(self.console_source in ("ssh", "com"))
+        # The visible content changed: refresh the search match counter.
+        if getattr(self, "log_search", None) and self.log_search.text():
+            self._log_search_changed()
 
     def clear_logs(self):
-        self.log_records.clear()
+        self._records_for(self.console_source).clear()
         self.console.clear()
+        self.console.set_interactive(self.console_source in ("ssh", "com"))   # re-adds the prompt
+        if getattr(self, "log_search", None) and self.log_search.text():
+            self._log_search_changed()
+
+    def _change_console_source(self, _index):
+        source = self.console_source_combo.currentData() or "system"
+        prev = self.console_source
+        self.console_source = source
+        if prev == source:
+            return
+        # The sunny.log stream follows the SSH connection, not the visible view:
+        # it keeps printing into the log buffer in the background. Switching to
+        # the log view only nudges a dead stream back on.
+        if source == "log" and self.connected and self._stream_state == "stopped":
+            self._ensure_log_stream()
+        self._render_logs()
+        self._refresh_controls()
+
+    def _set_console_source(self, key):
+        """Programmatically select a console source (auto-switch on connect)."""
+        index = self.console_source_combo.findData(key)
+        if index >= 0:
+            self.console_source_combo.setCurrentIndex(index)
+
+    def _find_in_log(self, forward=True):
+        """Find next/prev match of the log-search box text in the console."""
+        query = self.log_search.text()
+        if not query:
+            return
+        doc = self.console.document()
+        cursor = self.console.textCursor()
+        flags = QTextDocument.FindFlags()
+        if not forward:
+            flags |= QTextDocument.FindBackward
+        found = doc.find(query, cursor, flags)
+        if found.isNull():
+            # Wrap around.
+            start = QTextCursor(doc) if forward else QTextCursor(doc)
+            if forward:
+                start.movePosition(QTextCursor.Start)
+            else:
+                start.movePosition(QTextCursor.End)
+            found = doc.find(query, start, flags)
+        if not found.isNull():
+            self.console.setTextCursor(found)
+            self.console.ensureCursorVisible()
+        self._update_log_match_count(found)
+
+    def _update_log_match_count(self, found):
+        """Show 'current/total' for the search query, e.g. 3/17."""
+        query = self.log_search.text()
+        if not query:
+            self.log_match_count.setText("")
+            return
+        text = self.console.toPlainText()
+        total = text.count(query)
+        if not found.isNull() and total:
+            index = text.count(query, 0, found.selectionStart()) + 1
+            self.log_match_count.setText(f"{index}/{total}")
+        else:
+            self.log_match_count.setText(f"0/{total}")
+
+    def _log_search_changed(self, _text=None):
+        """Find-as-you-type keeps the match counter live with the query."""
+        if not self.log_search.text():
+            self.log_match_count.setText("")
+            return
+        self._find_in_log(forward=True)
 
     def export_logs(self):
-        path, _ = QFileDialog.getSaveFileName(self, "导出会话日志", f"session-{datetime.now():%Y%m%d-%H%M%S}.txt", "文本日志 (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, "导出会话日志", f"session_{datetime.now():%Y%m%d%H%M%S}.log", "日志文件 (*.log)")
         if path:
             try:
-                Path(path).write_text("\n".join(f"{stamp} [{level}] {text}" for stamp, level, text in self.log_records), encoding="utf-8")
-                self.status_left.setText("会话日志已导出。")
+                records = self._records_for(self.console_source)
+                text = ("".join(self.log_records_log) if self.console_source == "log"
+                        else "\n".join(f"{stamp} [{level}] {text}" for stamp, level, text in records))
+                Path(path).write_text(text, encoding="utf-8")
+                self._status("会话日志已导出。")
             except OSError as exc:
                 QMessageBox.warning(self, "导出失败", str(exc))
 
@@ -2177,7 +2586,6 @@ class MainWindow(QMainWindow):
             try:
                 Path(path).write_text(self.snapshot_csv(), encoding="utf-8-sig", newline="")
                 self.append_log("SUCCESS", "寄存器快照已导出：" + path)
-                self.status_left.setText("快照已导出，可用 Excel 打开。")
             except OSError as exc:
                 QMessageBox.warning(self, "导出失败", str(exc))
 
@@ -2190,13 +2598,16 @@ class MainWindow(QMainWindow):
             return
         self.cfg.update(host=self.host.text().strip(), port=self.port.value(), username=self.user.text().strip(),
                         password=self.password.text(), remember_password=self.remember.isChecked(),
-                        connect_timeout=self.timeout.value(), poll_interval=self._poll_interval_ms())
+                        poll_interval=self._poll_interval_ms(),
+                        serial_port=self._serial_device or self._selected_serial_port(), serial_baud=self._serial_baud_value(),
+                        serial_username=self.serial_user.text().strip(),
+                        serial_password=self.serial_password.text(),
+                        remember_serial_password=self.serial_remember.isChecked())
         self.cfg["window_size"] = [self.width(), self.height()]
         try:
             self.store.save(self.cfg)
         except OSError as exc:
             self.append_log("ERROR", f"设置保存失败：{exc}")
-            self.status_left.setText("设置未保存，请检查配置目录的写入权限。")
 
     def closeEvent(self, event):
         self._closing = True
@@ -2206,11 +2617,9 @@ class MainWindow(QMainWindow):
         self.cancel.set()
         self._stop_stream()
         self.session.close()
-        if self.board_log:
-            self.board_log.close()
-        if self._busy or self._stream_workers:
+        self.serial.close()
+        if self._busy or self._stream_workers or self._serial_busy:
             self.setEnabled(False)
-            self.status_left.setText("正在关闭连接，请稍候…")
             event.ignore()
             return
         self.save_settings()

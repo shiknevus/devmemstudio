@@ -13,7 +13,9 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import select
 import shlex
+import socket
 import sys
 import tempfile
 import threading
@@ -147,8 +149,10 @@ def register_group(register: dict) -> str:
 def default_config() -> dict:
     return {"host": "", "port": 22, "username": "root", "password": "",
             "base": "0xb0100000", "default_width": 32, "last_category": "axis",
-            "last_address": "0x0800", "connect_timeout": 2, "remember_password": False,
-            "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {}}
+            "last_address": "0x0800", "remember_password": False,
+            "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
+            "serial_port": "", "serial_baud": 115200, "serial_username": "",
+            "serial_password": "", "remember_serial_password": False}
 
 
 class ConfigStore:
@@ -192,16 +196,19 @@ class ConfigStore:
                     pass
         if cfg.get("last_category") not in DEFAULT_CATEGORIES:
             cfg["last_category"] = "axis"
-        for field, fallback, low, high in (("port", 22, 1, 65535), ("connect_timeout", 2, 1, 120),
+        for field, fallback, low, high in (("port", 22, 1, 65535),
                                             ("poll_interval", 1000, 100, 120000)):
             val = parse_int(cfg.get(field))
             cfg[field] = val if val is not None and low <= val <= high else fallback
+        baud = parse_int(cfg.get("serial_baud"))
+        cfg["serial_baud"] = baud if baud is not None and 1200 <= baud <= 10000000 else 115200
         for field in ("base", "last_address"):
             try:
                 validated_address(cfg[field])
             except (ValueError, TypeError):
                 cfg[field] = default_config()[field]
-        for field in ("host", "username", "password", "log_path", "top_path"):
+        for field in ("host", "username", "password", "log_path", "top_path",
+                      "serial_port", "serial_username", "serial_password"):
             cfg[field] = str(cfg.get(field) or "")
         if not isinstance(cfg.get("write_cache"), dict):
             cfg["write_cache"] = {}
@@ -213,6 +220,8 @@ class ConfigStore:
         data.pop("categories", None)
         if not data.get("remember_password"):
             data["password"] = ""
+        if not data.get("remember_serial_password"):
+            data["serial_password"] = ""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Replace atomically so loss of power doesn't leave half a JSON document.
         temp_name = None
@@ -299,6 +308,7 @@ class SshSession:
         self._stream_stop = threading.Event()
         self._stream_thread = None
         self._generation = 0
+        self._connect_sock = None   # live during connect(); close() aborts a handshake in flight
 
     @property
     def alive(self):
@@ -307,6 +317,47 @@ class SshSession:
                         and self.chan and not self.chan.closed)
         except Exception:
             return False
+
+    def _connect_socket_abortably(self, host, port, timeout, generation):
+        """TCP connect in cancel-checkable slices.
+
+        A blocked ``socket.create_connection`` to an unreachable board cannot
+        be interrupted (there is no socket to shutdown yet), so the handshake
+        waits out the whole timeout. Here the SYN wait is polled with select()
+        and the session generation is re-checked each slice: a cancel wins
+        immediately."""
+        last_error = None
+        for family, kind, proto, _null, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            sock = socket.socket(family, kind, proto)
+            sock.setblocking(False)
+            try:
+                try:
+                    sock.connect(sockaddr)
+                except BlockingIOError:
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        if generation != self._generation:
+                            raise CommandError("连接已取消。")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise socket.timeout("timed out")
+                        _, writable, _ = select.select([], [sock], [], min(0.1, remaining))
+                        if not writable:
+                            continue
+                        error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                        if error:
+                            raise OSError(error, os.strerror(error))
+                        break
+                sock.setblocking(True)
+                sock.settimeout(timeout)
+                return sock
+            except CommandError:
+                sock.close()
+                raise
+            except OSError as exc:
+                sock.close()
+                last_error = exc
+        raise last_error or OSError("无法建立 TCP 连接")
 
     def connect(self, host, port, username, password, timeout=8):
         self.close()
@@ -320,10 +371,18 @@ class SshSession:
             client.load_host_keys(str(known_hosts))
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             try:
+                # Abortable TCP connect: a cancel during the SYN wait breaks out
+                # immediately instead of waiting out the timeout.
+                sock = self._connect_socket_abortably(host, port, timeout, generation)
+                self._connect_sock = sock
+                if generation != self._generation:
+                    # Cancelled while the socket was being created (close()
+                    # found nothing to abort): stop before the handshake waits.
+                    raise CommandError("连接已取消。")
                 client.connect(hostname=host, port=port, username=username, password=password,
                                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
                                channel_timeout=timeout, allow_agent=False, look_for_keys=False,
-                               transport_factory=BoardTransport)
+                               sock=sock, transport_factory=BoardTransport)
             except paramiko.BadHostKeyException as exc:
                 raise HostKeyChangedError(host, port, exc.key, exc.expected_key) from exc
             except paramiko.ssh_exception.IncompatiblePeer as exc:
@@ -345,7 +404,14 @@ class SshSession:
             if generation != self._generation:
                 raise CommandError("连接已取消。")
             self.client, self.chan = client, channel
+            self._connect_sock = None
         except Exception:
+            sock, self._connect_sock = self._connect_sock, None
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
             client.close()
             raise
 
@@ -746,6 +812,16 @@ class SshSession:
     def close(self):
         self._generation += 1
         self.stop_stream()
+        # Break a handshake still waiting inside client.connect: a socket
+        # shutdown unblocks the recv even on Windows (close alone does not),
+        # so the blocked call raises instead of waiting out the timeout.
+        sock, self._connect_sock = self._connect_sock, None
+        if sock is not None:
+            for action in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+                try:
+                    action()
+                except OSError:
+                    pass
         channel, client = self.chan, self.client
         self.chan = self.client = None
         if channel:
