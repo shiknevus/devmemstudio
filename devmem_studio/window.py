@@ -12,7 +12,7 @@ import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
-from PySide6.QtGui import QIcon, QFont, QFontMetrics, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
@@ -342,7 +342,6 @@ class MainWindow(QMainWindow):
         self.write_all_button = button("批量写入", self.write_all, None, "write")
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
         self.module_badge = label("", "badge")
-        self.module_badge.hide()   # the type lives in the title/tooltip; it crowded the row
         self.export_button = button("导出快照", self.export_snapshot, None, "export")
         self.help_button = button("使用指南", lambda: show_help(self), "flat", "help")
         # Session state (formerly a top-right header bar): summary + SSH/serial badges
@@ -351,42 +350,23 @@ class MainWindow(QMainWindow):
         self.ssh_badge = label("", "badge")
         self.com_badge = label("", "badge")
         # Freeze each badge at its widest state text so 离线/已连接 toggles never
-        # change the badge size (which would shift the row layout). Measure the
-        # plain text: the dot is a fixed 13px span, and the markup's &nbsp; would
-        # otherwise count as a full character's width and over-reserve the pill.
-        badges = ((self.ssh_badge, ("SSH 离线", "SSH 已连接", "SSH 演示", "SSH 连接中")),
-                  (self.com_badge, ("serial 离线", "serial 已连接", "serial 连接中")))
-        for badge, texts in badges:
-            metrics = QFontMetrics(badge.font())
-            widest = max(metrics.horizontalAdvance(t) for t in texts)
-            badge.setFixedWidth(widest + 18)   # 9px padding + 1px border each side
+        # change the badge size (which would shift the row layout).
+        ssh_variants = [self._badge_dot(s) + t for s, t in
+                        (("offline", "SSH 离线"), ("connected", "SSH 已连接"),
+                         ("demo", "SSH 演示"), ("connecting", "SSH 连接中"))]
+        com_variants = [self._badge_dot("offline") + "serial 离线",
+                        self._badge_dot("connected") + "serial 已连接",
+                        self._badge_dot("connecting") + "serial 连接中"]
+        for badge, variants in ((self.ssh_badge, ssh_variants), (self.com_badge, com_variants)):
+            for text in variants:
+                badge.setText(text)
+                badge.setMinimumWidth(max(badge.minimumWidth(), badge.sizeHint().width()))
+            badge.setFixedWidth(badge.minimumWidth())
         self._update_connection_badge()
-        # The row is tighter than the sum of every label's hint at 1524px.
-        # Pin the fixed-size controls so they never shrink, and let the section
-        # title take the slack; the other labels yield space and carry their
-        # full text in a tooltip.
-        for control in (self.poll_check, self.interval, self.write_all_button,
-                        self.read_all_button, self.export_button, self.help_button,
-                        self.ssh_badge, self.com_badge):
-            control.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.module_title.setMaximumWidth(320)
-        self.module_title.setMinimumWidth(56)
-        self.module_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        for widget in (self.register_count, self.module_badge, self.target_label):
-            widget.setMaximumWidth(170)
-            widget.setMinimumWidth(56)
-            # Minimum: may shrink to minimumWidth, but never claims sizeHint
-            # space, so the row cannot be squeezed into an overlap.
-            widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Preferred)
         # 13px inner padding + the card's 1px border: the two section titles
         # (寄存器映射 / 会话终端) share a left edge; the cards below keep their
         # own full-width alignment.
-        # Title row: the section title takes the slack, then the session state
-        # (waiting hint + SSH/serial badges) sits left of 自动读取, with the
-        # read/write controls and the guide on the right. The hint only occupies
-        # the row while nothing is connected; once a link is up the badges carry
-        # the state and the title gets the space back.
-        title_row = row(self.module_title, 1, self.register_count,
+        title_row = row(self.module_title, self.register_count, 1, self.module_badge,
                         self.target_label, self.ssh_badge, self.com_badge,
                         self.poll_check, self.interval, self.write_all_button,
                         self.read_all_button, self.export_button, self.help_button,
@@ -417,6 +397,7 @@ class MainWindow(QMainWindow):
             self.view_buttons[key] = tab
             filters_layout.addWidget(tab)
         self.view_buttons["basic"].setChecked(True)
+        filters_layout.addStretch()
         self.access_filter = ComboBox()
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
         self.access_filter.setFixedWidth(112)
@@ -1036,9 +1017,7 @@ class MainWindow(QMainWindow):
             restyle(self.base_field)
         self._module_start = start
         context = ("top", comp["module_type"], comp["bias"], base)
-        title = f"{self._component_display_name(comp)} · 寄存器映射"
-        self.module_title.setText(title)
-        self.module_title.setToolTip(title)   # elided at narrow widths; hover shows it all
+        self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
         if context == self._last_context:
@@ -1224,13 +1203,8 @@ class MainWindow(QMainWindow):
                 visible.append(index)
         self.visible_regs = [self.regs[index] for index in visible]
         if self.active_component:
-            summary = f"{len(visible)} / {len(self.regs)} 项"
-            # The full address is a long tail; it lives in the tooltip so the
-            # title row stays readable next to the session badges.
-            self.register_count.setText(summary)
-            self.register_count.setToolTip(
-                f"{summary}可见 · 全地址 0x{self._module_start:08X}"
-                if self._module_start is not None else summary)
+            address = f" · 全地址 0x{self._module_start:08X}" if self._module_start is not None else ""
+            self.register_count.setText(f"{len(visible)} / {len(self.regs)} 项{address}")
         else:
             self.register_count.setText("")
         self.empty_label.setVisible(not visible)
@@ -1724,17 +1698,17 @@ class MainWindow(QMainWindow):
         self._refresh_controls()
 
     def _refresh_target_label(self):
-        """Session hint for the register title row, shown only while nothing is
-        connected — the badges already carry the state once a link is up, and
-        the title row needs the space for the component name."""
-        if self.connected:
-            self.target_label.setVisible(False)   # badges say it; give the title room
+        """Top-right SSH session summary; the serial state lives in the badges.
+        The waiting hint only shows when nothing at all is connected."""
+        if self.connected and self.demo:
+            text = "本地模拟设备"
+        elif self.connected:
+            text = f"SSH {self.user.text()}@{self.host.text()}:{self.port.value()}"
         elif self.serial_connected:
-            self.target_label.setVisible(False)
+            text = ""
         else:
-            self.target_label.setText("等待建立设备会话")
-            self.target_label.setToolTip("SSH 或 serial 任一连接后提示消失")
-            self.target_label.setVisible(True)
+            text = "等待建立设备会话"
+        self.target_label.setText(text)
 
     def _update_connection_badge(self):
         """Refresh the two independent SSH/serial status badges in the top-right.
