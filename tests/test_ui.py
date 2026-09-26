@@ -1134,6 +1134,39 @@ class TopImportUiTests(UiTests):
         self.assertTrue(dialog.upload_button.isEnabled())
         self.window.close()
 
+    def test_closing_during_bit_upload_exits_once_worker_finishes(self):
+        bit = Path(self.temp.name) / "closing.bit"
+        bit.write_bytes(b"\x00" * 64)
+        self.window.open_bit_upload()
+        self.settle()
+        self.window.bit_dialog.set_path(str(bit))
+        release = threading.Event()
+
+        def slow_upload(*args, **kwargs):
+            release.wait(5)
+            return "sunny_fpga.bit_20260926000000"
+
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
+             patch.object(self.window.session, "upload_bitfile", side_effect=slow_upload):
+            self.window.bit_dialog.start_upload()
+            self.settle(lambda: self.window._busy)
+            self.window.close()
+            self.assertTrue(self.window.isVisible())    # deferred until the worker is done
+            release.set()
+            self.settle(lambda: not self.window.isVisible())
+        self.assertFalse(self.window.isVisible())
+        self.assertFalse(self.window._busy)
+
+    def test_pending_write_cell_edit_is_hex(self):
+        self.window.poll_check.setChecked(False)
+        row = next(index for index, reg in enumerate(self.window.regs) if not reg.get("readonly"))
+        reg = self.window.regs[row]
+        self.window.table.item(row, 5).setText("20")
+        self.assertEqual((reg["_draft"], reg["_fmt"]), ("20", "H"))
+        self.assertIn("0x20", self.window.table.item(row, 5).text())
+        self.window.table.item(row, 5).setText("预设 · 0x2B")    # preset prefix kept by the editor
+        self.assertEqual((reg["_draft"], reg["_fmt"]), ("0x2B", "H"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -462,13 +462,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -726,7 +726,7 @@
             {
               "name": "adc_dat_o",
               "low": 0,
-              "width": 1
+              "width": 16
             }
           ]
         },
@@ -744,13 +744,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -1026,13 +1026,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -1301,13 +1301,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -1576,13 +1576,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -1858,13 +1858,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -2147,13 +2147,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -2429,13 +2429,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -2718,13 +2718,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -2993,13 +2993,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -3282,13 +3282,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -3571,13 +3571,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -3867,13 +3867,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -4156,13 +4156,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -4452,13 +4452,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -4755,13 +4755,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -5037,13 +5037,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -5333,13 +5333,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -5636,13 +5636,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -5939,13 +5939,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -6235,13 +6235,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -6538,13 +6538,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -7464,13 +7464,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -7781,13 +7781,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -8091,13 +8091,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -8450,13 +8450,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -12310,13 +12310,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -13917,7 +13917,7 @@
             {
               "name": "speed_gear",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         },
@@ -14008,7 +14008,7 @@
             {
               "name": "axis_number",
               "low": 0,
-              "width": 1
+              "width": 4
             }
           ]
         },
@@ -14117,13 +14117,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -16069,13 +16069,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -16810,13 +16810,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -17141,13 +17141,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }
@@ -17416,13 +17416,13 @@
           "fields": [
             {
               "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
+              "low": 8,
+              "width": 8
             },
             {
               "name": "irq_negedge_cnt",
               "low": 0,
-              "width": 1
+              "width": 8
             }
           ]
         }

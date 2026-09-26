@@ -142,6 +142,14 @@ class RegisterTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, ReadbackError)
         session.read.assert_not_called()
 
+    def test_batch_read_silent_devmem_does_not_swallow_next_register(self):
+        session = SshSession()
+        session.run = Mock(return_value="__R00001000 __R00001004 0x00000005\nroot@board:~# __R00001008 0x7")
+        results = session.read_many([0x1000, 0x1004, 0x1008])
+        self.assertIsNone(results[0x1000][0])
+        self.assertEqual(results[0x1004], (5, None))
+        self.assertEqual(results[0x1008], (7, None))
+
 
 class ConfigTests(unittest.TestCase):
     def test_basic_category_selection_and_write_cache_survive_restart(self):

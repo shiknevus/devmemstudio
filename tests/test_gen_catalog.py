@@ -366,6 +366,48 @@ class ComponentFolderTests(unittest.TestCase):
                              ["o_rst", "i_error", "o_fwd"])
             self.assertEqual([f["low"] for f in registers["DEBUG_REG3"]["fields"]], [2, 1, 0])  # path order: pl_exe_io before pl_ps_exe
 
+    def test_concat_fields_use_declared_widths(self):
+        widths = gen.harvest_signal_widths(
+            "module t(input [8:0] a_addr, input [31:0] b_data);\n"
+            "reg [7:0] irq_posedge_cnt; reg [7:0] irq_negedge_cnt; // counters\n"
+            "wire [15:0] adc_dat_o; wire [W-1:0] pw; reg [7:0] c = 8'd0, d;\nendmodule\n")
+        self.assertEqual((widths["a_addr"], widths["b_data"], widths["adc_dat_o"], widths["d"]), (9, 32, 16, 8))
+        self.assertIsNone(widths["pw"])
+        self.assertEqual(gen.extract_concat_fields("{16'd0,irq_posedge_cnt,irq_negedge_cnt}", widths), [
+            {"name": "irq_posedge_cnt", "low": 8, "width": 8},
+            {"name": "irq_negedge_cnt", "low": 0, "width": 8}])
+        self.assertEqual(gen.extract_concat_fields("{16'd0,adc_dat_o}", widths),
+                         [{"name": "adc_dat_o", "low": 0, "width": 16}])
+        self.assertEqual(gen.extract_concat_fields("{16'd0,pw}", widths), [])   # unknown width: no layout
+        self.assertEqual(gen.extract_concat_fields("{31'd0,undeclared}", widths),
+                         [{"name": "undeclared", "low": 0, "width": 1}])        # implicit 1-bit net
+
+
+class ParserEdgeTests(unittest.TestCase):
+    def test_define_table_accepts_underscores_case_and_indent(self):
+        self.assertEqual(gen.parse_define_table("`define PARAM66 9'h1_B4\n  `define X 10'H0E4\n"),
+                         {"PARAM66": 0x1B4, "X": 0x0E4})
+
+    def test_strip_comments_line_comment_hides_block_opener(self):
+        body = gen.strip_comments("// old: /* disabled\nassign a = param3;\n/* real\n */\nassign b = param4;")
+        self.assertIn("assign a = param3;", body)
+        self.assertIn("assign b = param4;", body)
+        self.assertEqual(body.count("\n"), 4)
+
+    def test_decode_widths_single_arm_bit_select_and_split_writes(self):
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "case (rd_addr_d2) `EC_ID: o_st_rd_data <= ec_id; `PARAM1: o_st_rd_data <= {24'd0, p1};"
+            " `P2: o_st_rd_data = {24'h0, p2}; endcase\n"
+            "x <= (wr_task_vld && wr_task_addr == `P3 && vld) ? i_st_wr_data[0] : x;\n"
+            "y <= (wr_task_addr[8:0] == `P4) ? i_st_wr_data[15:0] : y;\n"
+            "z <= (wr_task_addr == `P4) ? i_st_wr_data[31:16] : z;\n")}
+        self.assertEqual(entries["EC_ID"]["width"], 32)     # read arms don't bleed into each other
+        self.assertEqual(entries["PARAM1"]["width"], 8)
+        self.assertEqual(entries["P2"]["width"], 8)
+        self.assertEqual(entries["P3"]["width"], 1)
+        self.assertEqual(entries["P4"]["width"], 32)        # union of [15:0] and [31:16]
+        self.assertTrue(entries["P4"]["writable"])
+
 
 if __name__ == "__main__":
     unittest.main()
