@@ -606,7 +606,7 @@ class MainWindow(QMainWindow):
         self.log_wrap.setChecked(True)
         self.log_wrap.toggled.connect(lambda on: self.console.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap))
         self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "export")
-        self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；原文件备份为 sunny_fpga.bit_时间戳。")
+        self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；传完后原文件备份为 sunny_fpga.bit_时间戳。")
         self.bit_rollback_button = button("回退bit", self.open_bit_rollback, "flat", "refresh")
         self.bit_rollback_button.setToolTip("列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份，选择后把所选版本恢复为 sunny_fpga.bit（当前版本先备份为时间戳）。")
         self.log_download_button = button("下载log", self.download_board_log, "flat", "export")
@@ -671,8 +671,8 @@ class MainWindow(QMainWindow):
         """Ctrl+F: seed the search box with the terminal's current selection."""
         cursor = self.console.textCursor()
         if cursor.hasSelection():
-            # selectedText uses U+2020 for newlines; first line only, trimmed.
-            text = cursor.selectedText().split("†")[0].strip()
+            # selectedText uses U+2029 for newlines; first line only, trimmed.
+            text = cursor.selectedText().split(" ")[0].strip()
             if text:
                 self.log_search.setText(text)   # find-as-you-type picks it up
         self.log_search.setFocus()
@@ -1071,7 +1071,7 @@ class MainWindow(QMainWindow):
                     item.setFlags(item.flags() | Qt.ItemIsEditable)
                 if col in (1, 3, 4, 5):
                     item.setFont(QFont("Consolas", 10))
-                item.setTextAlignment(self.table.horizontalHeaderItem(col).textAlignment())
+                item.setTextAlignment(Qt.AlignmentFlag(self.table.horizontalHeaderItem(col).textAlignment()))
                 tooltip = f'{display} · {register_group(reg)}\n全地址 0x{reg["_address"]:08X}\n字段长度 {reg.get("width", 32)} 位'
                 if reg["name"].startswith("PARAM") and not reg.get("signal"):
                     tooltip += "\n未接线：顶层例化中已注释，读回值无意义。" if reg.get("unwired") else \
@@ -1111,8 +1111,9 @@ class MainWindow(QMainWindow):
             return "—"
         if reg.get("signed"):
             width = reg.get("width", 32) or 32
-            if width < 8 or width not in (8, 16, 32, 64):
+            if not 1 <= width <= 64:
                 width = 32
+            value &= (1 << width) - 1   # field width, e.g. {8'd0, signed [23:0]}
             if value >= 1 << (width - 1):
                 return str(value - (1 << width))
         return str(value)
@@ -1368,8 +1369,9 @@ class MainWindow(QMainWindow):
         if self._updating or item.column() != 5:
             return
         reg = self.regs[item.row()]
-        reg["_draft"] = item.text().strip()
-        reg["_fmt"] = "D"
+        # The column shows "预设名 · 0x..": edits are HEX, with or without the preset prefix.
+        reg["_draft"] = item.text().rsplit("·", 1)[-1].strip()
+        reg["_fmt"] = "H"
         self._remember_reg(reg)
         self._update_table_row(reg)
         self._selection_changed()
@@ -1461,16 +1463,20 @@ class MainWindow(QMainWindow):
                         self.serial_remember):
             control.setEnabled(not self.serial_connected and not self._serial_busy)
         self.serial_connect_button.setEnabled(not self._serial_busy)
-        for control in (self.component_tree, self.component_search, self.import_component_button,
-                        self.access_filter, self.search, *self.view_buttons.values()):
+        for control in (self.component_tree, self.import_component_button, *self.view_buttons.values()):
             control.setEnabled(not self._busy and not self._closing)
+        # Filters only hide rows; keep them (and the value editor) live during polling
+        # reads so each auto-read tick doesn't steal focus from what the user is typing.
+        inputs_locked = self._busy and self._task_kind != "read"
+        for control in (self.component_search, self.access_filter, self.search):
+            control.setEnabled(not inputs_locked and not self._closing)
         # A top mismatched with the live device can hang the board; import only while disconnected.
         self.import_button.setEnabled(not self._busy and not self._closing and not self.connected)
         if self.rtl_base is None:
             self.base_field.setEnabled(not self._busy and not self._closing)
         self.connect_button.setEnabled(not self._busy or self._task_kind == "connect")
         self.poll_check.setEnabled(self.connected and getattr(self, "address_valid", False))
-        self.editor_panel.setEnabled(not self._busy and getattr(self, "address_valid", False))
+        self.editor_panel.setEnabled(not inputs_locked and getattr(self, "address_valid", False))
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers if self._busy else
                                   QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.read_selected_button.setEnabled(enabled and self.selected is not None)
@@ -1628,6 +1634,7 @@ class MainWindow(QMainWindow):
             return
         port, baud, user, password, timeout = request
         self.serial.close()
+        self._serial_cancel_requested = False   # a cancel that lost the race to success must not linger
         session = SerialSession(self._log_emit("com"))
         self._task_serial = session
         self.save_settings()
@@ -1647,6 +1654,7 @@ class MainWindow(QMainWindow):
             return True
         def done(result):
             if self._closing:
+                session.close()   # connected after close was requested: release the COM port
                 return
             self._serial_busy = False
             self._task_serial = None
@@ -1775,44 +1783,53 @@ class MainWindow(QMainWindow):
             return
         self.bit_dialog.upload_button.setEnabled(False)
         self.bit_dialog.set_reset()
-        self.bit_dialog.status.setText("正在备份旧文件并上传，请勿断开连接。")
+        self.bit_dialog.status.setText("正在上传，传完后备份旧文件并换入，请勿断开连接。")
         self._bit_last_paint = 0.0
         session = self.session
 
         def task(progress):
             def report(done, total):
                 progress({"current": done, "total": total})
-            session.upload_bitfile(local_path, remote_dir, "sunny_fpga.bit", progress=report)
-            return True
+            return session.upload_bitfile(local_path, remote_dir, "sunny_fpga.bit", progress=report)
 
-        def done(_result):
+        def done(backup_name):
+            if self._closing:
+                return
             self.bit_dialog.set_done()
-            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            self.bit_dialog.status.setText(f"已上传为 {remote_dir}/sunny_fpga.bit；原文件备份为 sunny_fpga.bit_{stamp}。")
+            backup = f"原文件备份为 {backup_name}" if backup_name else "板端原无 sunny_fpga.bit，未产生备份"
+            self.bit_dialog.status.setText(f"已上传为 {remote_dir}/sunny_fpga.bit；{backup}。")
             self.bit_dialog.upload_button.setEnabled(True)
             self.append_log("SUCCESS", f"bit file 上传完成：{Path(local_path).name} -> {remote_dir}/sunny_fpga.bit")
 
         def failed(message):
+            if self._closing:
+                return
             self.bit_dialog.set_reset()
             self.bit_dialog.status.setText("上传失败：" + message)
             self.bit_dialog.upload_button.setEnabled(True)
             self.append_log("ERROR", f"bit file 上传失败：{message}")
 
-        def finished():
-            self._busy = False
-            self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
-            self._refresh_controls()
-
         worker = Worker(task)
         worker.signals.result.connect(done)
         worker.signals.failed.connect(failed)
         worker.signals.progress.connect(self._bit_progress)
-        worker.signals.finished.connect(finished)
+        worker.signals.finished.connect(self._side_task_finished)
         self._active_worker = worker   # keep a reference or Qt may drop the queued signals
         self._busy = True
         self._task_kind = "upload"
         self._refresh_controls()
         self.pool.start(worker)
+
+    def _side_task_finished(self):
+        """Finish for bit upload/rollback/listing workers; False once the window is closing."""
+        self._busy = False
+        self._active_worker = None
+        if self._closing:
+            QTimer.singleShot(0, self.close)   # closeEvent deferred to this worker
+            return False
+        self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
+        self._refresh_controls()
+        return True
 
     @Slot(object)
     def _bit_progress(self, data):
@@ -1858,7 +1875,9 @@ class MainWindow(QMainWindow):
             if self._closing or not dialog:
                 return
             dialog.set_reset()
-            dialog.populate(entries, f"共 {len(entries)} 个 bit 文件：当前版本 + {len(entries) - 1} 个备份（双击可直接回退）。"
+            backups = sum(1 for entry in entries if entry["timestamp"] is not None)
+            current = "当前版本 + " if len(entries) > backups else "无当前版本，"
+            dialog.populate(entries, f"共 {len(entries)} 个 bit 文件：{current}{backups} 个备份（双击可直接回退）。"
                              if entries else "板端没有可回退的 bit 备份。")
             self.append_log("INFO", f"读取到 {len(entries)} 个板端 bit 文件。")
 
@@ -1870,17 +1889,10 @@ class MainWindow(QMainWindow):
             dialog.status.setText("读取备份列表失败：" + message)
             self.append_log("ERROR", f"读取 bit 备份列表失败：{message}")
 
-        def finished():
-            if self._closing:
-                return
-            self._busy = False
-            self._active_worker = None
-            self._refresh_controls()
-
         worker = Worker(task)
         worker.signals.result.connect(done)
         worker.signals.failed.connect(failed)
-        worker.signals.finished.connect(finished)
+        worker.signals.finished.connect(self._side_task_finished)
         self._active_worker = worker
         self._busy = True
         self._task_kind = "operation"
@@ -1924,12 +1936,8 @@ class MainWindow(QMainWindow):
             self.append_log("ERROR", f"bit 回退失败：{message}")
 
         def finished():
-            if self._closing:
-                return
-            self._busy = False
-            self._active_worker = None
-            self._refresh_controls()
-            self._refresh_bit_backups()   # reload the list after a successful or failed rollback
+            if self._side_task_finished():
+                self._refresh_bit_backups()   # reload the list after a successful or failed rollback
 
         worker = Worker(task)
         worker.signals.result.connect(done)
@@ -2026,6 +2034,13 @@ class MainWindow(QMainWindow):
                 reg["_target"] = "DEMO" if self.demo else f"{self.host.text()}:{self.port.value()}"
                 self.read_count += 1
             self._update_table_row(reg)
+            if reg["name"] == "PARAM4" and "value" in data:
+                # PARAM4 is the pulse divisor: rows scaled by it were rendered with the old value.
+                for other in self.regs:
+                    if other is not reg and other.get("_row") is not None and self._pulse_scaled_label(other):
+                        self._update_table_row(other)
+                if self.selected is not None and self._pulse_scaled_label(self.selected):
+                    self._show_measurement()
             if reg is self.selected:
                 self._show_measurement()
             self._update_counts()
@@ -2268,10 +2283,14 @@ class MainWindow(QMainWindow):
 
     def send_command(self, text=""):
         """Run a shell command typed in the terminal prompt (routes by source)."""
-        if self._busy:
-            return
         text = (text or "").strip()
         if not text:
+            return
+        if self._busy:
+            # The prompt was already cleared on submit: give the command back instead of dropping it.
+            if self.console.is_interactive():
+                self.console._set_prompt_input(text)
+            self._status("正在执行其他操作（如自动读取），命令未发送，请稍后按回车重试。")
             return
         if self.console_source == "com":
             if not self.serial_connected:
@@ -2536,7 +2555,8 @@ class MainWindow(QMainWindow):
         if not query:
             self.log_match_count.setText("")
             return
-        text = self.console.toPlainText()
+        # doc.find is case-insensitive by default; count the same way.
+        text, query = self.console.toPlainText().lower(), query.lower()
         total = text.count(query)
         if not found.isNull() and total:
             index = text.count(query, 0, found.selectionStart()) + 1
@@ -2623,6 +2643,8 @@ class MainWindow(QMainWindow):
         self._stop_stream()
         self.session.close()
         self.serial.close()
+        if self._task_serial:
+            self._task_serial.cancel_connect()   # don't wait out the serial handshake
         if self._busy or self._stream_workers or self._serial_busy:
             self.setEnabled(False)
             event.ignore()

@@ -295,6 +295,21 @@ class BoardTransport(paramiko.Transport):
         return super().start_client(event=event, timeout=timeout)
 
 
+def _sftp_exists(sftp, path) -> bool:
+    try:
+        sftp.stat(path)
+        return True
+    except IOError:
+        return False
+
+
+def _sftp_remove_quietly(sftp, path):
+    try:
+        sftp.remove(path)
+    except Exception:
+        pass
+
+
 class SshSession:
     """Persistent command shell and a separate stream channel, with serialized commands."""
     def __init__(self, log=lambda level, text: None, data_dir: Path | None = None):
@@ -540,10 +555,10 @@ class SshSession:
         self.log("CMD", f"读取 {len(addresses)} 个寄存器 {address_list}")
         output = self.run("\n".join(lines), quiet=True)
         found = {}
-        for line in output.splitlines():
-            match = re.search(r"__R([0-9a-fA-F]{8})\s*(.*)", line.strip())
-            if match:
-                found[int(match.group(1), 16)] = match.group(2).strip()
+        # Split on tags, not lines: a silent devmem puts the next tag on the same line.
+        parts = re.split(r"__R([0-9a-fA-F]{8})", output)
+        for tag, text in zip(parts[1::2], parts[2::2]):
+            found[int(tag, 16)] = next((line.strip() for line in text.splitlines() if line.strip()), "")
         results = {}
         for address in addresses:
             text = found.get(address)
@@ -568,48 +583,16 @@ class SshSession:
         except Exception as exc:
             raise ReadbackError(f"0x{address:08X} 写入已完成，但回读失败：{exc}") from exc
 
-    def start_stream(self, path: str, output, stopped, cancel_event=None):
-        stop = cancel_event if cancel_event is not None else threading.Event()
-        if stop.is_set():
-            return False
-        if not self.alive:
-            raise CommandError("请先连接设备。")
-        if not path.strip() or "\x00" in path or "\n" in path:
-            raise ValueError("请输入有效的板端日志路径。")
-        self.stop_stream()
-        self._stream_stop = stop
-        command = "tail -f " + shlex.quote(path)
-        if stop.is_set():
-            return False
-        channel = self.client.get_transport().open_session(timeout=8)
-        # Publish the pending channel so closing the log window can cancel an
-        # exec request without closing the register shell or its SSH transport.
-        self._stream_channel = channel
-        try:
-            if stop.is_set():
-                channel.close()
-                return False
-            channel.exec_command(command)
-            if stop.is_set():
-                channel.close()
-                return False
-        except Exception:
-            channel.close()
-            if stop.is_set():
-                return False
-            raise
-        self.log("CMD", command)
-
     def upload_bitfile(self, local_path, remote_dir="/run/media/sda",
                        dest_name="sunny_fpga.bit", timestamp=None, progress=None):
-        """Rename the existing remote bit to a timestamped backup, then upload the new one.
+        """Upload the new bit beside the live one, then swap it in with a timestamped backup.
 
-        The remote directory and any parent path components are created on demand; the
-        previous sunny_fpga.bit (if present) is renamed to sunny_fpga.bit_<timestamp>.
+        The remote directory and any parent path components are created on demand. The
+        file is staged as <dest>.uploading, so a failed or cut-off transfer never touches
+        the live sunny_fpga.bit; only then is the old bit renamed to sunny_fpga.bit_<timestamp>.
         Runs on the worker thread; `progress(done, total)` reports byte transfer."""
         if not self.alive:
             raise CommandError("请先连接设备。")
-        import os
         stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
         transport = self.client.get_transport()
         sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
@@ -625,14 +608,9 @@ class SshSession:
                         sftp.stat(current)
                     except IOError:
                         sftp.mkdir(current)
-            backup_name = f"{dest_name}_{stamp}"
-            backup_path = f"{remote_dir.rstrip('/')}/{backup_name}"
-            try:
-                sftp.stat(f"{remote_dir}/{dest_name}")
-                self.log("CMD", f"rename {remote_dir}/{dest_name} -> {backup_name}")
-                sftp.rename(f"{remote_dir}/{dest_name}", backup_path)
-            except IOError:
-                pass  # no previous bit to back up
+            folder = remote_dir.rstrip("/")
+            remote_path = f"{folder}/{dest_name}"
+            staging_path = f"{remote_path}.uploading"
             total = os.path.getsize(local_path)
             sent = [0]
 
@@ -641,14 +619,38 @@ class SshSession:
                     sent[0] = transferred
                     progress(transferred, total)
 
-            remote_path = f"{remote_dir}/{dest_name}"
-            self.log("CMD", f"put {local_path} -> {remote_path}")
-            sftp.put(local_path, remote_path, callback=callback)
+            self.log("CMD", f"put {local_path} -> {staging_path}")
+            try:
+                sftp.put(local_path, staging_path, callback=callback)
+            except Exception:
+                _sftp_remove_quietly(sftp, staging_path)
+                raise
+            backup_name = f"{dest_name}_{stamp}"
+            backup_path = f"{folder}/{backup_name}"
+            if _sftp_exists(sftp, remote_path):
+                self.log("CMD", f"rename {remote_path} -> {backup_name}")
+                try:
+                    sftp.rename(remote_path, backup_path)
+                except Exception:
+                    _sftp_remove_quietly(sftp, staging_path)
+                    raise
+            else:
+                backup_path = None  # no previous bit to back up
+            try:
+                sftp.rename(staging_path, remote_path)
+            except Exception:
+                if backup_path:
+                    try:
+                        sftp.rename(backup_path, remote_path)  # put the old bit back
+                    except Exception:
+                        pass
+                raise
             try:
                 attrs = sftp.stat(remote_path)
                 self.log("INFO", f"{remote_path}: {attrs.st_size} 字节")
             except IOError:
                 pass
+            return backup_name if backup_path else None
         finally:
             if sftp is not None:
                 sftp.close()
@@ -703,16 +705,23 @@ class SshSession:
             except IOError:
                 raise CommandError(f"备份文件不存在：{backup_name}")
             aside = f"{remote_dir.rstrip('/')}/{dest_name}_{stamp}"
-            try:
-                sftp.stat(dest)
+            if _sftp_exists(sftp, dest):
                 self.log("CMD", f"rename {dest_name} -> {dest_name}_{stamp}")
                 sftp.rename(dest, aside)
-            except IOError:
-                pass  # no current bit to move aside
+            else:
+                aside = None  # no current bit to move aside
             if progress:
                 progress(50, 100)
             self.log("CMD", f"rename {backup_name} -> {dest_name}")
-            sftp.rename(backup, dest)
+            try:
+                sftp.rename(backup, dest)
+            except Exception:
+                if aside:
+                    try:
+                        sftp.rename(aside, dest)  # never leave the board without a bit
+                    except Exception:
+                        pass
+                raise
             if progress:
                 progress(100, 100)
             self.log("INFO", f"回退完成：{backup_name} -> {dest_name}")
@@ -724,7 +733,6 @@ class SshSession:
         """Download a remote file via SFTP; progress(done, total) reports byte transfer."""
         if not self.alive:
             raise CommandError("请先连接设备。")
-        import os
         transport = self.client.get_transport()
         sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
         try:
@@ -846,7 +854,7 @@ class DemoSession:
         if not demo_log.exists():
             demo_log.write_text("\n".join(
                 f"2026-09-14 20:{minute:02d}:{second:02d} INFO  [DEMO] board boot ok, fpga loaded"
-                .replace("20:", "20:").replace("fpga loaded", f"event #{minute * 60 + second}")
+                .replace("fpga loaded", f"event #{minute * 60 + second}")
                 for minute in range(0, 2) for second in range(0, 60, 7)), encoding="utf-8")
 
     def _to_remote(self, remote_path):
@@ -856,15 +864,15 @@ class DemoSession:
                        dest_name="sunny_fpga.bit", timestamp=None, progress=None):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
-        import os
         stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
         target_dir = self._to_remote(remote_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
         dest = target_dir / dest_name
+        backup_name = None
         if dest.exists():
-            backup = target_dir / f"{dest_name}_{stamp}"
-            self.log("CMD", f"rename {remote_dir}/{dest_name} -> {dest.name}_{stamp}")
-            dest.rename(backup)
+            backup_name = f"{dest_name}_{stamp}"
+            self.log("CMD", f"rename {remote_dir}/{dest_name} -> {backup_name}")
+            dest.rename(target_dir / backup_name)
         total = os.path.getsize(local_path)
         self.log("CMD", f"put {local_path} -> {remote_dir}/{dest_name}")
         chunk = max(1, total // 20)
@@ -882,6 +890,7 @@ class DemoSession:
         if progress:
             progress(total, total)
         self.log("INFO", f"{remote_dir}/{dest_name}: {total} 字节")
+        return backup_name
 
     def list_bit_backups(self, remote_dir="/run/media/sda", bitname="sunny_fpga.bit"):
         if not self.alive:
@@ -924,7 +933,6 @@ class DemoSession:
     def download_file(self, remote_path, local_path, progress=None):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
-        import os
         source = self._to_remote(remote_path)
         if not source.is_file():
             raise CommandError(f"演示板端文件不存在：{remote_path}")

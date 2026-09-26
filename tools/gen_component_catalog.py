@@ -13,16 +13,20 @@ sys.path.insert(0, str(ROOT))
 from devmem_studio.component_parse import (  # noqa: E402,F401
     ALIASES, CATALOG_SCHEMA, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry,
     debug_notes_for, extract_concat_fields, find_component_folders, find_top_file,
-    harvest_debug_snapshots, harvest_type_notes, parse_component_folder,
+    harvest_debug_snapshots, harvest_signal_widths, harvest_type_notes, parse_component_folder,
     parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
-    strip_comments)
+    strip_comments, top_is_plaintext)
 from devmem_studio.top_import import parse_top  # noqa: E402
 
 
 def type_keys_for(tops: list[Path], report: dict) -> list[str]:
     keys = []
     for top in tops:
-        info = parse_top(read_text_resilient(top))
+        text = read_text_resilient(top)
+        info = parse_top(text)
+        if not info["components"] and not top_is_plaintext(text):
+            report["unparsed_files"].append({"file": str(top), "reason": "not-plaintext-or-unrecognized-format"})
+            continue
         for component in info["components"]:
             if component["module_type"] not in keys:
                 keys.append(component["module_type"])
@@ -56,15 +60,26 @@ def match_decode_files(keys: list[str], decode_files: dict[str, Path]) -> tuple[
 def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
     report = {"top_warnings": [], "unparsed_files": [], "unmatched_top_types": [],
               "unharvested_top_types": [], "ambiguous": [], "forced_irq_registers": []}
-    defines_path = next(rtl_root.rglob("reg_addr_pl.vh"), None)
-    if defines_path is None:
+    define_maps = sorted(rtl_root.rglob("reg_addr_pl.vh"))   # sorted: deterministic pick
+    if not define_maps:
         raise SystemExit("reg_addr_pl.vh not found under the RTL root")
+    defines_path = define_maps[0]
+    if len(define_maps) > 1:
+        report["top_warnings"].append("多个 reg_addr_pl.vh，使用 " + str(defines_path) + "；其余："
+                                      + ", ".join(str(path) for path in define_maps[1:]))
     defines = parse_define_table(read_text_resilient(defines_path))
     if not defines:
         raise SystemExit(f"reg_addr map is empty or unreadable: {defines_path}")
 
-    decode_files = {path.stem[len("ps_rw_pl_reg_"):]: path
-                    for path in sorted(rtl_root.rglob("ps_rw_pl_reg_*"))}
+    decode_files = {}
+    for path in sorted(rtl_root.rglob("ps_rw_pl_reg_*")):
+        if not path.is_file() or path.suffix.lower() not in (".sv", ".v"):
+            continue   # skip .bak copies and directories
+        stem = path.stem[len("ps_rw_pl_reg_"):]
+        if stem in decode_files:
+            report["top_warnings"].append(f"解码文件重名 {stem}：{decode_files[stem]} 与 {path}，使用前者")
+            continue
+        decode_files[stem] = path
     keys = type_keys_for(tops, report) if tops else []
     for stem in decode_files:
         directory = decode_files[stem].parent.name
@@ -90,6 +105,9 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
         if "debug_notes" not in entry:
             report["unharvested_top_types"].append(key)
         types[key] = entry
+        top_file = find_top_file(key, path)
+        if top_file is not None and not top_is_plaintext(read_text_resilient(top_file)):
+            report["unparsed_files"].append({"file": str(top_file), "reason": "not-plaintext-or-unrecognized-format"})
     active = {c["module_type"] for top in tops for c in parse_top(read_text_resilient(top))["components"]
               if not c["disabled"]} if tops else set()
     report["unmatched_top_types"] = sorted(t for t in active if t not in types)

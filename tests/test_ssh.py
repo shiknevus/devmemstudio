@@ -239,14 +239,88 @@ class BitUploadUnitTests(unittest.TestCase):
                 paramiko.SFTPClient.from_transport = original
                 type(session).alive = original_alive
 
-            self.assertEqual(len(events["renames"]), 1)
-            self.assertTrue(events["renames"][0][1].endswith("_sunny_fpga.bit") is False)
-            self.assertIn("_", events["renames"][0][1])  # backup has timestamp suffix
-            self.assertEqual(len(events["puts"]), 1)
-            self.assertTrue(events["puts"][0][1].endswith("/sunny_fpga.bit"))
+            # staged put first, then old bit -> timestamped backup, then staging -> live name
+            self.assertEqual(events["puts"], [(str(local), "/run/media/sda/sunny_fpga.bit.uploading")])
+            self.assertEqual(len(events["renames"]), 2)
+            self.assertEqual(events["renames"][0][0], "/run/media/sda/sunny_fpga.bit")
+            self.assertRegex(events["renames"][0][1], r"/sunny_fpga\.bit_\d{14}$")
+            self.assertEqual(events["renames"][1], ("/run/media/sda/sunny_fpga.bit.uploading",
+                                                    "/run/media/sda/sunny_fpga.bit"))
             self.assertEqual(len(events["makedirs"]), 0)  # /run/media/sda exists
         finally:
             local.unlink(missing_ok=True)
+
+    def _upload_with(self, fake_sftp):
+        from devmem_studio.core import SshSession
+        import paramiko
+        local = Path(tempfile.gettempdir()) / "test_design_fail.bit"
+        local.write_bytes(b"\x00" * 64)
+        session = SshSession()
+        session.client = type("C", (), {"get_transport": lambda self: object()})()
+        session.chan = object()
+        original = paramiko.SFTPClient.from_transport
+        original_alive = type(session).alive
+        paramiko.SFTPClient.from_transport = lambda transport: fake_sftp
+        try:
+            type(session).alive = property(lambda s: True)
+            session.upload_bitfile(str(local), timestamp="20260926000000")
+        finally:
+            paramiko.SFTPClient.from_transport = original
+            type(session).alive = original_alive
+            local.unlink(missing_ok=True)
+
+    def test_failed_upload_leaves_live_bit_untouched(self):
+        events = {"renames": [], "removes": []}
+
+        class FakeSFTP:
+            def stat(self, path):
+                from types import SimpleNamespace
+                if path.endswith("/sunny_fpga.bit") or path in ("/run", "/run/media", "/run/media/sda"):
+                    return SimpleNamespace(st_size=400)
+                raise FileNotFoundError
+
+            def put(self, local_path, remote_path, callback=None):
+                raise OSError("connection lost")
+
+            def rename(self, src, dst):
+                events["renames"].append((src, dst))
+
+            def remove(self, path):
+                events["removes"].append(path)
+
+            def close(self):
+                pass
+
+        with self.assertRaises(OSError):
+            self._upload_with(FakeSFTP())
+        self.assertEqual(events["renames"], [])  # live bit never moved
+        self.assertEqual(events["removes"], ["/run/media/sda/sunny_fpga.bit.uploading"])
+
+    def test_failed_swap_restores_previous_bit(self):
+        events = {"renames": []}
+
+        class FakeSFTP:
+            def stat(self, path):
+                from types import SimpleNamespace
+                if path.endswith("/sunny_fpga.bit") or path in ("/run", "/run/media", "/run/media/sda"):
+                    return SimpleNamespace(st_size=400)
+                raise FileNotFoundError
+
+            def put(self, local_path, remote_path, callback=None):
+                pass
+
+            def rename(self, src, dst):
+                events["renames"].append((src, dst))
+                if src.endswith(".uploading"):
+                    raise OSError("rename refused")
+
+            def close(self):
+                pass
+
+        with self.assertRaises(OSError):
+            self._upload_with(FakeSFTP())
+        live, backup = "/run/media/sda/sunny_fpga.bit", "/run/media/sda/sunny_fpga.bit_20260926000000"
+        self.assertEqual(events["renames"], [(live, backup), (live + ".uploading", live), (backup, live)])
 
     def test_download_file_reports_progress_and_saves(self):
         from devmem_studio.core import SshSession
@@ -368,6 +442,41 @@ class BitUploadUnitTests(unittest.TestCase):
         self.assertEqual(sources, ["sunny_fpga.bit", "sunny_fpga.bit_20260916000000"])
         self.assertEqual(targets, ["sunny_fpga.bit_20260918010101", "sunny_fpga.bit"])   # aside then restore
         self.assertEqual(reps[-1], (100, 100))
+
+    def test_rollback_restores_live_bit_when_restore_fails(self):
+        from devmem_studio.core import SshSession
+        import paramiko
+        events = {"renames": []}
+
+        class FakeSFTP:
+            def stat(self, path):
+                from types import SimpleNamespace
+                return SimpleNamespace(st_size=400)
+
+            def rename(self, src, dst):
+                events["renames"].append((src, dst))
+                if src.endswith("_20260916000000"):
+                    raise OSError("rename refused")
+
+            def close(self):
+                pass
+
+        session = SshSession()
+        session.client = type("C", (), {"get_transport": lambda self: object()})()
+        session.chan = object()
+        original = paramiko.SFTPClient.from_transport
+        original_alive = type(session).alive
+        paramiko.SFTPClient.from_transport = lambda transport: FakeSFTP()
+        try:
+            type(session).alive = property(lambda s: True)
+            with self.assertRaises(OSError):
+                session.rollback_bit("sunny_fpga.bit_20260916000000", timestamp="20260918010101")
+        finally:
+            paramiko.SFTPClient.from_transport = original
+            type(session).alive = original_alive
+        live, aside = "/run/media/sda/sunny_fpga.bit", "/run/media/sda/sunny_fpga.bit_20260918010101"
+        self.assertEqual(events["renames"][0], (live, aside))
+        self.assertEqual(events["renames"][-1], (aside, live))  # live bit put back
 
     def test_rollback_rejects_live_bit_as_target(self):
         from devmem_studio.core import SshSession

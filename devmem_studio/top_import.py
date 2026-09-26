@@ -15,7 +15,8 @@ REG_GRID_STEP = 0x200
 CATALOG_RELPATH = "devmem_studio/data/component_catalog.json"
 
 _HEADER = re.compile(r"^[ \t]*//[ \t]*(?:/[ \t]*)*-{3,}[ \t]*flow_comp_(\d+)(?:[ \t]+\-+)*[ \t]*(.*?)[ \t]*\-*[ \t\r]*$", re.M)
-_BIAS = re.compile(r"\.REG_SPACE_BIAS\s*\(\s*\d+'([dh])\s*([0-9a-fA-F_]+)")
+# 20'h3000 / 20'H3000 / 'h3000 / 20'sd25600 / plain 25600
+_BIAS = re.compile(r"\.REG_SPACE_BIAS\s*\(\s*(?:\d*\s*'\s*[sS]?([dDhH])\s*([0-9a-fA-F_]+)|(\d[\d_]*)\s*\))")
 _BASE_ADDR = re.compile(r"PL_CFG_BASE_ADDR[^\n]*?32'h([0-9a-fA-F]+(?:_[0-9a-fA-F]+)*)")
 _IDENTIFIER = re.compile(r"^\s*(?://\s*)*([A-Za-z_]\w*)\s*$")
 
@@ -93,13 +94,42 @@ VIEW_SETS = {
 def read_text_resilient(path: Path) -> str:
     data = Path(path).read_bytes()
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")   # a BOM would hide the first ^-anchored `define / header
     except UnicodeDecodeError:
         return data.decode("gbk", errors="replace")
 
 
 def _decode_verilog_number(radix: str, digits: str) -> int:
-    return int(digits.replace("_", ""), 16 if radix == "h" else 10)
+    return int(digits.replace("_", ""), 16 if radix.lower() == "h" else 10)
+
+
+def _bias_value(found) -> int:
+    if found.group(3) is not None:
+        return int(found.group(3).replace("_", ""))
+    return _decode_verilog_number(found.group(1), found.group(2))
+
+
+def _block_comments_as_line_comments(text: str) -> str:
+    """Rewrite /* ... */ as // lines (same line count), so the comment-depth
+    logic treats a block-commented instance as disabled, not active."""
+    def convert(match):
+        comment = match.group(0)
+        if comment.startswith("//"):
+            return comment
+        if "\n" not in comment:
+            return " " * len(comment)   # inline /* note */: code around it stays live
+        return "\n".join("//" + line for line in comment[2:-2].split("\n"))
+    return re.sub(r"//[^\n]*|/\*.*?\*/", convert, text, flags=re.S)
+
+
+def _warn_duplicate_bias(components: list[dict], warnings: list[str]):
+    seen = {}
+    for component in components:
+        if component["disabled"]:
+            continue
+        other = seen.setdefault(component["bias"], component)
+        if other is not component:
+            warnings.append(f"{other['instance']} 与 {component['instance']} 偏移同为 0x{component['bias']:X}，寄存器空间重叠。")
 
 
 def _comment_depth(line: str) -> int:
@@ -124,6 +154,7 @@ def parse_top(text: str) -> dict:
     fall back to matching each ``ec_*`` instantiation directly.
     """
     components, warnings = [], []
+    text = _block_comments_as_line_comments(text)
     headers = list(_HEADER.finditer(text))
     if not headers:
         return _parse_unheaded(text)
@@ -132,7 +163,7 @@ def parse_top(text: str) -> dict:
             end = headers[position + 1].start()
         else:
             tail = text.find("endmodule", header.end())
-            end = min(tail if tail != -1 else len(text), header.end() + 4000)
+            end = tail if tail != -1 else len(text)
         block = text[header.end():end]
         seq = int(header.group(1))
         label = header.group(2).strip()
@@ -151,13 +182,14 @@ def parse_top(text: str) -> dict:
                 break
         if source is None:
             source = nonempty  # block without any ec_* declaration: report as-is
+            disabled = 0 not in by_depth   # nothing but comments: not an active component
         module_type = instance = None
         bias = None
         for line in source:
             if bias is None:
                 found = _BIAS.search(line)
                 if found:
-                    bias = _decode_verilog_number(found.group(1), found.group(2))
+                    bias = _bias_value(found)
             if module_type is None or instance is None:
                 candidate = _IDENTIFIER.match(line)
                 if candidate and candidate.group(1).startswith("ec_"):
@@ -192,22 +224,14 @@ def parse_top(text: str) -> dict:
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index, "disabled": disabled,
                            "line": text.count("\n", 0, header.start()) + 1})
+    _warn_duplicate_bias(components, warnings)
     return {"components": components, "warnings": warnings}
 
 
-_EC_INSTANCE = re.compile(
-    r"^[ \t]*([A-Za-z_]\w*)[ \t]*\r?\n"
-    r"[ \t]*#[ \t]*\([ \t]*\r?\n"
-    r"([^\n]*(?:\r?\n[^\n]*)*?)[ \t]*\r?\n"
-    r"[ \t]*\)[ \t]*\r?\n"
-    r"^[ \t]*([A-Za-z_]\w*)[ \t]*\r?\n",
-    re.M)
-"""Loose ``ec_*`` instantiation: module header, #(...) params, instance name.
-
-Each part sits on its own line and the file may use CRLF line endings; the
-params body is one line or many. ``re.M`` anchors ``^``/``$`` per line so
-surrounding code can't bleed into the match.
-"""
+_EC_INSTANCE_HEAD = re.compile(r"\b(ec_\w+)\s*#\s*\(")
+"""Loose ``ec_*`` instantiation head ``ec_type #(``; the params run to the
+matching ``)`` (found by paren counting, so one instance never bleeds into the
+next) and the instance name follows it: ``ec_type #( ... ) ec_type_27 (``."""
 
 
 def _instance_seq(instance: str) -> int:
@@ -224,14 +248,30 @@ def _parse_unheaded(text: str) -> dict:
     same 0x800 + i*0x200 convention the headed path uses).
     """
     components, warnings = [], []
-    for match in _EC_INSTANCE.finditer(text):
-        module_type, params, instance = match.group(1), match.group(2), match.group(3)
-        if not (module_type.startswith("ec_") and instance.startswith("ec_")):
+    # Blank // comments (same length) so commented instances, biases and stray
+    # parens in comments never count; offsets stay valid for line numbers.
+    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+    for match in _EC_INSTANCE_HEAD.finditer(code):
+        module_type = match.group(1)
+        depth, cursor = 1, match.end()
+        while cursor < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[cursor], 0)
+            cursor += 1
+        if depth:
+            warnings.append(f"{module_type} 参数列表括号不配对，已跳过。")
+            continue
+        params = code[match.end():cursor - 1]
+        named = re.match(r"\s*([A-Za-z_]\w*)\s*\(", code[cursor:])
+        if not named:
+            warnings.append(f"{module_type} 实例名未识别，已跳过。")
+            continue
+        instance = named.group(1)
+        if not instance.startswith("ec_"):
             continue
         bias = None
         found = _BIAS.search(params)
         if found:
-            bias = _decode_verilog_number(found.group(1), found.group(2))
+            bias = _bias_value(found)
         if bias is None:
             warnings.append(f"{instance} 缺少 .REG_SPACE_BIAS，已跳过。")
             continue
@@ -248,6 +288,7 @@ def _parse_unheaded(text: str) -> dict:
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index,
                            "disabled": False, "line": line})
+    _warn_duplicate_bias(components, warnings)
     return {"components": components, "warnings": warnings}
 
 

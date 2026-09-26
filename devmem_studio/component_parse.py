@@ -9,10 +9,17 @@ import re
 from .top_import import read_text_resilient
 
 ALIASES = {"ec_sf_door": "sf_doo"}
-DEFINE = re.compile(r"^`define\s+(\w+)\s+9'h([0-9A-Fa-f]+)", re.M)
-WRITE = re.compile(r"wr_task_addr\s*==\s*`(\w+)\s*\)\s*\?\s*i_st_wr_data(?:\s*\[(\d+)\s*:\s*(\d+)\])?")
+DEFINE = re.compile(r"^[ \t]*`define\s+(\w+)\s+\d*\s*'\s*[hH]\s*([0-9A-Fa-f_]+)", re.M)
+WRITE = re.compile(r"wr_task_addr(?:\s*\[[^\]]*\])?\s*==\s*`(\w+)\b[^?;]*?\?\s*i_st_wr_data"
+                   r"(?:\s*\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\])?")
 READ_CASE = re.compile(r"case\s*\(\s*rd_addr_d2(?:\s*\[[^\]]*\])?\s*\)(.*?)endcase", re.S)
-READ_PADDED = re.compile(r"`(\w+)\s*:[^\n]*?<=\s*\{(\d+)'d\d+\s*,")
+# One read arm only ([^;\n] stops at the arm's end); <= or =, any radix padding literal.
+READ_PADDED = re.compile(r"`(\w+)\s*:[^;\n]*?<?=\s*\{\s*(\d+)\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,")
+# Net/variable declarations: numeric [m:n] or none (1 bit); parameterized ranges stay unknown.
+DECLARATION = re.compile(r"\b(?:input|output|inout|wire|reg|logic)\b"
+                         r"(?:\s+(?:wire|reg|logic|var|signed|unsigned)\b)*\s*"
+                         r"(\[[^\]\n]*\])?\s*((?:(?!\b(?:input|output|inout|wire|reg|logic)\b)[^;\n)])*)")
+DECLARATION_KEYWORDS = {"input", "output", "inout", "wire", "reg", "logic", "var", "signed", "unsigned"}
 PARAM_NOTE = re.compile(r"^[ \t]*,?[ \t]*\.[ \t]*([Pp][Aa][Rr][Aa][Mm]\d+)[ \t]*\([^()\n]*\)[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
 BHA_NUM = re.compile(r"localparam\s+([ABC])_BHA_NUM\s*=\s*\d+\s*;[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
 BEHAVIOR_PAIR = re.compile(r"(\d+)\s*([A-Za-z_][\w\-]*(?:\[[\w\-]+\])?)")
@@ -33,11 +40,12 @@ HOOKUP_IDENT = re.compile(r"^([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$")
 
 
 def split_top_level(text: str) -> list[str]:
+    """Split on commas outside {} and () groups."""
     parts, depth, current = [], 0, []
     for character in text:
-        if character == "{":
+        if character in "{(":
             depth += 1
-        elif character == "}":
+        elif character in "})":
             depth -= 1
         if character == "," and depth == 0:
             parts.append("".join(current))
@@ -49,18 +57,36 @@ def split_top_level(text: str) -> list[str]:
 
 
 def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    """Drop // and /* */ comments in one left-to-right pass (whichever opens first wins).
+
+    Block comments keep their newlines so single-line patterns never merge lines."""
+    return re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
 
 
 def parse_define_table(text: str) -> dict[str, int]:
-    return {name: int(offset, 16) for name, offset in DEFINE.findall(text)}
+    return {name: int(offset.replace("_", ""), 16) for name, offset in DEFINE.findall(text)}
+
+
+def _write_widths(body: str) -> dict[str, int | None]:
+    """Written bit span per register; None = full-word write (no slice)."""
+    spans: dict[str, tuple[int, int] | None] = {}
+    for name, hi, lo in WRITE.findall(body):
+        span = None
+        if hi:
+            first, second = int(hi), int(lo if lo else hi)
+            span = (min(first, second), max(first, second))
+        if name in spans:
+            previous = spans[name]
+            # Several slices of one register ([15:0] and [31:16]) cover their union.
+            span = None if previous is None or span is None else (min(previous[0], span[0]), max(previous[1], span[1]))
+        spans[name] = span
+    return {name: (span[1] - span[0] + 1 if span else None) for name, span in spans.items()}
 
 
 def parse_decode_file(text: str) -> list[dict]:
     """Registers implemented by one ps_rw_pl_reg module: read case plus write ternaries."""
     body = strip_comments(text)
-    writes = {name: (int(hi) - int(lo) + 1 if hi else None) for name, hi, lo in WRITE.findall(body)}
+    writes = _write_widths(body)
     case = READ_CASE.search(body)
     reads, widths = set(), {}
     if case:
@@ -70,6 +96,10 @@ def parse_decode_file(text: str) -> list[dict]:
     return [{"name": name, "writable": name in writes, "readable": name in reads,
              "width": writes.get(name) or widths.get(name) or 32}
             for name in sorted(reads | set(writes))]
+
+
+def top_is_plaintext(text: str) -> bool:
+    return re.search(r"\bmodule\b", text) is not None
 
 
 def find_top_file(key: str, decode_path: Path) -> Path | None:
@@ -126,24 +156,32 @@ def harvest_type_notes(top_path: Path) -> dict:
             "signals": {f"PARAM{number}": "/".join(names) for number, names in signals.items()}}
 
 
-def split_top_level(text: str) -> list[str]:
-    parts, depth, current = [], 0, []
-    for character in text:
-        if character == "{":
-            depth += 1
-        elif character == "}":
-            depth -= 1
-        if character == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
+def harvest_signal_widths(text: str) -> dict[str, int | None]:
+    """Declared bit width per signal name in one module source.
+
+    None marks a name whose width is not a plain number ([W-1:0]) or that is
+    declared with different widths in different scopes."""
+    widths: dict[str, int | None] = {}
+    for packed, rest in DECLARATION.findall(strip_comments(text)):
+        if packed:
+            numbers = re.fullmatch(r"\[\s*(\d+)\s*:\s*(\d+)\s*\]", packed)
+            width = abs(int(numbers.group(1)) - int(numbers.group(2))) + 1 if numbers else None
         else:
-            current.append(character)
-    parts.append("".join(current))
-    return parts
+            width = 1
+        for piece in split_top_level(rest):
+            name = re.match(r"\s*([A-Za-z_]\w*)", piece)
+            if not name or name.group(1) in DECLARATION_KEYWORDS:
+                continue
+            key = name.group(1)
+            widths[key] = width if widths.get(key, width) == width else None
+    return widths
 
 
-def element_width(element: str) -> int | None:
-    """Width of one concat element: None for unknown plain identifiers."""
+def element_width(element: str, widths: dict | None = None) -> int | None:
+    """Width of one concat element: None when it can't be determined.
+
+    Plain identifiers take their declared width; an undeclared one is an
+    implicit 1-bit net, as in Verilog."""
     if element.startswith("{") and element.endswith("}"):
         element = element[1:-1].strip()   # replication group {N{literal}}
     replication = REPLICATION.match(element)
@@ -158,15 +196,16 @@ def element_width(element: str) -> int | None:
     if re.match(r"^[A-Za-z_]\w*\s*\[\s*\d+\s*\]$", element):
         return 1
     if re.match(r"^[A-Za-z_]\w*$", element):
-        return 1   # plain 1-bit wire in these hookups
+        return (widths or {}).get(element, 1)
     return None
 
 
-def extract_concat_fields(expression: str) -> list[dict]:
+def extract_concat_fields(expression: str, widths: dict | None = None) -> list[dict]:
     """Bit-field layout of a Verilog concat {a, b, c}: a takes the highest bits.
 
     Sized literals count toward the width (padding) but carry no name; plain
-    identifiers are treated as 1-bit wires, indexed selections keep their range."""
+    identifiers take their declared width from `widths` (1 bit if undeclared),
+    indexed selections keep their range."""
     expression = expression.strip()
     if expression.startswith("{") and expression.endswith("}"):
         expression = expression[1:-1]
@@ -174,7 +213,7 @@ def extract_concat_fields(expression: str) -> list[dict]:
     total = 0
     for raw in split_top_level(expression):
         element = raw.strip()
-        width = element_width(element)
+        width = element_width(element, widths)
         if width is None:
             return []
         total += width
@@ -265,13 +304,19 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     if top_file is None:
         warnings.append(f"{key}: 未找到组件顶层 ec_*.sv，参数注释与行为表未收割")
         return entry, forced, warnings
+    top_text = read_text_resilient(top_file)
+    if not top_is_plaintext(top_text):
+        # Encrypted/binary top: nothing below would be reliable (every PARAM would look unwired).
+        warnings.append(f"{top_file.name}: 组件顶层不可识别（可能被加密），参数注释与信号未收割")
+        return entry, forced, warnings
     harvested = harvest_type_notes(top_file)
     if harvested["notes"]:
         entry["notes"] = harvested["notes"]
     if harvested["behaviors"]:
         entry["behaviors"] = harvested["behaviors"]
     signals = harvested.get("signals", {})
-    top_body = strip_comments(read_text_resilient(top_file))
+    top_body = strip_comments(top_text)
+    widths = harvest_signal_widths(top_text)
     # A hookup that survives comment stripping means the register is wired at all.
     param_hookups = {number: expression for number, expression in PARAM_EXPR.findall(top_body)}
     wired = set(param_hookups)
@@ -291,13 +336,13 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
         if item["name"].startswith("PARAM"):
             expression = param_hookups.get(item["name"][5:], "")
             if expression.lstrip().startswith("{"):
-                fields = extract_concat_fields(expression)
+                fields = extract_concat_fields(expression, widths)
                 if fields:
                     item["fields"] = fields
         elif item["name"].startswith("DEBUG_REG"):
             expression = debug_hookups.get(item["name"][-1], "")
             if expression.lstrip().startswith("{"):
-                fields = extract_concat_fields(expression)
+                fields = extract_concat_fields(expression, widths)
                 if fields:
                     item["fields"] = fields
     entry["debug_notes"] = debug_notes_for(key, registers, harvest_debug_snapshots(top_body))

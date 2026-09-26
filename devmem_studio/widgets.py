@@ -290,7 +290,8 @@ class TerminalView(QPlainTextEdit):
         block = self.document().lastBlock()
         cursor = QTextCursor(block)
         cursor.beginEditBlock()
-        cursor.insertBlock()   # split: output block lands above the prompt text
+        # Insert at the prompt's start; the trailing newline pushes the prompt down.
+        text = text if text.endswith("\n") else text + "\n"
         if fmt is not None:
             cursor.insertText(text, fmt)
         else:

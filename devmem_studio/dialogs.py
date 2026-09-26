@@ -295,7 +295,7 @@ class BitUploadDialog(QDialog):
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
         layout.addWidget(label("选择、拖入或粘贴 .bit 文件", "title"))
-        hint = label("上传后板端原 sunny_fpga.bit 会重命名为 sunny_fpga.bit_时间戳 备份，新文件以 sunny_fpga.bit 落到 /run/media/sda。", "muted")
+        hint = label("新文件先完整上传到 /run/media/sda，再把原 sunny_fpga.bit 重命名为 sunny_fpga.bit_时间戳 备份并换入；传输失败时原文件不受影响。", "muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.path_label = label("未选择文件", "mono")
@@ -544,7 +544,7 @@ def show_help(parent):
     <h3>1. 连接设备</h3><p>填写主板地址、端口、用户名和密码，点 <code>SSH连接</code>；连接中按钮变红为 <code>取消连接</code>，可随时中止。下方 serial 区选本机端口与波特率后点 <code>serial连接</code> 进入串口控制台（遇 login 提示自动登录）。SSH 与 serial 相互独立、可同时在线；右上角徽章分别显示两者状态，寄存器读写始终走 SSH。</p>
     <h3>2. 导入 top 并选择组件</h3><p>连接前先点 <code>导入 top</code> 选择 emcc mix 顶层文件；组件按类型分组列出，点击组件即加载其精确寄存器表并自动读取。基地址自动取自 <code>components_param.vh</code> 。</p>
     <h3>3. 切换视图读写</h3><p>用 <code>基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部</code> 页签切换视图。选中行后右侧显示位状态与字段解析；双击待写入值或选预设，点 <code>写入并回读</code> 。<code>批量写入</code> 先预览再执行；<code>自动读取</code> 按所选间隔轮询。</p>
-    <h3>4. 上传 / 回退 bit、日志与重启</h3><p><code>上传bit</code> 选择或拖入 .bit，自动备份板端旧文件后上传为 <code>sunny_fpga.bit</code> ；<code>回退bit</code> 列出板端时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 发送 reboot 并断开。</p>
+    <h3>4. 上传 / 回退 bit、日志与重启</h3><p><code>上传bit</code> 选择或拖入 .bit，完整传完后才备份板端旧文件并换入为 <code>sunny_fpga.bit</code>（传输失败原文件不变）；<code>回退bit</code> 列出板端时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 发送 reboot 并断开。</p>
     <h3>5. 会话终端</h3><p>终端本身即 shell：来源选 <code>ssh</code> 或 <code>serial</code> 时直接在底部 <code>❯</code> 提示行输入命令，回车执行，<kbd>↑</kbd><kbd>↓</kbd> 翻历史；<code>tail log</code> 与 <code>system</code> 视图只读。SSH 连上后自动后台打印板端 <code>sunny.log</code>，切到 <code>tail log</code> 查看；连接生命周期等软件消息在 <code>system</code> 。<code>查找日志</code> 随输随查并显示 当前/总数 计数，选中终端文字后按 <kbd>Ctrl+F</kbd> 自动填充；<code>换行</code> / <code>跟随</code> 控制显示；<code>导出</code> 保存当前终端内容，<code>清空</code> 清除当前终端。</p>
     <h3>6. 组件定义更新</h3><p>RTL 组件内部修改后，点 <code>导入组件</code> 选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义，立即生效并保存到本机。</p>
     <h3>7. 快捷键</h3><p><kbd>F5</kbd> 读取全部 · <kbd>Ctrl+F</kbd> 查找日志 · <kbd>Ctrl+L</kbd> 终端聚焦 · <kbd>Ctrl+Shift+S</kbd> 导出快照 · <kbd>Esc</kbd> 停止后续操作。</p>

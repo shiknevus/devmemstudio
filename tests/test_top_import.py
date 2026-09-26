@@ -99,6 +99,34 @@ class ParseTopTests(unittest.TestCase):
         self.assertFalse(comp["disabled"])
         self.assertEqual(info["warnings"], [])
 
+    def test_unheaded_instances_never_merge_and_ignore_comments(self):
+        text = ("ec_a\n#(\n .REG_SPACE_BIAS (20'h800)\n) ec_a_1 (\n .x(y)\n);\n\n"
+                "ec_b\n#(\n // .REG_SPACE_BIAS (20'd54272),\n .REG_SPACE_BIAS (20'HA00)\n)\nec_b_2\n(\n);\n"
+                "ec_c #( .REG_SPACE_BIAS(25600) ) ec_c_3 ( );\n"
+                "/*\nec_d\n#( .REG_SPACE_BIAS (20'h1000) )\nec_d_4 ( );\n*/\n")
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["module_type"], c["instance"], c["bias"]) for c in info["components"]],
+                         [("ec_a", "ec_a_1", 0x800), ("ec_b", "ec_b_2", 0xA00), ("ec_c", "ec_c_3", 25600)])
+        self.assertEqual(info["warnings"], [])
+
+    def test_fully_commented_or_block_commented_blocks_are_disabled(self):
+        text = ("// --- flow_comp_1 --A0001_x---\nec_x\n#( .REG_SPACE_BIAS (20'h800) )\nec_x_1 ( );\n"
+                "// --- flow_comp_2 --EECC30---\n// eecc30\n// #( .REG_SPACE_BIAS (20'h2000) )\n// eecc30_2 ( );\n"
+                "// --- flow_comp_3 --blk---\n/*\nec_y\n#( .REG_SPACE_BIAS (20'hA00) )\nec_y_3 ( );\n*/\n"
+                "// --- flow_comp_4 --dup---\nec_z\n#( .REG_SPACE_BIAS (20'h800) )\nec_z_4 ( );\nendmodule\n")
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["seq"], c["disabled"]) for c in info["components"]],
+                         [(1, False), (2, True), (3, True), (4, False)])
+        self.assertEqual(len(info["warnings"]), 1)
+        self.assertIn("0x800", info["warnings"][0])   # overlapping active register spaces
+
+    def test_utf8_bom_does_not_hide_first_header(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "top.sv"
+            path.write_bytes(FIXTURE_TOP.lstrip("\n").encode("utf-8-sig"))
+            info = top_import.parse_top(top_import.read_text_resilient(path))
+        self.assertEqual(info["components"][0]["seq"], 1)
+
     def test_unheaded_skips_non_ec_instances(self):
         """Loose instances that do not start with ``ec_`` are left out."""
         text = """slave_rs485_arbiter

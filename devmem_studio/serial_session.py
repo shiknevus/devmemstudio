@@ -48,8 +48,9 @@ class SerialSession:
 
     def connect(self, port, baud=115200, username="", password="", timeout=8):
         self.close()
-        self._cancel = threading.Event()
-        ser = serial.serial_for_url(port, baudrate=baud, timeout=_READ_TIMEOUT, write_timeout=_READ_TIMEOUT)
+        # _cancel is not re-armed here: a cancel issued before the worker reaches
+        # connect() must still win. The window uses a fresh session per attempt.
+        ser =serial.serial_for_url(port, baudrate=baud, timeout=_READ_TIMEOUT, write_timeout=_READ_TIMEOUT)
         self.ser = ser
         self._closed = False
         self.last_exit = None
@@ -65,10 +66,13 @@ class SerialSession:
             raise
 
     def _send(self, data: bytes):
+        ser = self.ser   # close() from the GUI thread may null it mid-command
         try:
-            self.ser.write(data)
-            self.ser.flush()
-        except serial.SerialException:
+            if ser is None:
+                raise serial.SerialException("port closed")
+            ser.write(data)
+            ser.flush()
+        except (serial.SerialException, OSError, AttributeError):
             self._closed = True
             raise CommandError("串口连接已断开，请重新连接。") from None
 
@@ -79,10 +83,13 @@ class SerialSession:
         would stall every quiet poll for the full serial read timeout). Callers
         loop until their own deadline, so a short sleep between passes is all
         the idle cost."""
+        ser = self.ser
         try:
-            waiting = self.ser.in_waiting
-            return self.ser.read(waiting) if waiting else b""
-        except serial.SerialException:
+            if ser is None:
+                raise serial.SerialException("port closed")
+            waiting = ser.in_waiting
+            return ser.read(waiting) if waiting else b""
+        except (serial.SerialException, OSError, AttributeError):
             self._closed = True
             raise CommandError("串口连接已断开，请重新连接。") from None
 
@@ -147,7 +154,7 @@ class SerialSession:
                     return
                 if chunk:
                     buffer += chunk
-                    time.sleep(0.01)
+                time.sleep(0.01)
             raise CommandError(f"串口登录超时（{timeout:g} 秒未完成握手），请检查控制台状态。")
         # No login prompt: an async transport may still be surfacing the banner.
         if not text.strip() and not re.search(r"[#$>]\s", text):
@@ -161,6 +168,13 @@ class SerialSession:
         with self._lock:
             if not self.alive:
                 raise CommandError("串口未连接，请先连接串口。")
+            try:
+                drain_until = time.monotonic() + 0.2   # bounded: a chatty console never goes quiet
+                while self._read_raw() and time.monotonic() < drain_until:  # drop stale printk/echoes
+                    pass
+            except CommandError:
+                self.close()
+                raise
             if not quiet:
                 self.log("CMD", command)
             marker = "__DM_" + uuid.uuid4().hex[:16] + "_"
