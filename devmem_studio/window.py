@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxL
                                QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
 
 from . import __version__
-from . import component_parse, top_import
+from . import completion, component_parse, top_import
 from .catalog import REGISTER_FIELDS
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
@@ -34,6 +34,11 @@ from .dialogs import BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDia
 # Fixed connect timeout for both SSH and serial: impatient users hit the red
 # cancel button instead of tuning a number.
 CONNECT_TIMEOUT = 8
+WINDOW_DEFAULT_SIZE = (1540, 960)
+WINDOW_DESKTOP_MIN_SIZE = (1180, 740)
+WINDOW_COMPACT_MIN_SIZE = (960, 620)
+COMPACT_WIDTH = 1400
+COMPACT_HEIGHT = 850
 
 VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "basic": "身份、模块状态与安全链（公共寄存器头）",
@@ -70,8 +75,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("DevmemStudio  Auth: szzhang/cgliu/bxli")
         self.setWindowIcon(QIcon(str(resource_path("assets/logo.svg"))))
-        self.resize(1540, 960)
-        self.setMinimumSize(1180, 740)
+        self.resize(*WINDOW_DEFAULT_SIZE)
+        self.setMinimumSize(*WINDOW_DESKTOP_MIN_SIZE)
         self.store = store or ConfigStore()
         self.cfg = self.store.load()
         self.persist = persist
@@ -86,7 +91,6 @@ class MainWindow(QMainWindow):
         self._task_serial = None
         self._pending_host_key_change = None
         self._last_context = None
-        self._last_fmt = "D"
         self.top_info = None
         self.type_catalog = top_import.load_type_catalog()
         self.active_component = None
@@ -116,11 +120,17 @@ class MainWindow(QMainWindow):
         self._serial_device = None
         self._serial_busy = False   # serial connect runs outside the global task gate
         self._serial_worker = None
+        self._completion_workers = set()   # keep refs: pool.start alone lets GC drop them
         self._serial_cancel_requested = False
+        self._last_ports_scan = 0.0   # COM 口枚举有开销，节流到心跳间隔的倍数
         self.bit_dialog = None
         self.bit_rollback_dialog = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
+        self._compact_layout = None
+        self._screen = None
+        self._screen_connections_bound = False
+        self._screen_min_size = None
         # Per-source log buffers: console renders whichever the source selector points at.
         # log_records aliases the SSH buffer (the historically flat list tests read).
         self.log_records = []
@@ -141,6 +151,7 @@ class MainWindow(QMainWindow):
         self.selected = None
         self.remote_buttons = []
         self._build()
+        self._apply_responsive_layout(force=True)
         self._load_config_fields()
         self.rebuild_registers()
         self._set_connection(False)
@@ -178,6 +189,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
         main = QWidget()
         main.setObjectName("workspace")
+        self.workspace = main
         # Explicit floor replaces the toolbar row's ~1400px layout hint: the area
         # already compresses gracefully below it (window min 1180 - sidebar 320).
         main.setMinimumWidth(840)
@@ -318,6 +330,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(row(label("基地址", "sideCaption"), 1, self.base_field))
         layout.addStretch(0)  # no slack here: the component tree above absorbs it all
         scroll = _SidebarScroll()
+        self.sidebar_scroll = scroll
         scroll.setWidget(side)
         return scroll
 
@@ -336,8 +349,13 @@ class MainWindow(QMainWindow):
                             ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
             self.interval.addItem(text, value)
         self.interval.setFixedWidth(88)
+        # Editable (但 NoInsert)：可直接输入毫秒数或带小数的秒数（500 / 0.3 / 150ms），
+        # 4.1.1 重构时误删 setEditable，README「轮询间隔可编辑输入」因此失效。
+        self.interval.setEditable(True)
+        self.interval.setInsertPolicy(QComboBox.NoInsert)
         self.interval.currentIndexChanged.connect(lambda _i: self._interval_edited())
-        self.interval.setToolTip("自动读取周期")
+        self.interval.editTextChanged.connect(lambda _text: self._interval_edited())
+        self.interval.setToolTip("自动读取周期；可直接输入毫秒数或带小数的秒数（如 500 或 0.3），最快 0.1 s")
         self.read_all_button = button("读取全部", self.read_all, "primary", "read")
         self.write_all_button = button("批量写入", self.write_all, None, "write")
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
@@ -371,6 +389,7 @@ class MainWindow(QMainWindow):
                         self.poll_check, self.interval, self.write_all_button,
                         self.read_all_button, self.export_button, self.help_button,
                         spacing=10)
+        self.register_title_row = title_row
         title_row.setContentsMargins(14, 0, 14, 0)
         layout.addLayout(title_row)
         self.horizontal_split = QSplitter(Qt.Horizontal)
@@ -503,6 +522,7 @@ class MainWindow(QMainWindow):
         for control in (self.write_mode, self.bit_mode):
             control.setCheckable(True)
             self.inspect_modes.addButton(control)
+            control.clicked.connect(self._remember_inspector_mode)   # user clicks only
         self.bit_mode.setChecked(True)
         layout.addLayout(row(self.write_mode, self.bit_mode, 1))
         self.decoded_view = DecodedFieldsView()
@@ -625,7 +645,7 @@ class MainWindow(QMainWindow):
                              button("清空", self.clear_logs, "flat"), spacing=6))
         # The console itself is the shell: session views (ssh/serial) expose an
         # editable prompt line at the bottom; tail log / system stay read-only.
-        self.console = TerminalView(self.send_command)
+        self.console = TerminalView(self.send_command, self.complete_command)
         self.console.setObjectName("console")
         self.console.setMaximumBlockCount(3000)
         self.console.setLineWrapMode(QPlainTextEdit.WidgetWidth)
@@ -656,10 +676,11 @@ class MainWindow(QMainWindow):
         saved = self.cfg.get("poll_interval", 1000)
         index = self.interval.findData(saved)
         if index < 0:
-            # 旧配置里的自定义周期：选最接近的预设。
-            presets = [self.interval.itemData(i) for i in range(self.interval.count())]
-            index = min(range(len(presets)), key=lambda i: abs(presets[i] - saved), default=0)
-        self.interval.setCurrentIndex(index)
+            # 旧配置里的自定义周期：回填到编辑框（可编辑下拉直接显示该值），
+            # 而不是就近选预设——用户上次输入的自定义值得以还原。
+            self.interval.setEditText(f"{saved:g} ms")
+        else:
+            self.interval.setCurrentIndex(index)
 
     def _shortcuts(self):
         for sequence, callback in (("F5", self.read_all), ("Ctrl+F", self._focus_log_search),
@@ -1038,7 +1059,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(self.regs))
         for index, reg in enumerate(self.regs):
             reg.update(_address=start + parse_addr(reg["offset"]), _value=None, _updated="", _error="", _readback_failed=False,
-                       _row=index, _access_width=access_width(reg), _fmt="D", _source="未读取", _target="")
+                       _row=index, _access_width=access_width(reg), _fmt="H", _source="未读取", _target="")
             note = meta["notes"].get(reg["name"]) or meta["debug_notes"].get(reg["name"])
             if note:
                 reg["_note"] = note
@@ -1049,16 +1070,17 @@ class MainWindow(QMainWindow):
                                                for item in behaviors])
             presets = reg.get("aliases") or reg.get("buttons") or []
             initial = "0x1" if reg.get("action") else (presets[0]["value"] if presets else reg.get("value", "0x0"))
-            reg["_draft"] = f"{parse_int(initial) or 0}"
+            reg["_draft"] = f"{parse_int(initial) or 0:X}"
             remembered = cache.get(reg["name"])
             if isinstance(remembered, dict) and not reg.get("action"):
                 previous = str(remembered.get("v", reg["_draft"]))
                 match = re.search(r"\((0[xX][0-9a-fA-F]+|\d+)\)\s*$", previous)
                 if match:
-                    reg["_draft"] = f"{parse_int(match.group(1))}"
+                    reg["_draft"] = f"{parse_int(match.group(1)):X}"
                 else:
                     reg["_draft"] = previous
-                    reg["_fmt"] = remembered.get("f", "D") if remembered.get("f") in ("H", "D") else "D"
+                    if remembered.get("f") == "D" and previous.strip().isdigit():
+                        reg["_draft"] = f"{int(previous):X}"   # 旧缓存 DEC → HEX
                 if remembered.get("w") in (8, 16, 32, 64):
                     reg["_access_width"] = remembered["w"]
             mode = "RO" if reg.get("readonly") else "WO" if reg.get("write_only") else "ACT" if reg.get("action") else "RW"
@@ -1237,11 +1259,12 @@ class MainWindow(QMainWindow):
         self.access_badge.setText("只读" if reg.get("readonly") else "写-only" if reg.get("write_only")
                                   else "动作" if reg.get("action") else "读写")
         self.write_mode.setEnabled(not reg.get("readonly", False))
-        self.bit_mode.setChecked(True)   # 所有寄存器选中默认落在“解析与位状态”
+        # 沿用上次手动选的页签；只读寄存器临时落在解析页，不改记忆。
+        wants_write = self.cfg.get("inspector_mode") == "write" and not reg.get("readonly", False)
+        (self.write_mode if wants_write else self.bit_mode).setChecked(True)
         self.write_button.setVisible(not reg.get("readonly", False))
         self.readonly_note.setVisible(reg.get("readonly", False))
         self.width_combo.setCurrentText(str(reg["_access_width"]))
-        self._last_fmt = reg["_fmt"]
         self.format_combo.setCurrentIndex(0 if reg["_fmt"] == "H" else 1)
         self.write_input.setText(reg["_draft"])
         self.write_input.setReadOnly(bool(reg.get("action")))
@@ -1262,6 +1285,10 @@ class MainWindow(QMainWindow):
         self._show_measurement()
         self._update_command_preview()
         self._refresh_controls()
+
+    def _remember_inspector_mode(self):
+        self.cfg["inspector_mode"] = "write" if self.write_mode.isChecked() else "bits"
+        self._schedule_save()
 
     def _inspector_mode_changed(self):
         if not self.selected:
@@ -1302,8 +1329,113 @@ class MainWindow(QMainWindow):
         self.inspector_scroll.verticalScrollBar().setValue(anchor)
         self.inspector_scroll.ensureWidgetVisible(target, 0, 8)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._bind_screen()
+        self._apply_responsive_layout()
+        QTimer.singleShot(0, self._fit_to_screen)
+
+    def _bind_screen(self):
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        if not self._screen_connections_bound:
+            handle.screenChanged.connect(self._on_screen_changed)
+            self._screen_connections_bound = True
+        self._set_screen(handle.screen())
+
+    def _set_screen(self, screen):
+        if screen is self._screen:
+            return
+        if self._screen is not None:
+            for signal_name in ("availableGeometryChanged", "geometryChanged", "logicalDotsPerInchChanged"):
+                signal = getattr(self._screen, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(self._on_screen_metrics_changed)
+                    except (TypeError, RuntimeError):
+                        pass
+        self._screen = screen
+        if screen is not None:
+            for signal_name in ("availableGeometryChanged", "geometryChanged", "logicalDotsPerInchChanged"):
+                signal = getattr(screen, signal_name, None)
+                if signal is not None:
+                    signal.connect(self._on_screen_metrics_changed)
+
+    def _on_screen_changed(self, screen):
+        self._set_screen(screen)
+        QTimer.singleShot(0, self._fit_to_screen)
+
+    def _on_screen_metrics_changed(self, *_):
+        QTimer.singleShot(0, self._fit_to_screen)
+
+    def _fit_to_screen(self):
+        screen = self._screen or QApplication.primaryScreen()
+        if screen is None or self.isFullScreen() or self.isMinimized():
+            return
+        available = screen.availableGeometry()
+        # A low-resolution monitor cannot satisfy the normal desktop floor. Lower
+        # the application floor before clamping the window so it remains usable
+        # instead of extending beyond the monitor work area.
+        if available.width() < WINDOW_DESKTOP_MIN_SIZE[0] or available.height() < WINDOW_DESKTOP_MIN_SIZE[1]:
+            min_width = max(640, min(WINDOW_COMPACT_MIN_SIZE[0], available.width() - 16))
+            min_height = max(480, min(WINDOW_COMPACT_MIN_SIZE[1], available.height() - 16))
+            self._screen_min_size = (min_width, min_height)
+        else:
+            self._screen_min_size = None
+        self._apply_responsive_layout()
+        if self.isMaximized():
+            return
+        width = min(self.width(), available.width())
+        height = min(self.height(), available.height())
+        if width != self.width() or height != self.height():
+            self.resize(width, height)
+        x = min(max(self.x(), available.left()), available.right() - self.width() + 1)
+        y = min(max(self.y(), available.top()), available.bottom() - self.height() + 1)
+        if (x, y) != (self.x(), self.y()):
+            self.move(x, y)
+
+    def _apply_responsive_layout(self, force=False):
+        if not hasattr(self, "workspace"):
+            return
+        compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
+        if not force and compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        if compact:
+            self.setMinimumSize(*(self._screen_min_size or WINDOW_COMPACT_MIN_SIZE))
+            self.workspace.setMinimumWidth(680)
+            self.sidebar_scroll.setMinimumWidth(260)
+            self.component_tree.setMinimumWidth(250)
+            self.inspector.setMinimumWidth(240)
+            self.inspector.setMaximumWidth(320)
+            self.search.setMinimumWidth(105)
+            self.search.setMaximumWidth(180)
+            self.log_search.setMinimumWidth(140)
+            self.log_search.setMaximumWidth(220)
+            self.register_title_row.setContentsMargins(8, 0, 8, 0)
+            self.register_title_row.setSpacing(6)
+            # The badges remain visible; this secondary sentence is the first
+            # item removed from the crowded title row at compact widths.
+            self.target_label.setVisible(False)
+        else:
+            self.setMinimumSize(*(self._screen_min_size or WINDOW_DESKTOP_MIN_SIZE))
+            self.workspace.setMinimumWidth(840)
+            self.sidebar_scroll.setMinimumWidth(320)
+            self.component_tree.setMinimumWidth(300)
+            self.inspector.setMinimumWidth(270)
+            self.inspector.setMaximumWidth(350)
+            self.search.setMinimumWidth(145)
+            self.search.setMaximumWidth(220)
+            self.log_search.setMinimumWidth(240)
+            self.log_search.setMaximumWidth(280)
+            self.register_title_row.setContentsMargins(14, 0, 14, 0)
+            self.register_title_row.setSpacing(10)
+            self.target_label.setVisible(True)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._apply_responsive_layout()
         if hasattr(self, "inspector_scroll"):
             QTimer.singleShot(0, self._reveal_inspector)
 
@@ -1405,18 +1537,7 @@ class MainWindow(QMainWindow):
     def _format_changed(self, *args):
         if self._updating or not self.selected:
             return
-        new = self.format_combo.currentData()
-        try:
-            value = write_value(self.write_input.text(), self._last_fmt, int(self.width_combo.currentText()))
-        except ValueError:
-            self._updating = True
-            self.format_combo.setCurrentIndex(0 if self._last_fmt == "H" else 1)
-            self._updating = False
-            self._status("请先修正写入值，再切换进制。")
-            return
-        self._last_fmt = new
-        self.write_input.setText(f"{value:X}" if new == "H" else str(value))
-        self._editor_changed()
+        self._editor_changed()   # 只改解释进制，不转换已填值
 
     def _update_command_preview(self):
         if not self.selected:
@@ -1658,6 +1779,9 @@ class MainWindow(QMainWindow):
                 return
             self._serial_busy = False
             self._task_serial = None
+            # A cancel that lost the race to success must not linger: the next
+            # failed connect would otherwise be misreported as 连接已取消.
+            self._serial_cancel_requested = False
             self.serial = session
             self.serial_connected = True
             self._serial_device = port
@@ -2083,14 +2207,18 @@ class MainWindow(QMainWindow):
             self.select_component(pending)
 
     def cancel_task(self):
+        """Esc: stop the running register/SSH task, and cancel a serial handshake
+        (which runs on its own gate outside _busy) when one is in flight."""
+        if self._serial_busy:
+            self._serial_cancel_requested = True
+            if self._task_serial:
+                self._task_serial.cancel_connect()   # the same path as the red cancel button
+                self.append_log("SYSTEM", "已请求取消 serial 连接。")
         if self._busy:
             self.cancel.set()
             self.poll_check.setChecked(False)
             if self._task_kind == "connect":
                 self.session.close()
-            elif self._task_kind == "serial":
-                self._task_serial.close()
-                self._task_serial = None
             self.append_log("SYSTEM", "已请求停止后续操作。")
 
     def _can_operate(self):
@@ -2260,10 +2388,18 @@ class MainWindow(QMainWindow):
 
     def _refresh_serial_ports(self):
         """Rescan attached COM ports: pick up hot-plugs and drop the connected
-        port when its device disappears from the system."""
+        port when its device disappears from the system.
+
+        The enumeration walks the Windows setupapi tree and is throttled to
+        every few seconds from the heartbeat instead of every tick."""
         if self._closing or self._busy:
             return
-        devices = [device for device, _ in list_serial_ports()]
+        now = time.monotonic()
+        if now - self._last_ports_scan < 5:
+            return
+        self._last_ports_scan = now
+        ports = list_serial_ports()
+        devices = [device for device, _ in ports]
         if self.serial_connected and self._serial_device and self._serial_device not in devices:
             # The plugged-in port was unplugged: drop the session cleanly.
             self.serial.close()
@@ -2274,7 +2410,7 @@ class MainWindow(QMainWindow):
             current = self.serial_port.currentData()
             self.serial_port.blockSignals(True)
             self.serial_port.clear()
-            for device, description in list_serial_ports():
+            for device, description in ports:
                 self.serial_port.addItem(self._serial_port_label(device, description), device)
             self._serial_devices = devices
             if current is not None and current in devices:
@@ -2303,8 +2439,32 @@ class MainWindow(QMainWindow):
                 return
             session = self.session
         def done(result):
+            if not result:
+                session.log("INFO", "（命令无输出）")   # e.g. ls in an empty dir
             self._status("命令执行完成。")
         self._run_task(lambda progress: session.run(text), done, "执行命令", "command")
+
+    def complete_command(self, line, reply):
+        """Tab: local names now, board names (PATH / files) from a quiet background
+        run. Stays outside the busy gate; the session lock serialises it with polling."""
+        head, raw = completion.split_word(line)
+        word = completion.unescape(raw)
+        command_pos = completion.is_command_position(head, word)
+        local = completion.local_candidates(word, command_pos, self.console.history())
+        if self.console_source == "com":
+            session = self.serial if self.serial_connected else None
+        else:
+            session = self.session if self.connected and not self.demo else None
+        script = completion.remote_script(word, command_pos) if session else None
+        if not script:
+            reply(local)
+            return
+        worker = Worker(lambda progress: completion.parse_remote(session.run(script, timeout=5, quiet=True), word))
+        self._completion_workers.add(worker)
+        worker.signals.result.connect(lambda remote: self._closing or reply(sorted(set(local) | set(remote))))
+        worker.signals.failed.connect(lambda message: self._closing or reply(local))
+        worker.signals.finished.connect(lambda: self._completion_workers.discard(worker))
+        self.pool.start(worker)
 
     def reboot(self):
         if not self.connected or self._busy:

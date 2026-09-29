@@ -253,13 +253,14 @@ u_slave_rs485_arbiter
         Template tops carry an outdated reference template followed by the actual
         module below it; the ec_* declaration at the shallowest comment depth is
         the real component."""
-        text = """// --- flow_comp_27 -----河南思睿1#爪RFID读写一
+        text = r"""// --- flow_comp_27 -----河南思睿1#爪RFID读写一
 //    // ec_sp_rfid
 //    // #(
 //    //      .REG_SPACE_BIAS     (20'd54272)
 //    // )
 //    // ec_sp_rfid_27
 //    // (
+//    // );
 //    // );
 //
 ec_superisys_485_modbus_rtu
@@ -294,7 +295,7 @@ ec_superisys_485_modbus_rtu_27
     def test_hidden_comment_reference_only_block_stays_disabled(self):
         """Reference-only blocks (nested // + real commented ec_* at depth 1) stay disabled
         but still report the real ec_* module name instead of the stale reference."""
-        text = """// --- flow_comp_26 -----回库交换平台_RFID读写一
+        text = r"""// --- flow_comp_26 -----回库交换平台_RFID读写一
 //    // ec_sp_rfid
 //    // #(
 //    //      .REG_SPACE_BIAS     (20'd56320)
@@ -400,6 +401,23 @@ class CatalogTests(unittest.TestCase):
         registers, exact = top_import.registers_for(catalog, "ec_custom")
         self.assertTrue(exact)
         self.assertEqual([item["name"] for item in registers], ["IRQ_REG1", "IRQ_REG2"])
+
+    def test_registers_for_skips_malformed_override_offsets(self):
+        """User-edited override JSON with a broken offset must not crash the table rebuild."""
+        catalog = {"types": {"ec_uut": {"registers": [
+            {"offset": "0x00C", "name": "EC_ID", "width": 32, "readonly": False},
+            {"offset": "0xZZ", "name": "BROKEN", "width": 32},
+            {"offset": None, "name": "NULL_OFFSET", "width": 32},
+            "not-a-dict",
+        ]}}}
+        registers, exact = top_import.registers_for(catalog, "ec_uut")
+        self.assertTrue(exact)
+        names = [item["name"] for item in registers]
+        self.assertNotIn("BROKEN", names)
+        self.assertNotIn("NULL_OFFSET", names)
+        self.assertIn("EC_ID", names)
+        self.assertIn("IRQ_REG1", names)   # 公共中断头兜底仍补齐
+        self.assertEqual(names, ["IRQ_REG1", "IRQ_REG2", "EC_ID"])
 
     def test_shipped_catalog_is_well_formed(self):
         path = Path(__file__).resolve().parent.parent / "devmem_studio/data/component_catalog.json"

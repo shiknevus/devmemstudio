@@ -104,6 +104,51 @@ class UiTests(unittest.TestCase):
         self.app.processEvents()
         self.temp.cleanup()
 
+    def test_compact_layout_relaxes_fixed_widths_and_restores(self):
+        self.window.resize(1280, 800)
+        self.settle()
+        self.assertTrue(self.window._compact_layout)
+        self.assertFalse(self.window.target_label.isVisible())
+        self.assertEqual(self.window.inspector.minimumWidth(), 240)
+        self.assertEqual(self.window.search.minimumWidth(), 105)
+        self.assertEqual(self.window.log_search.minimumWidth(), 140)
+
+        self.window.resize(1540, 960)
+        self.settle()
+        self.assertFalse(self.window._compact_layout)
+        self.assertTrue(self.window.target_label.isVisible())
+        self.assertEqual(self.window.inspector.minimumWidth(), 270)
+        self.assertEqual(self.window.search.minimumWidth(), 145)
+        self.assertEqual(self.window.log_search.minimumWidth(), 240)
+
+    def test_inspector_tab_is_remembered_across_selection(self):
+        window = self.window
+        writable = [i for i, reg in enumerate(window.regs)
+                    if not reg.get("readonly") and not window.table.isRowHidden(i)]
+        readonly = [i for i, reg in enumerate(window.regs)
+                    if reg.get("readonly") and not window.table.isRowHidden(i)]
+        self.assertGreaterEqual(len(writable), 2)
+        window.table.selectRow(writable[0])
+        self.settle()
+        self.assertTrue(window.bit_mode.isChecked())   # default
+        window.write_mode.click()
+        self.assertEqual(window.cfg["inspector_mode"], "write")
+        window.table.selectRow(writable[1])
+        self.settle()
+        self.assertTrue(window.write_mode.isChecked())
+        if readonly:
+            window.table.selectRow(readonly[0])   # read-only falls back but keeps the memory
+            self.settle()
+            self.assertTrue(window.bit_mode.isChecked())
+            window.table.selectRow(writable[0])
+            self.settle()
+            self.assertTrue(window.write_mode.isChecked())
+        window.bit_mode.click()
+        window.table.selectRow(writable[1])
+        self.settle()
+        self.assertTrue(window.bit_mode.isChecked())
+        self.assertEqual(window.cfg["inspector_mode"], "bits")
+
     def test_device_error_stops_polling_and_marks_failed_row(self):
         class FailedDevice(DemoSession):
             def read(self, address, quiet=False):
@@ -146,6 +191,8 @@ class UiTests(unittest.TestCase):
         self.assertEqual(connected_serial, {"port": "COM9", "baud": 115200,
                                             "username": "root", "password": "secret"})
         self.assertEqual(self.window.serial_connect_button.text(), "断开连接")
+        # 连接成功路径必须清掉竞态残留的取消标志（否则下一次失败会被误报为“已取消”）。
+        self.assertFalse(self.window._serial_cancel_requested)
         # 终端来源=serial 时终端提示符可输入、命令走串口会话。
         idx = self.window.console_source_combo.findData("com")
         self.window.console_source_combo.setCurrentIndex(idx)
@@ -154,6 +201,18 @@ class UiTests(unittest.TestCase):
         self.window.send_command("ls /")
         self.settle(lambda: not self.window._busy)
         self.assertEqual(self.window.serial.last_command, "ls /")
+        # Tab 补全：板端候选经串口静默查询，唯一候选补齐。
+        self.window.serial.run = lambda command, timeout=8, quiet=False: "media/\n" if "for f in" in command else ""
+        console = self.window.console
+        console._set_prompt_input("cd /run/me")
+        QTest.keyClick(console, Qt.Key_Tab)
+        self.settle(lambda: console._prompt_input() == "cd /run/media/")
+        # 多候选且无公共前缀可延伸：列在提示符上方。
+        self.window.serial.run = lambda command, timeout=8, quiet=False: "log\nlock/\n"
+        console._set_prompt_input("ls /run/lo")
+        QTest.keyClick(console, Qt.Key_Tab)
+        self.settle(lambda: "lock/  log" in console.toPlainText())
+        self.assertEqual(console._prompt_input(), "ls /run/lo")
         # 断开串口后字段恢复可编辑
         self.window.disconnect_serial()
         self.assertFalse(self.window.serial_connected)
@@ -185,6 +244,33 @@ class UiTests(unittest.TestCase):
         self.assertTrue(self.window.progress.isHidden())
         self.assertIn("已连接", self.window.com_badge.text())
         self.assertEqual(self.window.com_badge.property("state"), "connected")
+
+    def test_esc_cancels_serial_handshake(self):
+        """Esc（cancel_task）必须能中止串口握手：serial 独立于 _busy 门控运行，
+        旧代码只处理 _task_kind == "serial"（该值从不出现），Esc 对串口无效。"""
+        from devmem_studio.core import CommandError
+        from devmem_studio.serial_session import SerialSession
+
+        class CancelAwareSerial(SerialSession):
+            def connect(self, port, baud, username, password, timeout):
+                while not self._cancel.is_set():
+                    time.sleep(0.01)
+                raise CommandError("连接已取消。")
+
+            def close(self):
+                pass
+
+        with patch("devmem_studio.window.SerialSession", CancelAwareSerial):
+            self.window.serial_port.addItem("USB Serial Port (COM9)", "COM9")
+            self.window.serial_port.setCurrentIndex(self.window.serial_port.findData("COM9"))
+            self.window._toggle_serial()
+            self.settle(lambda: self.window._serial_busy)
+            self.assertTrue(self.window._serial_cancel_requested is False)
+            self.window.cancel_task()   # Esc
+            self.settle(lambda: not self.window._serial_busy and not self.window.serial_connected)
+        self.assertFalse(self.window.serial_connected)
+        self.assertFalse(self.window._serial_cancel_requested)   # failed() 路径已清标志
+        self.assertTrue(any("已请求取消 serial 连接" in text for _, _, text in self.window.log_records_system))
 
     def test_irq_report_inspector_tooltips_and_export_use_requested_formats(self):
         samples = {
@@ -908,23 +994,31 @@ class TopImportUiTests(UiTests):
         self.assertTrue(self.window.cancel.is_set())
         self.settle(lambda: not self.window._busy)
 
-    def test_poll_interval_presets_and_clamp(self):
-        # 自动读取周期只能选预设（下拉不可编辑），最快 0.1 s（100 ms）。
-        self.assertFalse(self.window.interval.isEditable())
+    def test_poll_interval_presets_and_typed_values(self):
+        # 自动读取周期是可编辑下拉：选预设或直接输入毫秒数/带小数的秒数，最快 0.1 s（100 ms）。
+        self.assertTrue(self.window.interval.isEditable())
         presets = [self.window.interval.itemData(i) for i in range(self.window.interval.count())]
         self.assertEqual(min(presets), 100)   # “0.1 s” 是可选预设
         for i, expected in enumerate(presets):
             with self.subTest(preset=expected):
                 self.window.interval.setCurrentIndex(i)
                 self.assertEqual(self.window._poll_interval_ms(), expected)
-        # 旧配置里的自定义周期回填到最接近的预设（300 → 200）。
+        for typed, expected in (("0.3", 300), ("150ms", 150), ("500", 500), ("1 s", 1000),
+                                ("0", 100), ("99999", 60000), ("garbage", 1000)):
+            with self.subTest(typed=typed):
+                # 可编辑下拉输入时不改 currentIndex（NoInsert），先钉到 1 s 预设
+                # 让非法文本的后备分支（currentData）确定。
+                self.window.interval.setCurrentIndex(3)
+                self.window.interval.setEditText(typed)
+                self.assertEqual(self.window._poll_interval_ms(), expected)
+        # 旧配置里的自定义周期回填到编辑框原样还原（300 → 300，而非就近预选 200）。
         cfg = self.window.cfg
         cfg["poll_interval"] = 300
         self.window._load_config_fields()
-        self.assertEqual(self.window._poll_interval_ms(), 200)
+        self.assertEqual(self.window._poll_interval_ms(), 300)
         cfg["poll_interval"] = 7000
         self.window._load_config_fields()
-        self.assertEqual(self.window._poll_interval_ms(), 5000)
+        self.assertEqual(self.window._poll_interval_ms(), 7000)
 
     def test_import_component_updates_runtime_definition(self):
         from PySide6.QtWidgets import QMessageBox
@@ -1166,6 +1260,14 @@ class TopImportUiTests(UiTests):
         self.assertIn("0x20", self.window.table.item(row, 5).text())
         self.window.table.item(row, 5).setText("预设 · 0x2B")    # preset prefix kept by the editor
         self.assertEqual((reg["_draft"], reg["_fmt"]), ("0x2B", "H"))
+
+    def test_write_format_defaults_hex_and_switch_keeps_text(self):
+        self.window.table.selectRow(self.row_of("A_TX_OT"))
+        self.assertEqual(self.window.format_combo.currentData(), "H")
+        self.window.write_input.setText("10")
+        self.window.format_combo.setCurrentIndex(1)
+        self.assertEqual((self.window.write_input.text(), self.window.selected["_fmt"]), ("10", "D"))
+        self.assertTrue(self.window.command_preview.text().endswith(" 0xa"))   # "10" 按 DEC 解释
 
 
 if __name__ == "__main__":
