@@ -9,7 +9,8 @@ from unittest.mock import Mock
 from devmem_studio.catalog import DEFAULT_CATEGORIES, DEFAULT_TYPES
 from devmem_studio.core import (ConfigStore, access_width, decode_fields, format_decoded_fields, default_config,
                                parse_addr, parse_int, parse_devmem_read_output,
-                               validated_address, write_command, write_value, SshSession, CommandError, ReadbackError)
+                               validated_address, write_command, write_value, SshSession, DemoSession,
+                               CommandError, ReadbackError)
 
 
 class RegisterTests(unittest.TestCase):
@@ -205,6 +206,24 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg["last_category"], "axis")
             self.assertEqual(cfg["write_cache"], {})
             self.assertNotIn("connect_timeout", cfg)
+
+
+class DemoSessionTests(unittest.TestCase):
+    def test_run_devmem_write_accepts_hex_and_rejects_invalid_data(self):
+        session = DemoSession()
+        session.alive = True
+        self.assertEqual(session.run("devmem 0xb0100808 32 0x2A"), "0x0000002A")
+        session.memory[0xB0100808] = 0x2A
+        with self.assertRaises(ValueError):
+            session.run("devmem 0xb0100808 32 not-a-number")   # 不再把 None 写进内存
+        self.assertEqual(session.memory[0xB0100808], 0x2A)      # 失败的写入不得污染内存
+
+    def test_run_devmem_read_requires_connection(self):
+        session = DemoSession()
+        with self.assertRaises(CommandError):
+            session.run("devmem 0xb0100800")   # 未连接
+        session.connect()
+        self.assertTrue(session.run("devmem 0xb0100800").startswith("0x"))
 
 
 if __name__ == "__main__":

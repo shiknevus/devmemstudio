@@ -332,12 +332,25 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
     return data
 
 
+def _parse_offset(item) -> int | None:
+    """Register offset from a catalog/override entry; None when malformed."""
+    try:
+        return int(str(item["offset"]).strip(), 16)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def registers_for(catalog: dict | None, module_type: str) -> tuple[list[dict], bool]:
     """Register table for a component type; False when using the generic fallback."""
     entry = (catalog or {}).get("types", {}).get(module_type)
     if entry and isinstance(entry.get("registers"), list) and entry["registers"]:
-        registers = sorted((dict(item) for item in entry["registers"]),
-                           key=lambda item: int(str(item["offset"]), 16))
+        # User-edited override JSON may carry a broken offset ("0xZZ"); skip such
+        # items instead of crashing the register-table rebuild with a ValueError.
+        registers = sorted((dict(item) for item in entry["registers"]
+                            if isinstance(item, dict) and _parse_offset(item) is not None),
+                           key=lambda item: _parse_offset(item))
+        if not registers:
+            return copy.deepcopy(FALLBACK_REGISTERS), False
         # Every component implements the shared IRQ header; guarantee it even for odd tables.
         present = {item["name"] for item in registers}
         for name, offset in (("IRQ_REG1", "0x000"), ("IRQ_REG2", "0x004")):

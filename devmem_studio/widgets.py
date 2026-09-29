@@ -3,6 +3,7 @@ from PySide6.QtCore import QEvent, Qt, QRectF, Signal, QObject, QRunnable
 from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
                                QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy)
+from . import completion
 from .theme import icon
 
 
@@ -217,38 +218,21 @@ class DecodedFieldsView(QFrame):
                 cell.setVisible(False)
 
 
-class CommandLine(QLineEdit):
-    def __init__(self):
-        super().__init__()
-        self.history = []
-        self.position = 0
-
-    def remember(self, command):
-        if not self.history or self.history[-1] != command:
-            self.history.append(command)
-            self.history = self.history[-100:]
-        self.position = len(self.history)
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Up, Qt.Key_Down) and self.history:
-            self.position = max(0, min(len(self.history), self.position + (-1 if event.key() == Qt.Key_Up else 1)))
-            self.setText(self.history[self.position] if self.position < len(self.history) else "")
-            return
-        super().keyPressEvent(event)
-
-
 class TerminalView(QPlainTextEdit):
     """Log view whose trailing line is an editable shell prompt.
 
     Everything above the prompt is history: selectable but not editable — any
     typed key is redirected into the prompt line. Enter submits the line to the
-    `execute` callback; Up/Down walk the command history. Non-session views
+    `execute` callback; Up/Down walk the command history; Tab asks the
+    `complete(line, reply)` callback for candidates. Non-session views
     (tail log / system) stay plain read-only via set_interactive(False)."""
     PROMPT = "❯ "
 
-    def __init__(self, execute, parent=None):
+    def __init__(self, execute, complete=None, parent=None):
         super().__init__(parent)
         self._execute = execute
+        self._complete = complete
+        self._completion_token = 0
         self._interactive = False
         self._history = []
         self._history_index = 0
@@ -282,6 +266,24 @@ class TerminalView(QPlainTextEdit):
         cursor = self.textCursor()
         cursor.clearSelection()
         cursor.movePosition(QTextCursor.End)   # caret lands after any typed input
+        self.setTextCursor(cursor)
+
+    def _cursor_in_input(self):
+        cursor = self.textCursor()
+        start = self._prompt_start()
+        return cursor.position() >= start and cursor.anchor() >= start
+
+    def _keep_cursor_in_prompt(self):
+        """Caret/selection inside the input stays put; anywhere else jumps to the end."""
+        if not self._cursor_in_input():
+            self._force_cursor_to_prompt()
+
+    def _caret_offset(self):
+        return self.textCursor().position() - self._prompt_start()
+
+    def _set_caret_offset(self, offset):
+        cursor = self.textCursor()
+        cursor.setPosition(self._prompt_start() + max(0, min(offset, len(self._prompt_input()))))
         self.setTextCursor(cursor)
 
     # -- output --------------------------------------------------------------
@@ -327,6 +329,35 @@ class TerminalView(QPlainTextEdit):
             self._history_index = min(len(self._history), self._history_index + 1)
         self._set_prompt_input(self._history[self._history_index]
                                if self._history_index < len(self._history) else "")
+        self._force_cursor_to_prompt()
+
+    def history(self):
+        return list(self._history)
+
+    def _request_completion(self):
+        if not self._complete:
+            return
+        self._keep_cursor_in_prompt()
+        self._completion_token += 1
+        token, line, caret = self._completion_token, self._prompt_input(), self._caret_offset()
+        self._complete(line[:caret], lambda candidates: self._apply_completion(token, line, caret, candidates))
+
+    def _apply_completion(self, token, line, caret, candidates):
+        # Drop a late reply once the user has typed on or moved the caret.
+        if (token != self._completion_token or not self._interactive
+                or self._prompt_input() != line or self._caret_offset() != caret):
+            return
+        before, after = line[:caret], line[caret:]
+        new_before, listing = completion.apply(before, candidates)
+        if new_before != before:
+            self._set_prompt_input(new_before + after)
+            self._set_caret_offset(len(new_before))
+        elif listing:
+            shown = listing[:100]
+            more = f"  …（共 {len(listing)} 项）" if len(listing) > len(shown) else ""
+            self.append_before_prompt("  ".join(shown) + more)
+            self._set_caret_offset(caret)
+            self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def keyPressEvent(self, event):
         if not self._interactive:
@@ -339,22 +370,40 @@ class TerminalView(QPlainTextEdit):
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self._submit()
             return
+        if key in (Qt.Key_Tab, Qt.Key_Backtab):
+            self._request_completion()
+            return
         if key in (Qt.Key_Up, Qt.Key_Down):
             self._history_step(key == Qt.Key_Up)
             return
-        # Everything else edits the prompt line only.
-        self._force_cursor_to_prompt()
-        if key == Qt.Key_Backspace:
-            cursor = self.textCursor()
-            if not cursor.hasSelection() and cursor.position() <= self._prompt_start():
-                return   # keep the prompt marker intact
+        if key in (Qt.Key_PageUp, Qt.Key_PageDown):
+            bar = self.verticalScrollBar()   # scroll history without moving the caret
+            bar.setValue(bar.value() + (bar.pageStep() if key == Qt.Key_PageDown else -bar.pageStep()))
+            return
+        # Everything else edits the prompt line only; the caret may sit anywhere in it.
+        self._keep_cursor_in_prompt()
+        start = self._prompt_start()
+        cursor = self.textCursor()
+        shift = bool(event.modifiers() & Qt.ShiftModifier)
         if key == Qt.Key_Home:
-            cursor = self.textCursor()
-            cursor.clearSelection()
-            cursor.setPosition(self._prompt_start())
+            cursor.setPosition(start, QTextCursor.KeepAnchor if shift else QTextCursor.MoveAnchor)
             self.setTextCursor(cursor)
             return
+        if key in (Qt.Key_Backspace, Qt.Key_Left) and not cursor.hasSelection() and cursor.position() <= start:
+            return   # keep the prompt marker intact
+        if key == Qt.Key_Backspace and event.modifiers() & Qt.ControlModifier and not cursor.hasSelection():
+            cursor.movePosition(QTextCursor.PreviousWord, QTextCursor.KeepAnchor)
+            if cursor.position() < start:
+                cursor.setPosition(start, QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+            return
         super().keyPressEvent(event)
+        cursor = self.textCursor()
+        if cursor.position() < start:   # Ctrl+Left / PageUp must not leave the input
+            anchor = cursor.anchor() if cursor.anchor() >= start else start
+            cursor.setPosition(anchor)
+            cursor.setPosition(start, QTextCursor.KeepAnchor)
+            self.setTextCursor(cursor)
         if not self._prompt_present():
             self.ensure_prompt()
 
@@ -365,7 +414,7 @@ class TerminalView(QPlainTextEdit):
         text = source.text().replace(" ", " ").replace("\r", " ").replace("\n", " ")
         if not text:
             return
-        self._force_cursor_to_prompt()
+        self._keep_cursor_in_prompt()
         self.textCursor().insertText(text)
 
 

@@ -152,7 +152,7 @@ def default_config() -> dict:
             "last_address": "0x0800", "remember_password": False,
             "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
-            "serial_password": "", "remember_serial_password": False}
+            "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits"}
 
 
 class ConfigStore:
@@ -212,6 +212,8 @@ class ConfigStore:
             cfg[field] = str(cfg.get(field) or "")
         if not isinstance(cfg.get("write_cache"), dict):
             cfg["write_cache"] = {}
+        if cfg.get("inspector_mode") not in ("bits", "write"):
+            cfg["inspector_mode"] = "bits"
         return cfg
 
     def save(self, cfg: dict):
@@ -1013,7 +1015,13 @@ class DemoSession:
             address = parse_int(parts[1])
             if address is None:
                 raise ValueError("地址格式无效。")
-            value = self.read(address, quiet=quiet) if len(parts) == 2 else self.write(address, int(parts[2]), parse_int(parts[3]), quiet=quiet)
+            if len(parts) == 2:
+                value = self.read(address, quiet=quiet)
+            else:
+                data = parse_int(parts[3])
+                if data is None:
+                    raise ValueError("写入值格式无效。")
+                value = self.write(address, int(parts[2]), data, quiet=quiet)
             return f"0x{value:08X}"
         if not quiet:
             self.log("CMD", command)

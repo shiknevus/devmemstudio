@@ -354,11 +354,19 @@ class BitUploadDialog(QDialog):
         if not str(path).lower().endswith(".bit"):
             QMessageBox.warning(self, "文件类型错误", "选中文件不是bit文件，请选择 .bit 文件。")
             return
+        local = Path(path)
+        try:
+            size = local.stat().st_size
+        except OSError:
+            # A stale clipboard file URL or a vanished network path must not
+            # raise out of the Qt slot: reject with a message instead.
+            QMessageBox.warning(self, "文件不存在", f"找不到文件：{path}\n该路径可能已失效或不可访问。")
+            return
         self._local_path = path
         self.path_label.setText(path)
         self.path_label.setToolTip(path)
         self.set_reset()
-        self.status.setText(f"本地文件：{Path(path).name}（{Path(path).stat().st_size:,} 字节）")
+        self.status.setText(f"本地文件：{local.name}（{size:,} 字节）")
 
     def paste_file(self):
         """Accept a .bit file pasted from the clipboard (Ctrl+V)."""
@@ -481,8 +489,12 @@ class BitRollbackDialog(QDialog):
             name = entry["name"]
             stamp = entry.get("timestamp")
             if stamp:
-                human = datetime.strptime(stamp, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S") \
-                    if re.fullmatch(r"\d{14}", stamp) else stamp
+                human = stamp
+                if re.fullmatch(r"\d{14}", stamp):
+                    try:
+                        human = datetime.strptime(stamp, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass   # not a real calendar date: show the raw board-side stamp
                 text = f"{name}    备份于 {human}"
             else:
                 text = f"{name}    当前版本"

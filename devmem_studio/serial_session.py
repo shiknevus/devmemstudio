@@ -131,7 +131,13 @@ class SerialSession:
         # First beat: a console that broadcasts a login:/banner answers fast, so
         # settle early on data; a truly quiet UART returns in the short window.
         text = self._recv_text(min(timeout, 0.5))
+        if not text.strip():
+            # getty sits silently at login: until it sees Enter: poke it once.
+            self._send(b"\n")
+            text = self._recv_text(min(timeout, 0.5))
         if _LOGIN_RE.search(text):
+            if not username:
+                raise CommandError("串口控制台停在 login: 提示，请填写串口用户名/密码后重新连接。")
             self._send((username + "\n").encode())
             # The password phase honours the connect timeout: a slow board may
             # take seconds before asking for the password, and a console that
@@ -144,7 +150,7 @@ class SerialSession:
                 decoded = strip_ansi(buffer.decode("utf-8", "replace"))
                 if _PASSWORD_RE.search(decoded):
                     self._send((password + "\n").encode())
-                    self._recv_text(0.3)  # swallow the post-login banner/prompt
+                    self._await_shell(deadline)
                     return
                 if re.search(r"[#$>]\s*$", decoded) and "\n" in decoded:
                     return  # shell prompt behind us: login completed without password
@@ -161,6 +167,17 @@ class SerialSession:
             text = self._recv_text(0.2, settled=False)
         if not _LOGIN_RE.search(text):
             return  # quiet console: treat as an already-logged-in root shell
+
+    def _await_shell(self, deadline):
+        """After the password: wait for a shell prompt; login rejects slowly (~3s)."""
+        text = ""
+        while time.monotonic() < deadline:
+            text += self._recv_text(0.2)
+            if re.search(r"[Ll]ogin incorrect|[Ll]ogin:\s*$", text):
+                raise CommandError("串口登录失败：用户名或密码错误。")
+            if re.search(r"[#$>]\s*$", text):
+                return
+        raise CommandError("串口登录超时：已发送密码但未等到 shell 提示符。")
 
     def run(self, command: str, timeout=8, quiet=False):
         if not command.strip() or "\x00" in command:
@@ -214,7 +231,9 @@ class SerialSession:
                 time.sleep(0.01)
             # A console without its terminator is not safe to reuse.
             self.close()
-            raise TimeoutError(f"命令超过 {timeout:g} 秒未完成，连接已关闭，请重新连接。")
+            tail = strip_ansi(output.decode("utf-8", "replace")).strip()[-120:]
+            hint = f"最后收到：{tail!r}" if tail else "期间未收到任何数据"
+            raise TimeoutError(f"命令超过 {timeout:g} 秒未完成（{hint}），连接已关闭，请重新连接。")
 
     def close(self):
         self._closed = True

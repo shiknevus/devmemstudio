@@ -189,6 +189,70 @@ class SerialSessionTests(unittest.TestCase):
         self.assertEqual(self.session.run("whoami", timeout=2), "out:whoami")
         self.assertEqual(delayed.commands, ["whoami"])
 
+    def _quiet_login_board(self):
+        """Real getty: silent at login: until it receives an Enter."""
+        class QuietLogin(FakeBoard):
+            def __init__(self):
+                super().__init__(require_login=True)
+                self._out.clear()
+                self._poked = False
+
+            def write(self, data):
+                if not self._poked and data.strip() == b"":
+                    self._poked = True
+                    self._out += b"\r\nPetaLinux Sunny-Linux /dev/ttyPS0\r\n\rSunny-Linux login: "
+                    return len(data)
+                return super().write(data)
+
+        board = QuietLogin()
+        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
+                              lambda *a, **k: board)
+        self._patcher.start()
+        return board
+
+    def test_quiet_login_prompt_is_woken_and_logged_in(self):
+        board = self._quiet_login_board()
+        self.session.connect("fake://port", 115200, "root", "root", timeout=2)
+        self.assertTrue(board._poked)
+        self.assertEqual(self.session.run("ls", timeout=2), "out:ls")
+        self.assertEqual(board.commands, ["ls"])
+
+    def test_quiet_login_prompt_without_username_fails_fast(self):
+        self._quiet_login_board()
+        with self.assertRaisesRegex(CommandError, "请填写串口用户名"):
+            self.session.connect("fake://port", 115200, "", "", timeout=2)
+        self.assertFalse(self.session.alive)
+
+    def test_wrong_password_fails_connect(self):
+        class Reject(FakeBoard):
+            def write_line(self, text):
+                if self._login == "password":
+                    self._out += b"\r\nLogin incorrect\r\nboard login: "
+                    self._login = "login"
+                    return
+                return super().write_line(text)
+
+        board = Reject(require_login=True)
+        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
+                              lambda *a, **k: board)
+        self._patcher.start()
+        with self.assertRaisesRegex(CommandError, "用户名或密码错误"):
+            self.session.connect("fake://port", 115200, "root", "bad", timeout=2)
+        self.assertFalse(self.session.alive)
+
+    def test_timeout_reports_received_tail(self):
+        class Mute(FakeBoard):
+            def write_line(self, text):
+                self._out += b"Login incorrect\r\n"
+
+        board = Mute()
+        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
+                              lambda *a, **k: board)
+        self._patcher.start()
+        self.session.connect("fake://port", 115200, timeout=0.5)
+        with self.assertRaisesRegex(TimeoutError, "Login incorrect"):
+            self.session.run("ls", timeout=0.5)
+
     def test_run_before_connect_raises(self):
         with self.assertRaisesRegex(CommandError, "串口未连接"):
             self.session.run("echo hi", timeout=0.5)
