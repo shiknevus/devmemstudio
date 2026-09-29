@@ -1,4 +1,4 @@
-# 寄存器调试工作台 4.1.6
+# 寄存器调试工作台 4.1.7
 
 作者：szzhang / cgliu / bxli
 
@@ -20,7 +20,7 @@
 
 ### top 组件解析与精确寄存器表
 
-- 导入 top 解析 `flow_comp` 组件（设备名/类型/地址/禁用态），重启自动重载；类型无精确表时回退通用表并标 `≈`。
+- 导入 top 按 `ec_` 实例解析全部控件（设备名/类型/地址/禁用态）。有 `flow_comp` 头时用头上的名称和编号；没有头、或同一个头下面还有别的 `ec_` 实例，也会收进来。重启自动重载；类型无精确表时回退通用表并标 `≈`。
 - 寄存器表由 `tools/gen_component_catalog.py` 从 `reg_addr_pl.vh` + 各 `ps_rw_pl_reg_*.sv` 生成（含 PARAM 注释与行为表收割），打包于 `devmem_studio/data/component_catalog.json`；RTL 变更后重跑脚本刷新。
 
 ### 运行时导入组件（RTL 改动后免重新打包）
@@ -30,6 +30,14 @@
 - 解析出的寄存器表/信号名/行为表/DEBUG 语义**立即覆盖**内置定义并作用于该类型组件（正在查看的组件自动刷新）
 - 定义持久化到 `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json`，重启自动加载；删除该文件即恢复内置定义
 - 与生成器同源（`devmem_studio/component_parse.py`），两端解析结果一致
+
+## 4.1.7 发布
+
+**导入 top**
+
+- 控件按 `ec_` 实例解析，不再只认 `flow_comp` 头。`emcc_mix_top(7).sv` 这类文件里，头前面的 `ec_superisys_485_modbus_rtu` 和头下面的 `ec_5di` 都会出现在组件目录。
+- 有头的块仍用头上的名称、编号；整段被注释的仍标为禁用。同一个头下面还有第二个 `ec_` 实例时，不会被第一个挤掉。
+- 文件里一个 `ec_` 控件都没有时，提示「未找到 ec_ 控件」。
 
 ## 4.1.6 发布
 
@@ -376,7 +384,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 重新打包
 
-双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller。构建后会隔离启动 EXE 验收，并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.1.6）。
+双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller。构建后会隔离启动 EXE 验收，并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.1.7）。
 
 也可手动执行：
 

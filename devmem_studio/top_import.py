@@ -145,13 +145,18 @@ def _comment_depth(line: str) -> int:
 def parse_top(text: str) -> dict:
     """Extract flow components from a mix-top source text.
 
-    Each flow_comp block may carry a nested comment reference template plus the
-    real ``ec_*`` instantiation below it. The component is the ``ec_*`` module
-    declaration at the shallowest comment depth (0 = active code, >0 = commented
-    reference), so stale reference names never shadow the real module type.
+    Every control is an ``ec_*`` instantiation. ``flow_comp_N`` headers, when
+    present, supply the label, code and commented/disabled state. A block may
+    carry a nested comment reference template plus the real ``ec_*`` instantiation
+    below it; the component is the ``ec_*`` declaration at the shallowest comment
+    depth (0 = active code, >0 = commented reference), so stale reference names
+    never shadow the real module type.
 
-    Mix-top sources without ``flow_comp_N`` headers (loose ``ec_*`` instances)
-    fall back to matching each ``ec_*`` instantiation directly.
+    Active ``ec_*`` instantiations that sit outside those blocks — or that a
+    header block did not already record — are still components. A file that
+    mixes headed blocks with loose instances therefore yields both. Sources
+    with no ``flow_comp_N`` header are parsed from the ``ec_*`` instantiations
+    alone.
     """
     components, warnings = [], []
     text = _block_comments_as_line_comments(text)
@@ -224,6 +229,16 @@ def parse_top(text: str) -> dict:
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index, "disabled": disabled,
                            "line": text.count("\n", 0, header.start()) + 1})
+    # Header blocks are not the whole file: an ec_* instantiation before the
+    # first header, between blocks, or written in a shape the line scanner
+    # missed is still a control. Skip names the header pass already recorded
+    # so a block and its loose match are not listed twice.
+    known = frozenset(item["instance"] for item in components)
+    loose = _parse_unheaded(text, skip_instances=known, finalize=False)
+    if loose["components"]:
+        components.extend(loose["components"])
+        components.sort(key=lambda item: (item["line"], item["instance"]))
+        warnings.extend(message for message in loose["warnings"] if "寄存器空间重叠" not in message)
     _warn_duplicate_bias(components, warnings)
     return {"components": components, "warnings": warnings}
 
@@ -240,13 +255,16 @@ def _instance_seq(instance: str) -> int:
     return int(match.group(1)) if match else -1
 
 
-def _parse_unheaded(text: str) -> dict:
-    """Components for mix-top sources without flow_comp_N headers.
+def _parse_unheaded(text: str, skip_instances: frozenset[str] | None = None, finalize: bool = True) -> dict:
+    """Active ``ec_*`` instantiations, used alone or to fill gaps around headers.
 
     Matches each active ``ec_*`` module instantiation in the code and takes its
     ``REG_SPACE_BIAS`` as the register-space bias (grid address semantics, the
-    same 0x800 + i*0x200 convention the headed path uses).
+    same 0x800 + i*0x200 convention the headed path uses). ``skip_instances``
+    drops names a header block already recorded. ``finalize`` adds the
+    overlapping-bias warning; the headed path recomputes that on the merged list.
     """
+    skip_instances = skip_instances or frozenset()
     components, warnings = [], []
     # Blank // comments (same length) so commented instances, biases and stray
     # parens in comments never count; offsets stay valid for line numbers.
@@ -266,7 +284,7 @@ def _parse_unheaded(text: str) -> dict:
             warnings.append(f"{module_type} 实例名未识别，已跳过。")
             continue
         instance = named.group(1)
-        if not instance.startswith("ec_"):
+        if not instance.startswith("ec_") or instance in skip_instances:
             continue
         bias = None
         found = _BIAS.search(params)
@@ -288,7 +306,8 @@ def _parse_unheaded(text: str) -> dict:
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index,
                            "disabled": False, "line": line})
-    _warn_duplicate_bias(components, warnings)
+    if finalize:
+        _warn_duplicate_bias(components, warnings)
     return {"components": components, "warnings": warnings}
 
 
