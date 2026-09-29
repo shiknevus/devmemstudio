@@ -810,7 +810,7 @@ class MainWindow(QMainWindow):
             self.append_log("ERROR", message)
             return False
         if not info["components"]:
-            message = f"未在 {path.name} 中找到 flow_comp 组件块。"
+            message = f"未在 {path.name} 中找到 ec_ 控件。"
             if not quiet:
                 QMessageBox.warning(self, "导入失败", message)
             self.append_log("ERROR", message)

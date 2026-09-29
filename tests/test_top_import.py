@@ -292,6 +292,58 @@ ec_superisys_485_modbus_rtu_27
         self.assertEqual(comp["bias"], 0x3000)
         self.assertEqual(info["warnings"], [])
 
+    def test_loose_ec_instances_survive_alongside_flow_comp_blocks(self):
+        """A headed file still keeps every ec_* control, including ones with no header.
+
+        emcc_mix_top(7).sv puts ec_superisys_485_modbus_rtu before flow_comp_93;
+        parsing only the header blocks used to drop it and leave just ec_5di.
+        """
+        text = """
+ec_superisys_485_modbus_rtu
+#(
+        .REG_SPACE_BIAS         (20'h3000                 ),
+        .REG_SPACE_SIZE         (`REG_SPACE_SIZE          )
+)
+ec_superisys_485_modbus_rtu_27
+(
+        .clk_i                  ( clk                     )
+);
+
+// --- flow_comp_93 --A0096_9号线边轴承检测---
+ec_5di
+#(
+     .REG_SPACE_BIAS     ( 20'd84992)
+    ,.REG_SPACE_SIZE     ( `REG_SPACE_SIZE           )
+)
+ec_5di_93
+(
+      .clk_i                 ( clk               )
+);
+
+// --- flow_comp_94 --A0097_第二只---
+ec_a
+#( .REG_SPACE_BIAS (20'h800) )
+ec_a_1
+(
+);
+ec_b
+#( .REG_SPACE_BIAS (20'hA00) )
+ec_b_2
+(
+);
+"""
+        info = top_import.parse_top(text)
+        found = [(c["module_type"], c["instance"], c["seq"], c["label"], c["disabled"], c["bias"])
+                 for c in info["components"]]
+        self.assertEqual(found, [
+            ("ec_superisys_485_modbus_rtu", "ec_superisys_485_modbus_rtu_27", 27,
+             "ec_superisys_485_modbus_rtu_27", False, 0x3000),
+            ("ec_5di", "ec_5di_93", 93, "A0096_9号线边轴承检测", False, 84992),
+            ("ec_a", "ec_a_1", 94, "A0097_第二只", False, 0x800),
+            ("ec_b", "ec_b_2", 2, "ec_b_2", False, 0xA00),
+        ])
+        self.assertEqual(info["warnings"], [])
+
     def test_hidden_comment_reference_only_block_stays_disabled(self):
         """Reference-only blocks (nested // + real commented ec_* at depth 1) stay disabled
         but still report the real ec_* module name instead of the stale reference."""
