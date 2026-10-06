@@ -22,13 +22,15 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxL
 from . import __version__
 from . import completion, component_parse, top_import
 from .catalog import REGISTER_FIELDS
+from .bitpack_dialog import BitPackDialog
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK)
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
-from .widgets import (label, button, row, field, divider, restyle, ComboBox,
-                      BitView, DecodedFieldsView, Worker, LogBridge, password_field, IpAddressField, TerminalView)
+from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
+                      ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
+                      IpAddressField, TerminalView)
 from .dialogs import BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
 
 # Fixed connect timeout for both SSH and serial: impatient users hit the red
@@ -50,24 +52,27 @@ VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "debug": "行为状态机历史(DEBUG_REG，每字节一个状态)"}
 
 
-class _SidebarScroll(QScrollArea):
-    """Sidebar rail whose width comes from the side splitter; content can never
-    widen past the viewport.
-
-    widgetResizable(True) alone lets a single wide child (a non-wrapping
-    path label, for example) stretch the content past the sidebar width with
-    the horizontal scrollbar off, clipping the rest."""
+class _SidebarRail(QWidget):
+    """Fixed-position rail, not a scroll area: only its component tree scrolls."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("sidebarScroll")
+        self.setObjectName("sidebarRail")
         self.setMinimumWidth(320)
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._content = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.widget():
-            self.widget().setFixedWidth(self.viewport().width())
+    def setWidget(self, content):
+        self._content = content
+        self._layout.addWidget(content)
+
+    def widget(self):
+        return self._content
+
+    def viewport(self):
+        # Compatibility with width calculations; there is no outer scrollbar.
+        return self
 
 
 class MainWindow(QMainWindow):
@@ -123,6 +128,8 @@ class MainWindow(QMainWindow):
         self._completion_workers = set()   # keep refs: pool.start alone lets GC drop them
         self._serial_cancel_requested = False
         self._last_ports_scan = 0.0   # COM 口枚举有开销，节流到心跳间隔的倍数
+        self._desktop_sidebar_width = 360
+        self.bit_pack_dialog = None
         self.bit_dialog = None
         self.bit_rollback_dialog = None
         self._stream_epoch = 0
@@ -153,6 +160,7 @@ class MainWindow(QMainWindow):
         self._build()
         self._apply_responsive_layout(force=True)
         self._load_config_fields()
+        self._fold_channels()
         self.rebuild_registers()
         self._set_connection(False)
         self.append_log("SYSTEM", "工作台就绪。导入 top 并选择组件后读写寄存器。")
@@ -221,6 +229,7 @@ class MainWindow(QMainWindow):
         self.side_split.setStretchFactor(0, 0)
         self.side_split.setStretchFactor(1, 1)
         self.side_split.setSizes([360, 1180])
+        self.side_split.splitterMoved.connect(lambda *_: QTimer.singleShot(0, self._fit_console_toolbar))
         root.addWidget(self.side_split)
         # No left-corner notice label: former status-bar messages go to the
         # system terminal (see _status); only counters and the version remain.
@@ -235,6 +244,8 @@ class MainWindow(QMainWindow):
         # may widen the content past the sidebar viewport - text wraps instead.
         side.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout = QVBoxLayout(side)
+        self.sidebar_content = side
+        self.sidebar_layout = layout
         layout.setSizeConstraint(QLayout.SetNoConstraint)
         layout.setContentsMargins(16, 23, 16, 14)
         layout.setSpacing(10)
@@ -247,55 +258,10 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(label("DevmemStudio", "brand"))
         layout.addLayout(row(logo, brand, 1, spacing=9))
         layout.addSpacing(12)
-        self.host = IpAddressField()
-        self.host.setAccessibleName("设备主机")
-        self.port = QSpinBox()
-        self.port.setRange(1, 65535)
-        self.port.setFixedWidth(110)
-        layout.addLayout(row(field("主板地址", self.host), field("端口", self.port)))
-        self.user = QLineEdit()
-        self.user.setAccessibleName("用户名")
-        self.password, password_box = password_field("密码")
-        self.password.setPlaceholderText("SSH 登录密码")
-        self.password.setAccessibleName("SSH 密码")
-        layout.addLayout(row(field("用户名", self.user), password_box))
-        self.remember = QCheckBox("记住密码")
-        self.remember.setToolTip("将登录密码保存在本机 registers.json 中。")
-        self.remember.setMinimumHeight(30)
-        layout.addWidget(self.remember)
-        self.connect_button = button("SSH连接", self.toggle_connection, "primary", "connect")
-        self.connect_button.setMinimumHeight(35)
-        layout.addWidget(self.connect_button)
-        layout.addWidget(divider())
-        layout.addSpacing(2)
-        self.serial_port = ComboBox()
-        self.serial_port.setAccessibleName("本机端口")
-        self.serial_port.setMinimumWidth(140)
-        self._serial_devices = []
-        for device, description in list_serial_ports():
-            self.serial_port.addItem(self._serial_port_label(device, description), device)
-            self._serial_devices.append(device)
-        self.serial_baud = ComboBox()
-        for baud in ("115200", "57600", "38400", "19200", "9600"):
-            self.serial_baud.addItem(baud)
-        self.serial_baud.setFixedWidth(110)
-        layout.addLayout(row(field("本机端口", self.serial_port), field("波特率", self.serial_baud)))
-        self.serial_user = QLineEdit()
-        self.serial_user.setPlaceholderText("留空自动登录")
-        self.serial_user.setAccessibleName("用户名")
-        self.serial_password, serial_password_box = password_field("密码")
-        self.serial_password.setPlaceholderText("留空无需密码")
-        self.serial_password.setAccessibleName("密码")
-        layout.addLayout(row(field("用户名", self.serial_user), serial_password_box))
-        self.serial_remember = QCheckBox("记住密码")
-        self.serial_remember.setToolTip("将串口登录密码保存在本机 registers.json 中。")
-        self.serial_remember.setMinimumHeight(30)
-        layout.addWidget(self.serial_remember)
-        self.serial_connect_button = button("serial连接", self._toggle_serial, "primary", "connect")
-        self.serial_connect_button.setMinimumHeight(35)
-        layout.addWidget(self.serial_connect_button)
-        layout.addSpacing(16)
-        self.import_button = button("导入 top", self.import_top, "demo", "export")
+        layout.addWidget(label("设备连接", "sideCaption"))
+        layout.addWidget(self._build_connection_card())
+        layout.addSpacing(10)
+        self.import_button = button("导入 top", self.import_top, "demo", "import")
         self.import_button.setToolTip("解析 emcc mix top 文件，按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
         self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
         self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹导单个，"
@@ -309,8 +275,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.component_search)
         self.component_tree = QTreeWidget()
         self.component_tree.setHeaderHidden(True)
+        self.component_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.component_tree.setMinimumWidth(300)
-        self.component_tree.setMinimumHeight(220)
+        self.component_tree.setMinimumHeight(120)
         # Flat single-column layout: the selection bar spans the full row with no
         # separate branch area, which QSS cannot paint consistently (torn selection).
         self.component_tree.setRootIsDecorated(False)
@@ -320,8 +287,8 @@ class MainWindow(QMainWindow):
         self.component_tree.itemExpanded.connect(self._update_group_marker)
         self.component_tree.itemCollapsed.connect(self._update_group_marker)
         layout.addWidget(self.component_tree, 1)
-        self.top_summary = label("导入 top 后按类型列出组件", "sideCaption")
-        self.top_summary.setWordWrap(True)
+        self.top_summary = ElidedLabel("导入 top 后按类型列出组件", "sideCaption")
+        self.top_summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self.top_summary)
         self.base_field = QLineEdit()
         self.base_field.setObjectName("mono")
@@ -329,10 +296,125 @@ class MainWindow(QMainWindow):
         self.base_field.setToolTip("未找到 components_param.vh；可手动修改基地址（十六进制）。")
         layout.addLayout(row(label("基地址", "sideCaption"), 1, self.base_field))
         layout.addStretch(0)  # no slack here: the component tree above absorbs it all
-        scroll = _SidebarScroll()
+        scroll = _SidebarRail()
         self.sidebar_scroll = scroll
         scroll.setWidget(side)
         return scroll
+
+    def _build_connection_card(self):
+        """SSH and serial as two one-line channels (status, target, connect); fields fold below."""
+        self.host = IpAddressField()
+        self.host.setAccessibleName("设备主机")
+        self.port = QSpinBox()
+        self.port.setRange(1, 65535)
+        self.port.setFixedWidth(64)
+        self.port.setAccessibleName("SSH 端口")
+        self.user = QLineEdit()
+        self.user.setAccessibleName("用户名")
+        self.remember = QCheckBox("记住密码")
+        self.remember.setToolTip("将 SSH 登录密码保存在本机 registers.json 中。")
+        self.password, password_box = password_field("密码", extra=self.remember)
+        self.password.setPlaceholderText("SSH 登录密码")
+        self.password.setAccessibleName("SSH 密码")
+        self.connect_button = button("连接", self.toggle_connection, "primary", "connect")
+        self.ssh_section = ChannelSection("SSH", self._channel_body(
+            row(field("主板地址", self.host), field("端口", self.port)),
+            row(field("用户名", self.user), password_box)), self.connect_button)
+        self.serial_port = ElidedComboBox()
+        self.serial_port.setAccessibleName("本机端口")
+        self.serial_port.setMinimumWidth(100)
+        self._serial_devices = []
+        for device, description in list_serial_ports():
+            self.serial_port.addItem(self._serial_port_label(device, description), device)
+            self._serial_devices.append(device)
+        self.serial_baud = ComboBox()
+        self.serial_baud.setAccessibleName("波特率")
+        for baud in ("115200", "57600", "38400", "19200", "9600"):
+            self.serial_baud.addItem(baud)
+        self.serial_baud.setFixedWidth(92)
+        self.serial_user = QLineEdit()
+        self.serial_user.setPlaceholderText("留空自动登录")
+        self.serial_user.setAccessibleName("用户名")
+        self.serial_remember = QCheckBox("记住密码")
+        self.serial_remember.setToolTip("将串口登录密码保存在本机 registers.json 中。")
+        self.serial_password, serial_password_box = password_field("密码", extra=self.serial_remember)
+        self.serial_password.setPlaceholderText("留空无需密码")
+        self.serial_password.setAccessibleName("密码")
+        self.serial_connect_button = button("连接", self._toggle_serial, "primary", "connect")
+        self.serial_section = ChannelSection("serial", self._channel_body(
+            row(field("本机端口", self.serial_port), field("波特率", self.serial_baud)),
+            row(field("用户名", self.serial_user), serial_password_box)), self.serial_connect_button)
+        card = QFrame()
+        card.setObjectName("connectionCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(1, 1, 1, 1)
+        card_layout.setSpacing(0)
+        card_layout.addWidget(self.ssh_section)
+        card_layout.addWidget(divider("channelDivider"))
+        card_layout.addWidget(self.serial_section)
+        for section in (self.ssh_section, self.serial_section):
+            section.expandedChanged.connect(lambda expanded, s=section: self._channel_expanded(s, expanded))
+        self.host.changed.connect(self._refresh_channel_summaries)
+        self.port.valueChanged.connect(self._refresh_channel_summaries)
+        self.user.textChanged.connect(self._refresh_channel_summaries)
+        for combo in (self.serial_port, self.serial_baud):
+            combo.currentIndexChanged.connect(self._refresh_channel_summaries)
+            combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
+        # Enter in any SSH / serial field connects that channel.
+        for edit in (*self.host.octets, self.user, self.password, self.port.lineEdit()):
+            edit.returnPressed.connect(self._connect_ssh_on_enter)
+        for edit in (self.serial_user, self.serial_password):
+            edit.returnPressed.connect(self._connect_serial_on_enter)
+        self._refresh_channel_summaries()
+        return card
+
+    @staticmethod
+    def _channel_body(*rows):
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(12, 2, 12, 12)
+        layout.setSpacing(8)
+        for item in rows:
+            layout.addLayout(item)
+        return body
+
+    def _channel_expanded(self, section, expanded):
+        # Accordion: one channel's fields at a time keeps the component tree tall.
+        if expanded:
+            for other in (self.ssh_section, self.serial_section):
+                if other is not section:
+                    other.set_expanded(False)
+
+    def _fold_channels(self):
+        """Collapse both channels; an offline SSH stays open while its address is still empty."""
+        self.serial_section.set_expanded(False)
+        self.ssh_section.set_expanded(not self.host.text() and not self.connected)
+
+    def _refresh_channel_summaries(self, *_):
+        if not hasattr(self, "serial_section"):
+            return
+        host, port, user = self.host.text(), self.port.value(), self.user.text().strip()
+        if self.connected and self.demo:
+            self.ssh_section.set_summary("本地模拟设备", "SSH：离线演示会话，数据来自本地模拟")
+        elif host:
+            target = host if port == 22 else f"{host}:{port}"
+            self.ssh_section.set_summary(target, f"SSH {user + '@' if user else ''}{host}:{port}")
+        else:
+            self.ssh_section.set_summary("未设置主板地址", "SSH：填写主板地址、用户名和密码")
+        device = self._serial_device or self._selected_serial_port()
+        baud = self.serial_baud.currentText()
+        if device:
+            self.serial_section.set_summary(f"{device} · {baud}", f"serial {self.serial_port.currentText()} @ {baud} bps")
+        else:
+            self.serial_section.set_summary("未检测到串口", "serial：插入 USB 串口线后自动出现在端口列表")
+
+    def _connect_ssh_on_enter(self):
+        if not self.connected and not self._busy:
+            self.toggle_connection()
+
+    def _connect_serial_on_enter(self):
+        if not self.serial_connected and not self._serial_busy:
+            self._toggle_serial()
 
     def _build_register_area(self):
         panel = QWidget()
@@ -340,11 +422,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        self.module_title = label("寄存器映射", "sectionTitle")
+        self.module_title = ElidedLabel("寄存器映射", "sectionTitle")
         self.register_count = label("", "muted")
         self.poll_check = QCheckBox("自动读取")
         self.poll_check.toggled.connect(self._poll_toggled)
         self.interval = ComboBox()
+        self.interval.setAccessibleName("自动读取周期")
         for text, value in (("0.1 s", 100), ("0.2 s", 200), ("0.5 s", 500), ("1 s", 1000),
                             ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
             self.interval.addItem(text, value)
@@ -359,33 +442,14 @@ class MainWindow(QMainWindow):
         self.read_all_button = button("读取全部", self.read_all, "primary", "read")
         self.write_all_button = button("批量写入", self.write_all, None, "write")
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
-        self.module_badge = label("", "badge")
+        self.module_badge = ElidedLabel("", "badge")
         self.export_button = button("导出快照", self.export_snapshot, None, "export")
         self.help_button = button("使用指南", lambda: show_help(self), "flat", "help")
-        # Session state (formerly a top-right header bar): summary + SSH/serial badges
-        # parked left of 自动读取; the guide button sits right of 导出快照.
-        self.target_label = label("等待建立设备会话", "muted")
-        self.ssh_badge = label("", "badge")
-        self.com_badge = label("", "badge")
-        # Freeze each badge at its widest state text so 离线/已连接 toggles never
-        # change the badge size (which would shift the row layout).
-        ssh_variants = [self._badge_dot(s) + t for s, t in
-                        (("offline", "SSH 离线"), ("connected", "SSH 已连接"),
-                         ("demo", "SSH 演示"), ("connecting", "SSH 连接中"))]
-        com_variants = [self._badge_dot("offline") + "serial 离线",
-                        self._badge_dot("connected") + "serial 已连接",
-                        self._badge_dot("connecting") + "serial 连接中"]
-        for badge, variants in ((self.ssh_badge, ssh_variants), (self.com_badge, com_variants)):
-            for text in variants:
-                badge.setText(text)
-                badge.setMinimumWidth(max(badge.minimumWidth(), badge.sizeHint().width()))
-            badge.setFixedWidth(badge.minimumWidth())
-        self._update_connection_badge()
+        # Connection state lives on the sidebar connection card only; this row is for registers.
         # 13px inner padding + the card's 1px border: the two section titles
         # (寄存器映射 / 会话终端) share a left edge; the cards below keep their
         # own full-width alignment.
         title_row = row(self.module_title, self.register_count, 1, self.module_badge,
-                        self.target_label, self.ssh_badge, self.com_badge,
                         self.poll_check, self.interval, self.write_all_button,
                         self.read_all_button, self.export_button, self.help_button,
                         spacing=10)
@@ -405,6 +469,7 @@ class MainWindow(QMainWindow):
         filters_layout = QHBoxLayout(filters)
         filters_layout.setContentsMargins(12, 9, 12, 9)
         filters_layout.setSpacing(3)
+        self.register_filters_layout = filters_layout
         self.view_group = QButtonGroup(self)
         self.view_group.setExclusive(True)
         self.view_buttons = {}
@@ -418,9 +483,11 @@ class MainWindow(QMainWindow):
         self.view_buttons["basic"].setChecked(True)
         filters_layout.addStretch()
         self.access_filter = ComboBox()
+        self.access_filter.setAccessibleName("寄存器权限过滤")
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
         self.access_filter.setFixedWidth(112)
         self.access_filter.currentIndexChanged.connect(self.filter_rows)
+        self.access_filter.currentIndexChanged.connect(self._refresh_selector_tooltips)
         filters_layout.addWidget(self.access_filter)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索名称 / 偏移")
@@ -541,22 +608,33 @@ class MainWindow(QMainWindow):
         editor.setSpacing(8)
         self.editor_title = label("待写入值", "muted")
         self.width_combo = ComboBox()
+        self.width_combo.setAccessibleName("访问位宽")
         self.width_combo.addItems(["8", "16", "32", "64"])
         self.width_combo.setFixedWidth(80)
         self.width_combo.currentTextChanged.connect(self._editor_changed)
+        self.width_combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
         editor.addLayout(row(self.editor_title, 1, label("访问位宽", "muted"), self.width_combo))
         self.preset_combo = ComboBox()
+        self.preset_combo.setAccessibleName("寄存器写入预设")
+        self.preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.preset_combo.setMinimumContentsLength(8)
+        self.preset_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.preset_combo.currentIndexChanged.connect(self._preset_changed)
+        self.preset_combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
         editor.addWidget(self.preset_combo)
         self.write_input = QLineEdit()
         self.write_input.setObjectName("mono")
         self.write_input.setPlaceholderText("待写入值")
         self.write_input.textChanged.connect(self._editor_changed)
         self.format_combo = ComboBox()
+        self.format_combo.setAccessibleName("写入值进制")
         self.format_combo.addItem("HEX", "H")
         self.format_combo.addItem("DEC", "D")
         self.format_combo.setFixedWidth(88)
+        self.format_combo.setItemData(0, "十六进制（HEX）", Qt.ToolTipRole)
+        self.format_combo.setItemData(1, "十进制（DEC）", Qt.ToolTipRole)
         self.format_combo.currentIndexChanged.connect(self._format_changed)
+        self.format_combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
         editor.addLayout(row(self.write_input, self.format_combo))
         self.command_preview = label("—", "mono")
         self.command_preview.setWordWrap(True)
@@ -593,29 +671,36 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(13, 9, 13, 11)
         layout.setSpacing(7)
         self.log_filter = ComboBox()
+        self.log_filter.setAccessibleName("日志级别筛选")
         self.log_filter.addItems(["全部日志", "仅错误", "仅命令"])
         self.log_filter.setFixedWidth(118)
         self.log_filter.currentIndexChanged.connect(self._render_logs)
+        self.log_filter.currentIndexChanged.connect(lambda _: self._fit_console_toolbar())
         self.follow_log = QCheckBox("跟随")
         self.follow_log.setChecked(True)
         # Terminal source selector: log=板端 sunny.log 流, ssh=SSH 命令日志,
         # serial=串口命令日志, system=软件自身运行日志.
         self.console_source_combo = ComboBox()
+        self.console_source_combo.setAccessibleName("日志来源")
         for key, text in (("log", "tail log"), ("ssh", "ssh"), ("com", "serial"), ("system", "system")):
             self.console_source_combo.addItem(text, key)
         self.console_source_combo.setFixedWidth(118)
         self.console_source_combo.setToolTip("终端来源：tail log=板端 sunny.log 流（SSH tail），ssh=SSH 会话日志，serial=串口会话日志，system=软件运行日志。")
         self.console_source_combo.currentIndexChanged.connect(self._change_console_source)
+        self.console_source_combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
         self.log_search = QLineEdit()
         self.log_search.setPlaceholderText("查找日志…")
         self.log_search.setClearButtonEnabled(True)
-        self.log_search.setMinimumWidth(240)
-        self.log_search.setMaximumWidth(280)
+        self.log_search.setMinimumWidth(120)
+        self.log_search.setMaximumWidth(170)
         self.log_search.addAction(icon("search", size=16), QLineEdit.LeadingPosition)
         self.log_search.returnPressed.connect(lambda: self._find_in_log(forward=True))
+        self.log_search.setToolTip("查找日志：Enter 下一个，Shift+Enter 上一个")
+        QShortcut(QKeySequence("Shift+Return"), self.log_search,
+                  lambda: self._find_in_log(forward=False)).setContext(Qt.WidgetShortcut)
         # Match counter right of the search box: current match / total matches.
         self.log_match_count = label("", "muted")
-        self.log_match_count.setMinimumWidth(46)
+        self.log_match_count.setMinimumWidth(32)
         self.log_match_count.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         self.log_search.textChanged.connect(self._log_search_changed)
         self.log_prev = button("", lambda: self._find_in_log(forward=False), "flat", "up")
@@ -625,24 +710,30 @@ class MainWindow(QMainWindow):
         self.log_wrap = QCheckBox("换行")
         self.log_wrap.setChecked(True)
         self.log_wrap.toggled.connect(lambda on: self.console.setLineWrapMode(QPlainTextEdit.WidgetWidth if on else QPlainTextEdit.NoWrap))
-        self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "export")
+        self.bit_pack_button = button("打包bit", self.open_bit_pack, "flat", "package")
+        self.bit_pack_button.setToolTip("打开内置 Bit_pack：选择或拖入 .bit，生成项目号_bit_时间戳.zip；本地工具，无需连接设备。")
+        self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "write")
         self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；传完后原文件备份为 sunny_fpga.bit_时间戳。")
         self.bit_rollback_button = button("回退bit", self.open_bit_rollback, "flat", "refresh")
         self.bit_rollback_button.setToolTip("列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份，选择后把所选版本恢复为 sunny_fpga.bit（当前版本先备份为时间戳）。")
-        self.log_download_button = button("下载log", self.download_board_log, "flat", "export")
+        self.log_download_button = button("下载log", self.download_board_log, "flat", "read")
         self.log_download_button.setToolTip("下载板端 /run/media/sda/sunny.log 到本地（选择保存位置）。")
         self.reboot_button = button("重启设备", self.reboot, "flat", "refresh")
-        # upload/download/reboot need only a live session, not a selected register component
-        layout.addLayout(row(label("会话终端", "sectionTitle"),
-                             self.log_filter, self.console_source_combo,
-                             self.log_search, self.log_match_count,
-                             self.log_prev, self.log_next,
-                             self.log_wrap, self.follow_log, 1,
-                             self.bit_upload_button, self.bit_rollback_button,
-                             self.log_download_button,
-                             self.reboot_button,
-                             button("导出", self.export_logs, "flat", "export"),
-                             button("清空", self.clear_logs, "flat"), spacing=6))
+        self.log_export_button = button("导出", self.export_logs, "flat", "export")
+        self.log_export_button.setToolTip("导出当前终端日志")
+        self.log_clear_button = button("清空", self.clear_logs, "flat", "clear")
+        self.log_clear_button.setToolTip("清空当前终端日志")
+        self.reboot_button.setToolTip("重启设备")
+        self.console_title = label("会话终端", "sectionTitle")
+        # One row only; the bit actions stay labelled, secondary actions use
+        # compact icons/tooltips rather than wrapping below the search field.
+        self.console_toolbar = row(self.console_title, self.log_filter, self.console_source_combo,
+                                   self.log_search, self.log_match_count, self.log_prev, self.log_next,
+                                   self.log_wrap, self.follow_log, 1,
+                                   self.bit_pack_button, self.bit_upload_button, self.bit_rollback_button,
+                                   self.log_download_button, self.reboot_button,
+                                   self.log_export_button, self.log_clear_button, spacing=4)
+        layout.addLayout(self.console_toolbar)
         # The console itself is the shell: session views (ssh/serial) expose an
         # editable prompt line at the bottom; tail log / system stay read-only.
         self.console = TerminalView(self.send_command, self.complete_command)
@@ -1009,7 +1100,7 @@ class MainWindow(QMainWindow):
             self.inspector.setEnabled(False)
             self.module_title.setText("寄存器映射")
             self.module_badge.setText("")
-            self.register_count.setText("")
+            self._set_register_count("")
             self.empty_label.setText("先点击左侧「导入 top」加载组件目录，再选择组件开始调试。" if not self.top_info
                                      else "从左侧「组件目录」选择一个组件开始调试。")
             self.empty_label.show()
@@ -1227,9 +1318,9 @@ class MainWindow(QMainWindow):
         self.visible_regs = [self.regs[index] for index in visible]
         if self.active_component:
             address = f" · 全地址 0x{self._module_start:08X}" if self._module_start is not None else ""
-            self.register_count.setText(f"{len(visible)} / {len(self.regs)} 项{address}")
+            self._set_register_count(f"{len(visible)} / {len(self.regs)} 项{address}")
         else:
-            self.register_count.setText("")
+            self._set_register_count("")
         self.empty_label.setVisible(not visible)
         self.table.setVisible(bool(visible))
         if visible:
@@ -1279,6 +1370,9 @@ class MainWindow(QMainWindow):
         except ValueError:
             pass
         self.preset_combo.setVisible(bool(presets))
+        for index in range(self.preset_combo.count()):
+            self.preset_combo.setItemData(index, self.preset_combo.itemText(index), Qt.ToolTipRole)
+        self._refresh_selector_tooltips()
         self.write_button.setText("触发并回读" if reg.get("action") else "写入并回读")
         self._updating = False
         self._inspector_mode_changed()
@@ -1398,44 +1492,193 @@ class MainWindow(QMainWindow):
     def _apply_responsive_layout(self, force=False):
         if not hasattr(self, "workspace"):
             return
+        self._fit_console_toolbar()
         compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
         if not force and compact == self._compact_layout:
             return
         self._compact_layout = compact
         if compact:
             self.setMinimumSize(*(self._screen_min_size or WINDOW_COMPACT_MIN_SIZE))
-            self.workspace.setMinimumWidth(680)
-            self.sidebar_scroll.setMinimumWidth(260)
+            self._desktop_sidebar_width = max(320, self.side_split.sizes()[0])
+            self.workspace.setMinimumWidth(640)
+            self.sidebar_scroll.setFixedWidth(300)
+            self.side_split.setSizes([300, max(640, self.width() - 309)])
+            self.side_split.handle(1).setEnabled(False)
+            self._fold_channels()
             self.component_tree.setMinimumWidth(250)
+            self.component_tree.setMinimumHeight(80)
             self.inspector.setMinimumWidth(240)
             self.inspector.setMaximumWidth(320)
             self.search.setMinimumWidth(105)
             self.search.setMaximumWidth(180)
-            self.log_search.setMinimumWidth(140)
-            self.log_search.setMaximumWidth(220)
+            self.log_search.setMinimumWidth(100)
+            self.log_search.setMaximumWidth(140)
             self.register_title_row.setContentsMargins(8, 0, 8, 0)
             self.register_title_row.setSpacing(6)
-            # The badges remain visible; this secondary sentence is the first
-            # item removed from the crowded title row at compact widths.
-            self.target_label.setVisible(False)
+            self.module_title.setMaximumWidth(150)
+            self.module_badge.setMaximumWidth(100)
         else:
             self.setMinimumSize(*(self._screen_min_size or WINDOW_DESKTOP_MIN_SIZE))
             self.workspace.setMinimumWidth(840)
+            self.sidebar_scroll.setMaximumWidth(16777215)
             self.sidebar_scroll.setMinimumWidth(320)
+            self.side_split.handle(1).setEnabled(True)
+            self.side_split.setSizes([self._desktop_sidebar_width, max(840, self.width() - self._desktop_sidebar_width - 9)])
             self.component_tree.setMinimumWidth(300)
+            self.component_tree.setMinimumHeight(120)
             self.inspector.setMinimumWidth(270)
             self.inspector.setMaximumWidth(350)
             self.search.setMinimumWidth(145)
             self.search.setMaximumWidth(220)
-            self.log_search.setMinimumWidth(240)
-            self.log_search.setMaximumWidth(280)
+            self.log_search.setMinimumWidth(120)
+            self.log_search.setMaximumWidth(170)
             self.register_title_row.setContentsMargins(14, 0, 14, 0)
             self.register_title_row.setSpacing(10)
-            self.target_label.setVisible(True)
+            self.module_title.setMaximumWidth(240)
+            self.module_badge.setMaximumWidth(180)
+
+    def _set_register_count(self, text):
+        self._full_register_count = str(text)
+        self.register_count.setToolTip(self._full_register_count)
+        shown = self._full_register_count
+        if shown and self.workspace.width() < 1070:
+            shown = shown.split("项", 1)[0].replace(" ", "") + "项"
+        self.register_count.setText(shown)
+
+    def _fit_console_toolbar(self):
+        if not hasattr(self, "console_toolbar"):
+            return
+        available = self.workspace.width()
+        wide = available >= 1420
+        narrow = available < 1070
+        tiny = available < 820
+        self.log_filter.setFixedWidth(70 if tiny else 88 if narrow else 118)
+        self.console_source_combo.setFixedWidth(70 if tiny else 88 if narrow else 118)
+        compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
+        self.log_search.setMinimumWidth(80 if tiny else 100 if compact else 120)
+        self.log_search.setMaximumWidth(110 if tiny else 140 if compact else 170)
+        for control, text in ((self.bit_pack_button, "打包bit"), (self.bit_upload_button, "上传bit"),
+                              (self.bit_rollback_button, "回退bit")):
+            control.setText("" if tiny else text)
+            control.setIconSize(QSize(16, 16))
+            control.setMinimumWidth(control.minimumSizeHint().width())
+            control.setAccessibleName(text)
+        for control, text in ((self.log_download_button, "下载log"), (self.reboot_button, "重启设备"),
+                              (self.log_export_button, "导出"), (self.log_clear_button, "清空")):
+            control.setText(text if wide else "")
+            control.setIconSize(QSize(16, 16))
+            control.setFixedWidth(control.sizeHint().width())
+            control.setAccessibleName(text)
+        for control in (self.log_prev, self.log_next):
+            control.setIconSize(QSize(14, 14))
+            control.setFixedWidth(control.sizeHint().width())
+        self.console_title.setVisible(not narrow)
+        self.log_match_count.setVisible(not narrow)
+        self.log_prev.setVisible(not narrow)
+        self.log_next.setVisible(not narrow)
+        self.console_toolbar.setSpacing(0 if tiny else 3 if narrow else 4)
+        for control, text in ((self.read_all_button, "读取全部"), (self.write_all_button, "批量写入"),
+                              (self.export_button, "导出快照"), (self.help_button, "使用指南")):
+            control.setText("" if narrow else text)
+            control.setIconSize(QSize(16, 16))
+            control.setFixedWidth(control.sizeHint().width())
+            control.setAccessibleName(text)
+            control.setToolTip(text)
+        self.module_title.setMaximumWidth(100 if tiny else 150 if narrow else 240)
+        self.module_badge.setVisible(not tiny)
+        self.register_count.setVisible(not tiny)
+        self._set_register_count(getattr(self, "_full_register_count", ""))
+        sidebar_narrow = self.sidebar_scroll.viewport().width() < 320
+        for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "导入组件")):
+            control.setText("" if sidebar_narrow else text)
+            control.setIconSize(QSize(16, 16))
+            control.setFixedWidth(control.sizeHint().width())
+            control.setAccessibleName(text)
+        full_filters = ("全部日志", "仅错误", "仅命令")
+        short_filters = ("全部", "错误", "命令")
+        full_sources = ("tail log", "ssh", "serial", "system")
+        short_sources = ("log", "ssh", "serial", "sys")
+        for combo, full, short in ((self.log_filter, full_filters, short_filters),
+                                   (self.console_source_combo, full_sources, short_sources)):
+            self._set_combo_display_labels(combo, full, short, narrow)
+        self._fit_compact_selectors(narrow, tiny)
+
+    @staticmethod
+    def _set_combo_display_labels(combo, full_labels, short_labels, compact):
+        """Change presentation only; preserve item data, selection and typed drafts."""
+        index = combo.currentIndex()
+        current = combo.currentText()
+        old_label = combo.itemText(index) if index >= 0 else ""
+        edit = combo.lineEdit() if combo.isEditable() else None
+        keep_draft = edit is not None and (current != old_label or edit.hasFocus())
+        cursor = edit.cursorPosition() if edit is not None else 0
+        selection = edit.selectionStart() if edit is not None else -1
+        selection_length = len(edit.selectedText()) if edit is not None else 0
+        blocked = combo.blockSignals(True)
+        try:
+            for position, full in enumerate(full_labels[:combo.count()]):
+                combo.setItemText(position, short_labels[position] if compact else full)
+                combo.setItemData(position, full, Qt.ToolTipRole)
+            if keep_draft:
+                combo.setEditText(current)
+                if selection >= 0:
+                    edit.setSelection(selection, selection_length)
+                else:
+                    edit.setCursorPosition(cursor)
+        finally:
+            combo.blockSignals(blocked)
+
+    def _fit_compact_selectors(self, compact, tiny):
+        for combo in (self.access_filter, self.interval, self.width_combo, self.format_combo,
+                      self.preset_combo, self.log_filter, self.console_source_combo):
+            if combo.property("compact") != compact:
+                combo.setProperty("compact", compact)
+                restyle(combo)
+        short_views = {"basic": "基", "task_a": "A", "task_b": "B", "task_c": "C",
+                       "irq": "IRQ", "param": "参", "debug": "调", "all": "全"}
+        for key, tab in self.view_buttons.items():
+            full = top_import.VIEW_LABELS[key]
+            tab.setText(short_views.get(key, full) if tiny else full)
+            tab.setAccessibleName(full)
+            tab.setToolTip(full + "\n" + VIEW_TOOLTIPS.get(key, full))
+            if tab.property("compact") != tiny:
+                tab.setProperty("compact", tiny)
+                restyle(tab)
+        self.register_filters_layout.setSpacing(1 if tiny else 3)
+        self.search.setMinimumWidth(80 if tiny else 105 if compact else 145)
+        self.search.setMaximumWidth(110 if tiny else 180 if compact else 220)
+        self._set_combo_display_labels(self.access_filter,
+                                      ("全部权限", "只读", "可读写"), ("全部", "只读", "读写"), compact)
+        self.access_filter.setFixedWidth(72 if tiny else 80 if compact else 112)
+        periods = ("0.1 s", "0.2 s", "0.5 s", "1 s", "2 s", "5 s", "10 s")
+        self._set_combo_display_labels(self.interval, periods,
+                                      tuple(text.replace(" ", "") for text in periods), compact)
+        self.interval.setFixedWidth(64 if tiny else 72 if compact else 88)
+        self.width_combo.setFixedWidth(64 if compact else 80)
+        self.format_combo.setFixedWidth(64 if compact else 88)
+        self.preset_combo.setMinimumContentsLength(6 if compact else 8)
+        self._refresh_selector_tooltips()
+
+    def _refresh_selector_tooltips(self, *_):
+        for name in ("access_filter", "format_combo", "preset_combo", "serial_port", "log_filter"):
+            combo = getattr(self, name, None)
+            if combo is None:
+                continue
+            combo.setToolTip(str(combo.currentData(Qt.ToolTipRole) or combo.currentText()))
+        if hasattr(self, "console_source_combo"):
+            source = self.console_source_combo.currentData()
+            descriptions = {"log": "tail log：板端 sunny.log 流", "ssh": "ssh：SSH 会话日志",
+                            "com": "serial：串口会话日志", "system": "system：软件运行日志"}
+            self.console_source_combo.setToolTip(descriptions.get(source, "选择日志来源"))
+        if hasattr(self, "width_combo"):
+            self.width_combo.setToolTip(f"访问位宽：{self.width_combo.currentText()} 位")
+        if hasattr(self, "serial_baud"):
+            self.serial_baud.setToolTip(f"波特率：{self.serial_baud.currentText()} Baud")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply_responsive_layout()
+        QTimer.singleShot(0, self._fit_console_toolbar)
         if hasattr(self, "inspector_scroll"):
             QTimer.singleShot(0, self._reveal_inspector)
 
@@ -1608,16 +1851,21 @@ class MainWindow(QMainWindow):
         """Connect buttons: blue 'connect' while offline, red 'disconnect' once linked."""
         btn.setText(on_text if connected else off_text)
         btn.setObjectName("danger" if connected else "primary")
-        btn.setIcon(icon("disconnect", "#B64242") if connected else icon("connect", "#FFFFFF"))
+        btn.setIcon(icon("disconnect", "#F08C8C") if connected else icon("connect", "#FFFFFF"))
+        channel = "SSH" if btn is self.connect_button else "serial"
+        btn.setAccessibleName(f"{channel} {btn.text()}")
+        btn.setToolTip(f"{btn.text()} {channel}")
         restyle(btn)
 
     def _set_connection(self, connected):
         self.connected = connected
         # DemoSession is an internal simulator used by tests and offline acceptance.
         self.demo = isinstance(self.session, DemoSession)
-        self._update_connection_badge()
-        self._refresh_target_label()
-        self._style_session_button(self.connect_button, connected, "断开SSH", "SSH连接")
+        self._update_connection_status()
+        self._style_session_button(self.connect_button, connected, "断开", "连接")
+        self._refresh_channel_summaries()
+        if connected:
+            self.ssh_section.set_expanded(False)   # locked fields fold away; the summary keeps the target
         if connected and self.demo:
             self._status("演示模式 · 当前数据来自本地模拟")
         if not connected:
@@ -1650,7 +1898,8 @@ class MainWindow(QMainWindow):
             return
         if not self.host.text().strip() or not self.user.text().strip():
             self._status("请填写设备主机地址和用户名。")
-            self.host.setFocus()
+            self.ssh_section.set_expanded(True)
+            (self.user if self.host.text().strip() else self.host).setFocus()
             return
         request = (self.host.text().strip(), self.port.value(), self.user.text().strip(),
                    self.password.text(), CONNECT_TIMEOUT)
@@ -1668,7 +1917,7 @@ class MainWindow(QMainWindow):
         self._reset_measurements()
         self.save_settings()
         # The button becomes a red 'cancel' control while the handshake runs.
-        self._style_session_button(self.connect_button, True, "取消连接", "SSH连接")
+        self._style_session_button(self.connect_button, True, "取消", "连接")
         self.append_log("SYSTEM", f"正在连接 {user}@{host}:{port}。")
         def connect(progress):
             if approved_change:
@@ -1687,7 +1936,7 @@ class MainWindow(QMainWindow):
             self._set_connection(True)
             self.append_log("SUCCESS", "SSH 连接成功。")
         self._run_task(connect, done, "SSH连接", "connect")
-        self._update_connection_badge()   # _busy+kind set → SSH 连接中
+        self._update_connection_status()   # _busy+kind set → SSH 连接中
 
     def _confirm_host_key_change(self, change, request):
         if self._closing or self._busy or self.connected or self.cancel.is_set():
@@ -1729,6 +1978,7 @@ class MainWindow(QMainWindow):
         port = self._selected_serial_port()
         if not port:
             self._status("请选择 serial 端口。")
+            self.serial_section.set_expanded(True)
             self.serial_port.setFocus()
             return
         request = (port, self._serial_baud_value(), self.serial_user.text().strip(),
@@ -1736,11 +1986,10 @@ class MainWindow(QMainWindow):
         self._connect_serial(request)
 
     def _serial_port_label(self, device, description):
-        """Pick text for a listed serial entry: the full board name (e.g.
-        ``USB Serial Port (COM6)``), falling back to the device when Windows
-        gives no description. The device stays as the item data for the
-        actual connection."""
-        return (description or "").strip() or device
+        """List text 'COM6 · USB Serial Port': the port number leads so it survives
+        eliding; the device stays as the item data for the actual connection."""
+        name = re.sub(rf"\s*\({re.escape(device)}\)\s*$", "", (description or "").strip())
+        return f"{device} · {name}" if name and name != device else device
 
     def _selected_serial_port(self):
         """The device name for the picked port: the combo's data (COMx) when a
@@ -1764,11 +2013,11 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0)
         self.progress.show()
         # The button becomes a red 'cancel' control while the handshake runs.
-        self._style_session_button(self.serial_connect_button, True, "取消连接", "serial连接")
+        self._style_session_button(self.serial_connect_button, True, "取消", "连接")
         for control in (self.serial_port, self.serial_baud, self.serial_user,
                         self.serial_password, self.serial_remember):
             control.setEnabled(False)
-        self._update_connection_badge()   # _serial_busy set → serial 连接中
+        self._update_connection_status()   # _serial_busy set → serial 连接中
         self.append_log("SYSTEM", f"正在连接 serial {port} @ {baud} bps。")
         def connect(progress):
             session.connect(port, baud, user, password, timeout)
@@ -1799,6 +2048,8 @@ class MainWindow(QMainWindow):
             self._reflect_serial(False)
             cancelled = self._serial_cancel_requested
             self._serial_cancel_requested = False
+            if not cancelled:
+                self.serial_section.set_expanded(True)   # show the settings that just failed
             self.append_log("SYSTEM" if cancelled else "ERROR", message)
         worker = Worker(connect)
         self._serial_worker = worker   # keep the reference: pool.start alone lets GC drop it
@@ -1824,29 +2075,17 @@ class MainWindow(QMainWindow):
 
     def _reflect_serial(self, connected):
         self.serial_connected = connected
-        self._style_session_button(self.serial_connect_button, connected, "断开连接", "serial连接")
-        self._update_connection_badge()
-        self._refresh_target_label()
+        self._style_session_button(self.serial_connect_button, connected, "断开", "连接")
+        if connected:
+            self.serial_section.set_expanded(False)
+        self._update_connection_status()
+        self._refresh_channel_summaries()
         self._refresh_controls()
 
-    def _refresh_target_label(self):
-        """Top-right SSH session summary; the serial state lives in the badges.
-        The waiting hint only shows when nothing at all is connected."""
-        if self.connected and self.demo:
-            text = "本地模拟设备"
-        elif self.connected:
-            text = f"SSH {self.user.text()}@{self.host.text()}:{self.port.value()}"
-        elif self.serial_connected:
-            text = ""
-        else:
-            text = "等待建立设备会话"
-        self.target_label.setText(text)
-
-    def _update_connection_badge(self):
-        """Refresh the two independent SSH/serial status badges in the top-right.
-        Each shows its own connection state so neither hides the other. The dot
-        is a fixed-size rich-text glyph whose color alone changes, so it renders
-        the same size in every state."""
+    def _update_connection_status(self):
+        """Status dots on the connection card for both channels."""
+        if not hasattr(self, "serial_section"):
+            return
         if self.connected and self.demo:
             ssh_text, ssh_state = "SSH 演示", "demo"
         elif self.connected:
@@ -1855,24 +2094,38 @@ class MainWindow(QMainWindow):
             ssh_text, ssh_state = "SSH 连接中", "connecting"
         else:
             ssh_text, ssh_state = "SSH 离线", "offline"
-        self.ssh_badge.setText(self._badge_dot(ssh_state) + ssh_text)
-        self.ssh_badge.setProperty("state", ssh_state)
-        restyle(self.ssh_badge)
         if self.serial_connected:
             com_state, com_text = "connected", "serial 已连接"
         elif self._serial_busy:
             com_state, com_text = "connecting", "serial 连接中"
         else:
             com_state, com_text = "offline", "serial 离线"
-        self.com_badge.setText(self._badge_dot(com_state) + com_text)
-        self.com_badge.setProperty("state", com_state)
-        restyle(self.com_badge)
+        self.ssh_section.set_state(ssh_state, ssh_text)
+        self.serial_section.set_state(com_state, com_text)
 
-    @staticmethod
-    def _badge_dot(state):
-        """Fixed-size status dot (rich-text span; only the color varies by state)."""
-        colors = {"connected": "#157767", "demo": "#B57518", "connecting": "#2463DC", "offline": "#8395A8"}
-        return f'<span style="color:{colors.get(state, "#8395A8")};font-size:13px">●</span>&nbsp;&nbsp;'
+    def open_bit_pack(self):
+        if self._closing:
+            return
+        if self.bit_pack_dialog is None:
+            top_path = self.cfg.get("top_path")
+            directory = Path(top_path).parent if top_path else None
+            self.bit_pack_dialog = BitPackDialog(self, directory, self.cfg.get("bitpack_settings"))
+            self.bit_pack_dialog.settings_changed.connect(self._remember_bitpack_settings)
+            self.bit_pack_dialog.job_finished.connect(self._bit_pack_job_finished)
+        if self.bit_pack_dialog.isMinimized():
+            self.bit_pack_dialog.showNormal()
+        else:
+            self.bit_pack_dialog.show()
+        self.bit_pack_dialog.raise_()
+        self.bit_pack_dialog.activateWindow()
+
+    def _remember_bitpack_settings(self, settings):
+        self.cfg["bitpack_settings"] = dict(settings)
+        self._schedule_save()
+
+    def _bit_pack_job_finished(self):
+        if self._closing:
+            QTimer.singleShot(0, self.close)
 
     def open_bit_upload(self):
         if self._closing or not self.connected or self._busy:
@@ -2140,6 +2393,8 @@ class MainWindow(QMainWindow):
         self.poll_check.setChecked(False)
         if not self.session.alive:
             self._set_connection(False)
+        if self._task_kind == "connect" and not self.cancel.is_set() and "已取消" not in message:
+            self.ssh_section.set_expanded(True)   # show the settings that just failed
 
     @Slot(object)
     def _task_progress(self, data):
@@ -2192,9 +2447,9 @@ class MainWindow(QMainWindow):
         self._update_progress()
         # A finished connect (e.g. waiting on the host-key dialog) must not keep
         # the badge stuck on 连接中.
-        self._update_connection_badge()
+        self._update_connection_status()
         self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
-        self._style_session_button(self.connect_button, self.connected, "断开SSH", "SSH连接")
+        self._style_session_button(self.connect_button, self.connected, "断开", "连接")
         self._refresh_controls()
         pending, self._pending_component = self._pending_component, None
         if self._closing:
@@ -2416,6 +2671,8 @@ class MainWindow(QMainWindow):
             if current is not None and current in devices:
                 self.serial_port.setCurrentIndex(self.serial_port.findData(current))
             self.serial_port.blockSignals(False)
+            self._refresh_selector_tooltips()
+            self._refresh_channel_summaries()
 
     def send_command(self, text=""):
         """Run a shell command typed in the terminal prompt (routes by source)."""
@@ -2714,6 +2971,7 @@ class MainWindow(QMainWindow):
         query = self.log_search.text()
         if not query:
             self.log_match_count.setText("")
+            self.log_search.setToolTip("查找日志：Enter 下一个，Shift+Enter 上一个")
             return
         # doc.find is case-insensitive by default; count the same way.
         text, query = self.console.toPlainText().lower(), query.lower()
@@ -2723,6 +2981,7 @@ class MainWindow(QMainWindow):
             self.log_match_count.setText(f"{index}/{total}")
         else:
             self.log_match_count.setText(f"0/{total}")
+        self.log_search.setToolTip(f"匹配 {self.log_match_count.text()}；Enter 下一个，Shift+Enter 上一个")
 
     def _log_search_changed(self, _text=None):
         """Find-as-you-type keeps the match counter live with the query."""
@@ -2805,7 +3064,10 @@ class MainWindow(QMainWindow):
         self.serial.close()
         if self._task_serial:
             self._task_serial.cancel_connect()   # don't wait out the serial handshake
-        if self._busy or self._stream_workers or self._serial_busy:
+        packing = self.bit_pack_dialog is not None and self.bit_pack_dialog.busy
+        if packing:
+            self.bit_pack_dialog.close()
+        if self._busy or self._stream_workers or self._serial_busy or packing:
             self.setEnabled(False)
             event.ignore()
             return

@@ -653,7 +653,7 @@ class HostKeyTests(BoardFixture, unittest.TestCase):
         self.save_host_key(paramiko.RSAKey.generate(2048))
         with self.assertRaises(HostKeyChangedError) as captured:
             self.session.connect("127.0.0.1", self.port, "test", "test", timeout=2)
-        self.assertIsInstance(captured.exception, paramiko.BadHostKeyException)
+        self.assertIsInstance(captured.exception.__cause__, paramiko.BadHostKeyException)
         self.assertEqual(captured.exception.key, self.key)
         self.assertEqual(captured.exception.hostkey_name, f"[127.0.0.1]:{self.port}")
         self.assertTrue(captured.exception.new_fingerprint.startswith("SHA256:"))

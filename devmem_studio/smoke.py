@@ -11,9 +11,10 @@ import paramiko
 from PySide6.QtCore import Qt, QCoreApplication, QEvent
 from PySide6.QtWidgets import QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit
 from unittest.mock import patch
-from . import top_import
+from . import bitpack, top_import
 from .core import ConfigStore, DemoSession, HostKeyChangedError
 from .dialogs import BatchDialog, HostKeyDialog
+from .bitpack_dialog import BitPackDialog
 from .window import MainWindow
 
 FIXTURE_TOP = """// --- flow_comp_1 --A0001_验收轴---
@@ -84,6 +85,94 @@ def run_smoke(app, directory: Path):
         report["initial_logical_size"] = [window.width(), window.height()]
         check(not window.connected and not window.read_all_button.isEnabled(), "Offline controls disabled")
         check(not window.component_mode and window.regs == [], "Empty register state before a component is chosen")
+        check(window.bit_pack_button.isEnabled(), "Local bit packing is available offline")
+        window.bit_pack_button.click()
+        settle()
+        pack_dialog = window.bit_pack_dialog
+        check(pack_dialog.isVisible() and pack_dialog.parentWidget() is window,
+              "Packing button opens a workbench-styled dialog offline")
+        check(pack_dialog.start_button.objectName() == "primary" and pack_dialog.project.isEnabled(),
+              "Packing dialog reuses the workbench primary button and input styling")
+        window.bit_pack_button.click()
+        check(window.bit_pack_dialog is pack_dialog, "Repeated packing clicks reuse the same styled dialog")
+        pack_dialog.grab().save(str(directory / "bitpack-dialog.png"))
+        pack_dialog.close()
+        # Exercise the real bundled executable, including inside a copied frozen
+        # workbench with Python and the original bitfile directory unavailable.
+        import subprocess
+        import zipfile
+        with patch("devmem_studio.bitpack.user_data_dir", return_value=directory / "bitpack-cache"):
+            packer = bitpack.prepare_bitpack_executable()
+        check(packer.is_file() and packer.is_relative_to(directory), "Bundled packer is released to an independent cache")
+        def run_packer(*arguments):
+            result = subprocess.run([str(packer), *map(str, arguments)], cwd=directory,
+                                    capture_output=True, timeout=30,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            check(result.returncode == 0, "Bundled packer CLI succeeds: " + str(arguments[0]))
+            return result
+        version = run_packer("--version").stdout.decode("utf-8").strip()
+        check(version == "Bit_pack 2.0.1", "Bundled native packer version is correct")
+        report["bitpack"] = version
+        pack_directory = directory / "打包验收 空格"
+        pack_directory.mkdir(exist_ok=True)
+        source_bit = pack_directory / "源文件.bit"
+        payload = bytes(range(256)) * 4
+        source_bit.write_bytes(payload)
+        run_packer("--project", "集成验收", "--input", source_bit, "--output", pack_directory)
+        archives = list(pack_directory.glob("集成验收_bit_*.zip"))
+        check(bool(archives), "Bundled packer creates a project release ZIP with Unicode paths")
+        newest = max(archives, key=lambda path: path.stat().st_mtime_ns)
+        with zipfile.ZipFile(newest) as archive:
+            check(archive.namelist() == ["sunny_fpga.bit"] and archive.read("sunny_fpga.bit") == payload,
+                  "Packed archive contains only the byte-identical sunny_fpga.bit")
+        check(source_bit.read_bytes() == payload, "Packing preserves the original bit file")
+        # Prove the real themed dialog + Qt worker + named-event CLI bridge also
+        # functions inside the copied single-file EXE, not only in source tests.
+        with patch("devmem_studio.bitpack.user_data_dir", return_value=directory / "bitpack-cache"):
+            pack_dialog.set_source(source_bit)
+            pack_dialog.project.setText("界面验收")
+            pack_dialog.show()
+            pack_dialog.start_button.click()
+            check(pack_dialog.busy, "Styled packing dialog starts a real asynchronous engine job")
+            settle(lambda: not pack_dialog.busy, timeout=30)
+            check(pack_dialog.status.property("state") == "connected" and pack_dialog.progress.value() == 100,
+                  "Styled packing dialog displays actual engine completion and verified progress")
+            with zipfile.ZipFile(pack_dialog._result_path) as archive:
+                check(archive.namelist() == ["sunny_fpga.bit"] and archive.read("sunny_fpga.bit") == payload,
+                      "Styled dialog publishes a byte-identical archive through the bundled engine")
+            check(pack_dialog._cancel is None and pack_dialog.open_output_button.isEnabled(),
+                  "Styled dialog releases its cancellation event and enables output browsing after success")
+            pack_dialog.grab().save(str(directory / "bitpack-success.png"))
+            nested = pack_directory / "子目录"
+            nested.mkdir(exist_ok=True)
+            nested_bit = nested / "nested.BIT"
+            nested_bit.write_bytes(b"nested fixture")
+            pack_dialog.scan_directory(pack_directory)
+            settle(lambda: not pack_dialog.busy, timeout=30)
+            check(pack_dialog.source_combo.count() == 2, "Styled dialog recursively scans a chosen folder for bit files")
+            index = pack_dialog.source_combo.findText(str(nested_bit))
+            check(index >= 0, "Folder scan includes uppercase .BIT in nested directories")
+            pack_dialog.output.setText(str(pack_directory))
+            pack_dialog._output_edited(str(pack_directory))
+            pack_dialog.source_combo.setCurrentIndex(index)
+            pack_dialog.project.setText("目录界面验收")
+            pack_dialog.start_button.click()
+            settle(lambda: not pack_dialog.busy, timeout=30)
+            check(pack_dialog.status.property("state") == "connected", "Folder selection packs the chosen bit with the real engine")
+            with zipfile.ZipFile(pack_dialog._result_path) as archive:
+                check(archive.read("sunny_fpga.bit") == b"nested fixture", "Folder-selected archive contains the selected file, not another bit")
+            preferences = pack_dialog.preference_snapshot()
+            check(window.cfg.get("bitpack_settings") == preferences,
+                  "Project and selected/output directories are passed to the main configuration")
+            restored = BitPackDialog(window, directory, preferences)
+            restored.show()
+            settle(lambda: not restored.busy and restored.source_combo.count() == 2, timeout=30)
+            check(restored.project.text() == "目录界面验收" and restored.output.text() == str(pack_directory)
+                  and restored.source.text() == str(nested_bit), "New styled dialog restores project, directories and selected file")
+            restored.close()
+            restored.deleteLater()
+            pack_dialog.grab().save(str(directory / "bitpack-folder.png"))
+            pack_dialog.close()
         window.grab().save(str(directory / "offline.png"))
         window.session = DemoSession(window._log_emit("ssh"))
         window.session.connect()
@@ -310,10 +399,38 @@ def run_smoke(app, directory: Path):
               "Target address remains fixed above the scrolling editor")
         window.grab().save(str(directory / "compact.png"))
         check(window.width() == 1280, "Compact desktop layout")
-        check(all(control.parentWidget().rect().contains(control.geometry()) for control in
-                  (window.host, window.user, window.password, window.port)), "Compact connection fields are not clipped")
-        sidebar = window.findChild(QScrollArea, "sidebarScroll")
+        check(all(control.isVisible() and control.parentWidget().rect().contains(control.geometry())
+                  and control.width() >= control.minimumSizeHint().width() for control in
+                  (window.bit_pack_button, window.bit_upload_button, window.bit_rollback_button,
+                   window.log_download_button, window.reboot_button)),
+              "Local packer and firmware actions remain visible at compact size")
+        check(all(abs(control.geometry().center().y() - window.log_search.geometry().center().y()) <= 2
+                  for control in (window.bit_pack_button, window.bit_upload_button, window.bit_rollback_button,
+                                  window.log_download_button, window.reboot_button)),
+              "Firmware actions and log search share a single toolbar row")
+        check(not window.ssh_section.is_expanded() and not window.serial_section.is_expanded()
+              and window.connect_button.isVisible() and window.serial_connect_button.isVisible()
+              and window.component_tree.isVisible(),
+              "Compact mode folds SSH/serial to one line each, keeping connect buttons and the component tree visible")
+        sidebar = window.sidebar_scroll
+        check(not isinstance(sidebar, QScrollArea) and not sidebar.findChildren(QScrollArea),
+              "Sidebar has no outer or nested vertical scroll area")
+        check(sidebar.width() == 300 and window.side_split.sizes()[0] == 300
+              and window.workspace.x() == 300 + window.side_split.handleWidth()
+              and not window.side_split.handle(1).isEnabled(),
+              "Compact sidebar width is fixed without a wasted gutter while the component tree remains scrollable")
         check(sidebar.widget().width() <= sidebar.viewport().width(), "Sidebar content fits its horizontal viewport")
+        window.serial_section.toggle.click()
+        settle()
+        check(window.serial_section.is_expanded() and window.serial_port.isVisible()
+              and not window.ssh_section.is_expanded() and window.component_tree.isVisible()
+              and sidebar.widget().rect().contains(window.component_tree.geometry()),
+              "Opening one channel shows its fields inline without hiding the component tree")
+        window.sidebar_scroll.grab().save(str(directory / "connection-settings.png"))
+        window.serial_section.toggle.click()
+        settle()
+        check(not window.serial_section.is_expanded() and not window.serial_port.isVisible(),
+              "Folding the channel restores the tree-only rail")
         check(window.write_button.isVisible() and window.inspector.rect().contains(
             window.write_button.mapTo(window.inspector, window.write_button.rect().center())), "Inspector action remains visible at compact size")
         window.table.selectRow(row_of("A_TX_RSULT_RPT"))

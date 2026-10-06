@@ -1,0 +1,156 @@
+【工作台集成说明】
+在 DevmemStudio 的「会话终端」一行点击「打包bit」，打开统一 PySide6 风格的打包弹窗。
+可选择 .bit 文件，也可选择/拖入文件夹递归扫描后从列表选择源文件；填写项目号和输出目录后开始打包，无需连接设备。
+项目号、选择目录、输出目录和所选文件保存到工作台配置，重启自动恢复；上次选文件夹时自动重新扫描。
+引擎只在后台运行，不弹原生窗口或控制台。弹窗可显示阶段、取消任务和打开输出目录。
+关闭弹窗或工作台时请求安全取消，等待引擎清理完毕后关闭；复制已有目标须先确认。
+此集成版增加 --scan、--progress 与 --cancel-event（Windows 命名事件）接口供工作台调用。
+以下是独立引擎的原始说明；单独无参数运行引擎仍保留原生 GUI，正常集成入口不会使用它。
+
+﻿【Bit_pack 2.0.1 — sunny_fpga 安全打包工具】
+
+一、用途和安全规则
+将选中的 .bit 文件打包为：项目号_bit_yyyyMMddHHmmss.zip。
+ZIP 根目录只包含 sunny_fpga.bit，内容与源文件一致。
+
+重要变化：
+1. 源文件始终保留，即使它本来就叫 sunny_fpga.bit。
+2. 打包使用每次任务独立的临时目录，不覆盖用户目录中的 sunny_fpga.bit。
+3. 同名 ZIP 不覆盖，自动追加 _01、_02 等序号，支持多个实例同时打包。
+4. 压缩后校验归档文件名、数量、长度和解压内容，再发布正式 ZIP。
+5. 输出先写入输出目录内的唯一临时文件，刷新成功后在同目录改名。
+   取消、超时、磁盘写入或工具失败不会留下被误认为成功的正式 ZIP。
+6. 仅复制模式默认拒绝覆盖；GUI 须确认，CLI 须明确使用 --force。
+7. 硬链接或源/目标为同一文件时，复制模式直接成功，不删除或重写文件。
+8. ZIP 内 sunny_fpga.bit 及仅复制生成的文件保留源 .bit 的修改时间
+   （即 FPGA 编译时间，与 1.x 一致），便于追溯版本；ZIP 本身为打包时间。
+
+二、图形界面
+双击 pack_bit.exe：
+- 当前目录的 .bit 文件在后台扫描，按完整路径排序显示。
+- “选文件…”选择单个 .bit；也可在源文件框粘贴完整路径。
+- “扫描目录…”扫描目录及其子目录。
+- 可拖入一个 .bit 文件或目录；拖入目录会进行递归扫描。
+- 浏览后默认输出到源文件所在目录；用户指定输出目录后保留该设置。
+- 输入项目号，确认输出目录，点击“开始打包”。
+- 勾选“仅复制…”后不需要项目号，只生成 sunny_fpga.bit。
+- 扫描和打包在后台执行，界面显示任务阶段；可取消或关闭。
+  任务进行中关闭窗口，会先终止并清理本次任务，再关闭。
+- 默认超时 300 秒，可设置为 1–86400 秒。
+- 成功后窗口保留，便于继续打包；状态栏显示绿色结果，点击
+  “在资源管理器中显示输出文件”可直接定位生成的 ZIP。
+- 状态颜色：蓝色＝进行中，绿色＝成功，红色＝失败；进度条仅在任务中显示。
+- 项目号或超时填写有误时，在对应输入框旁弹出提示并选中内容。
+- 快捷键：Alt+P 项目号、Alt+I 源文件、Alt+O 输出目录、Alt+F 选文件、
+  Alt+D 扫描目录、Alt+B 浏览、Alt+C 仅复制、Alt+T 超时；回车＝开始打包。
+- 支持 Windows 高对比度主题（自动改用系统配色）。
+
+递归扫描跳过目录联接、符号链接等重解析点，避免循环。
+文件列表为动态分配，不再有 64 文件上限。扫描深度上限 128 层，
+总文件上限 100000，跳过项目或结果不完整会在界面明确提示。
+为保持界面响应，下拉框最多显示前 2000 项；其它文件可粘贴完整路径。
+源文件框、CLI 和文件 I/O 支持 Unicode 与长路径。
+
+三、命令行
+兼容旧方式（当前目录只有一个普通 .bit 文件）：
+  pack_bit.exe A100
+  pack_bit.exe --nopack
+
+指定输入和输出：
+  pack_bit.exe A100 --input "D:\FPGA output\design.bit" --output "D:\release"
+  pack_bit.exe --project A100 -i "D:\source\design.bit" -o "D:\release"
+
+仅复制：
+  pack_bit.exe --nopack --input "D:\source\design.bit" --output "D:\release"
+  pack_bit.exe --nopack --input "D:\source\design.bit" --output "D:\release" --force
+
+选择压缩引擎和超时：
+  pack_bit.exe A100 --input "D:\source\design.bit" --engine tar --timeout 600
+  pack_bit.exe A100 --input "D:\source\design.bit" --engine powershell
+  pack_bit.exe --help
+  pack_bit.exe --version
+
+--engine auto（默认）：优先系统 tar；启动、压缩或校验失败后回退
+到 Windows PowerShell/.NET ZIP；取消、超时不会重新尝试另一引擎。
+PowerShell 使用固定脚本和流式 .NET ZIP，不拼接项目号或用户路径，
+不使用 Compress-Archive 的文件大小限制路径。
+系统工具按完整路径调用，不从当前目录或 PATH 寻找同名程序。
+
+CLI 不主动弹控制台或消息框；重定向输出为 UTF-8。
+Ctrl+C / Ctrl+Break 请求取消。退出码：
+  0 = 成功（源/目标同一文件、无需复制也算成功）
+  1 = 文件、权限、磁盘、压缩工具、校验或其它操作失败
+  2 = 参数错误
+  3 = 已取消
+  4 = 超时
+
+四、输出和输入规则
+- --output 是已经存在的目录，不是 ZIP 文件名；程序不会自动创建它。
+- 默认输出到源文件所在目录，而不是 EXE 所在目录。
+- 项目号 1–63 个字符，禁止空白、控制字符和 \ / : * ? " < > |。
+- 中文、单引号、括号等合法字符可用；超长项目号直接报错，不截断。
+- 多个 .bit 文件时请使用 --input 或 GUI 选择。
+- 正在被其它程序写入的源文件会报错；请等待 FPGA 编译完成后打包。
+- 工作目录在系统 TEMP 中；发布临时文件在输出目录内。
+  需要留出快照、归档和验证所需磁盘空间。
+- 清理失败会给出具体临时路径，不会递归删除用户目录。
+- 强制结束进程或断电可能留下任务临时目录/.bitpack-*.tmp；确认没有
+  打包任务正在运行后可手动清理。已完成正式 ZIP 不受正常取消影响。
+
+五、环境与构建
+Windows 10 及以上，单个 EXE，只依赖 Windows 系统 DLL 和系统工具。
+注意：EXE 为图形界面程序，在 PowerShell 中直接输入命令时不会等待结束、
+也不设置 $LASTEXITCODE；脚本中请用 Start-Process -Wait -PassThru，
+或把输出接到管道（如 | Out-String）。批处理（.cmd）中会正常等待。
+当前编译器生成 32 位 EXE，可在 64 位 Windows 上运行。
+没有额外第三方运行库，不需要安装压缩软件。
+
+构建需要 MinGW-w64 gcc、windres，加入 PATH：
+  build.cmd
+或：
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+构建并测试：
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -Test
+
+开启 -Wall -Wextra -Wpedantic -Wformat=2 -Werror，编译失败不替换旧 EXE。
+图标和清单从 app.ico/app.manifest 生成文本资源，避免此环境中
+透明加密导致 windres 无法直接读取二进制图标的问题。
+生成文件必须是 _build\resource_data.rc2：windres 与 rc.exe 一样会静默忽略
+被 #include 的 .h/.c 文件里的资源语句（2.0.0 因此缺失图标和清单）。
+回归测试会检查 EXE 内存在清单和图标资源。
+EXE 含版本信息、系统 DPI 感知、长路径清单、ASLR、DEP。
+不同编译器架构会自动选择相应链接选项。
+
+六、回归测试
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\test.ps1
+可选：-SkipGui、-SkipBenchmark、-KeepArtifacts。
+-RealInputs 可传入真实 .bit 路径数组，仅读取源文件，输出到独立测试目录。
+传多个路径须用 -Command（-File 不解析数组）：
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\tests\test.ps1 -RealInputs @('a.bit','b.bit')"
+
+测试会编译测试辅助程序，在 TEMP 下创建唯一 bitpack-test-* 目录，
+不会修改真实项目的输入文件。原生二进制生成器避免测试文件的文本
+编码和本机透明加密干扰；ZIP 解压后用独立 .NET SHA-256 校验。
+测试目录每次约 140 MB：全部通过时自动删除；有失败或加 -KeepArtifacts
+时保留供排查。报告位于：
+  _build\test-results\latest.json
+
+覆盖核心单元、真实 EXE、两种引擎、自动回退、ZIP 内容、源文件保留、
+复制覆盖保护、异常参数、中文/空格/单引号、长路径、并发、防重名、
+源文件锁定、只读文件、递归联接循环、取消/超时、子进程树终止、
+模拟磁盘写满/读取错误/发布失败、GUI 和 30 MiB 性能测试。
+
+七、版本回退和源码结构
+旧版已备份在 backups\before-optimization-*。
+pack_bit.c：命令行、GUI 和后台任务调度。
+pack_core.c/.h：安全文件操作、压缩、验证、发布、取消和目录扫描。
+app.rc/app.manifest：界面资源、图标、版本、兼容性清单。
+generate_resources.ps1：把图标和清单生成 windres 可读取的文本资源。
+tests\：可重复执行的原生核心测试和 EXE 集成测试。
+icon_data.h 是旧版遗留，2.0 构建不再使用。
+
+八、验证范围
+测试在本机 Windows 环境完成，尚未实测其它 Windows 版本、网络盘、
+超过 2 GiB 的输入、磁盘断电或强制断电恢复。磁盘写满和 I/O 失败使用
+受控故障注入验证，不实际填满磁盘。构建失败保护可单独运行
+ .\tests\test_build_failure.ps1 验证；故障不替换已部署 EXE。

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import copy
 import hashlib
 import hmac
+import importlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -23,9 +24,27 @@ import threading
 import time
 import uuid
 
-import paramiko
-
 from .catalog import DEFAULT_CATEGORIES, DEFAULT_TYPES, NAME_GROUPS, REGISTER_FIELDS
+
+
+class _LazyModule:
+    """Imports on first attribute access: paramiko is about half of start-up time."""
+    def __init__(self, name):
+        self._name = name
+
+    def __getattr__(self, attribute):
+        return getattr(importlib.import_module(self._name), attribute)
+
+
+paramiko = _LazyModule("paramiko")
+
+
+def preload_ssh():
+    """Warm the SSH stack off the GUI thread so the first connect does not wait for it."""
+    try:
+        importlib.import_module("paramiko")
+    except Exception:
+        pass   # the connect itself reports a broken SSH stack
 
 DEFAULT_LOG_PATH = "/run/media/sda/sunny.log"
 
@@ -34,7 +53,14 @@ BATCH_READ_CHUNK = 32
 
 
 def application_dir() -> Path:
-    return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent
+    if getattr(sys, "frozen", False):
+        # A native single-file bootstrap may run the verified payload from its
+        # per-user cache; portable preferences still belong beside the outer EXE.
+        origin = os.environ.get("DEVMEMSTUDIO_LAUNCHER_DIR")
+        if origin and Path(origin).is_absolute() and Path(origin).is_dir():
+            return Path(origin)
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
 
 
 def resource_path(name: str) -> Path:
@@ -153,7 +179,8 @@ def default_config() -> dict:
             "last_address": "0x0800", "remember_password": False,
             "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
-            "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits"}
+            "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits",
+            "bitpack_settings": {}}
 
 
 class ConfigStore:
@@ -269,10 +296,11 @@ def host_key_fingerprint(key):
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
-class HostKeyChangedError(paramiko.BadHostKeyException):
+class HostKeyChangedError(Exception):
     """A specific observed host key change, retained for explicit confirmation."""
     def __init__(self, hostname, port, key, expected_key):
         super().__init__(hostname, key, expected_key)
+        self.hostname, self.key, self.expected_key = hostname, key, expected_key
         self.port = port
         self.hostkey_name = hostname if port == 22 else f"[{hostname}]:{port}"
         self.old_fingerprint = host_key_fingerprint(expected_key)
@@ -293,20 +321,29 @@ def _matches_host(token, hostname):
     return False
 
 
-class BoardTransport(paramiko.Transport):
-    """Keep RSA/SHA-2 ahead of legacy RSA even for a saved RSA host key."""
-    def start_client(self, event=None, timeout=None):
-        options = self.get_security_options()
-        algorithms = list(options.key_types)
-        if "ssh-rsa" in algorithms:
-            # SSHClient promotes the saved key's type (ssh-rsa) before calling
-            # start_client. Prefer stronger signatures for that same trusted key.
-            modern_rsa = [name for name in ("rsa-sha2-512", "rsa-sha2-256") if name in algorithms]
-            algorithms = [name for name in algorithms if name not in modern_rsa]
-            position = algorithms.index("ssh-rsa")
-            algorithms[position:position] = modern_rsa
-            options.key_types = tuple(algorithms)
-        return super().start_client(event=event, timeout=timeout)
+_board_transport = None
+
+
+def board_transport():
+    """paramiko.Transport subclass, built on first use since paramiko loads lazily."""
+    global _board_transport
+    if _board_transport is None:
+        class BoardTransport(paramiko.Transport):
+            """Keep RSA/SHA-2 ahead of legacy RSA even for a saved RSA host key."""
+            def start_client(self, event=None, timeout=None):
+                options = self.get_security_options()
+                algorithms = list(options.key_types)
+                if "ssh-rsa" in algorithms:
+                    # SSHClient promotes the saved key's type (ssh-rsa) before calling
+                    # start_client. Prefer stronger signatures for that same trusted key.
+                    modern_rsa = [name for name in ("rsa-sha2-512", "rsa-sha2-256") if name in algorithms]
+                    algorithms = [name for name in algorithms if name not in modern_rsa]
+                    position = algorithms.index("ssh-rsa")
+                    algorithms[position:position] = modern_rsa
+                    options.key_types = tuple(algorithms)
+                return super().start_client(event=event, timeout=timeout)
+        _board_transport = BoardTransport
+    return _board_transport
 
 
 def _sftp_exists(sftp, path) -> bool:
@@ -429,7 +466,7 @@ class SshSession:
                 client.connect(hostname=host, port=port, username=username, password=password,
                                timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
                                channel_timeout=timeout, allow_agent=False, look_for_keys=False,
-                               sock=sock, transport_factory=BoardTransport)
+                               sock=sock, transport_factory=board_transport())
             except paramiko.BadHostKeyException as exc:
                 raise HostKeyChangedError(host, port, exc.key, exc.expected_key) from exc
             except paramiko.ssh_exception.IncompatiblePeer as exc:

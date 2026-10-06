@@ -14,7 +14,9 @@ if errorlevel 1 goto :failed
 if errorlevel 1 goto :failed
 "venv\Scripts\python.exe" devmem_debug.py --offscreen --smoke-test artifacts\build-smoke
 if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" -m PyInstaller --noconfirm DevmemStudio.spec
+"venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --distpath build\dist DevmemStudio.spec
+if errorlevel 1 goto :failed
+"venv\Scripts\python.exe" tools\build_singlefile.py
 if errorlevel 1 goto :failed
 "venv\Scripts\python.exe" tools\verify_exe.py
 if errorlevel 1 goto :failed
