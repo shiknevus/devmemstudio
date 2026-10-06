@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 
-from .core import resource_path, user_data_dir
+from .core import parse_int, resource_path, user_data_dir
 
 REG_GRID_START = 0x800
 REG_GRID_STEP = 0x200
@@ -16,8 +16,10 @@ CATALOG_RELPATH = "devmem_studio/data/component_catalog.json"
 
 _HEADER = re.compile(r"^[ \t]*//[ \t]*(?:/[ \t]*)*-{3,}[ \t]*flow_comp_(\d+)(?:[ \t]+\-+)*[ \t]*(.*?)[ \t]*\-*[ \t\r]*$", re.M)
 # 20'h3000 / 20'H3000 / 'h3000 / 20'sd25600 / plain 25600
-_BIAS = re.compile(r"\.REG_SPACE_BIAS\s*\(\s*(?:\d*\s*'\s*[sS]?([dDhH])\s*([0-9a-fA-F_]+)|(\d[\d_]*)\s*\))")
-_BASE_ADDR = re.compile(r"PL_CFG_BASE_ADDR[^\n]*?32'h([0-9a-fA-F]+(?:_[0-9a-fA-F]+)*)")
+_BIAS = re.compile(r"\.REG_SPACE_BIAS\b\s*\(\s*(?:\d*\s*'\s*[sS]?([dDhH])\s*([0-9a-fA-F_]+)|(\d[\d_]*))\s*\)")
+_BASE_ADDR = re.compile(r"^[ \t]*`define[ \t]+PL_CFG_BASE_ADDR[ \t]+"
+                        r"(?:\{\s*32\s*'\s*[hH]\s*([0-9a-fA-F_]+)\s*\}|"
+                        r"32\s*'\s*[hH]\s*([0-9a-fA-F_]+))[ \t\r]*$", re.M)
 _IDENTIFIER = re.compile(r"^\s*(?://\s*)*([A-Za-z_]\w*)\s*$")
 
 # Common header plus A/B/C channels; used when the type has no generated table.
@@ -190,11 +192,20 @@ def parse_top(text: str) -> dict:
             disabled = 0 not in by_depth   # nothing but comments: not an active component
         module_type = instance = None
         bias = None
+        invalid_bias = False
+        # Remove only the selected comment layer, then trailing notes. Disabled
+        # components stay discoverable, but stale literals in notes do not count.
+        source = [re.sub(r"^\s*(?://\s*)*", "", line).split("//", 1)[0] for line in source]
         for line in source:
-            if bias is None:
+            if bias is None and not invalid_bias:
                 found = _BIAS.search(line)
                 if found:
-                    bias = _bias_value(found)
+                    try:
+                        bias = _bias_value(found)
+                    except ValueError:
+                        invalid_bias = True
+                elif re.search(r"\.REG_SPACE_BIAS\b", line):
+                    invalid_bias = True
             if module_type is None or instance is None:
                 candidate = _IDENTIFIER.match(line)
                 if candidate and candidate.group(1).startswith("ec_"):
@@ -289,9 +300,12 @@ def _parse_unheaded(text: str, skip_instances: frozenset[str] | None = None, fin
         bias = None
         found = _BIAS.search(params)
         if found:
-            bias = _bias_value(found)
+            try:
+                bias = _bias_value(found)
+            except ValueError:
+                pass
         if bias is None:
-            warnings.append(f"{instance} 缺少 .REG_SPACE_BIAS，已跳过。")
+            warnings.append(f"{instance} 缺少或无法解析 .REG_SPACE_BIAS 常量，已跳过。")
             continue
         index = None
         if bias >= REG_GRID_START and (bias - REG_GRID_START) % REG_GRID_STEP == 0:
@@ -324,8 +338,17 @@ def find_components_param(top_path: Path) -> Path | None:
 
 
 def parse_base_address(text: str) -> int | None:
-    found = _BASE_ADDR.search(text)
-    return int(found.group(1).replace("_", ""), 16) if found else None
+    # Match a complete active macro, never an old address in a comment or the
+    # prefix of an expression. Unknown expressions require manual confirmation.
+    code = re.sub(r"//[^\n]*|/\*.*?\*/",
+                  lambda match: re.sub(r"[^\n]", " ", match.group(0)), text, flags=re.S)
+    found = _BASE_ADDR.search(code)
+    if found:
+        try:
+            return int((found.group(1) or found.group(2)).replace("_", ""), 16)
+        except ValueError:
+            pass
+    return None
 
 
 def load_type_catalog(path: Path | None = None) -> dict | None:
@@ -337,6 +360,8 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
             return None
     except (OSError, ValueError):
         return None
+    data["types"] = {key: normalized for key, entry in data["types"].items()
+                     if (normalized := _normalize_catalog_entry(entry)) is not None}
     # Tests and offline acceptance opt out of the machine's real overrides via env flag.
     if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
         overrides = user_data_dir() / "component_overrides"
@@ -346,30 +371,88 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
                     entry = json.loads(item.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if isinstance(entry, dict) and isinstance(entry.get("registers"), list) and entry["registers"]:
-                    data["types"][item.stem] = entry
+                normalized = _normalize_catalog_entry(entry)
+                if normalized is not None:
+                    data["types"][item.stem] = normalized
     return data
 
 
 def _parse_offset(item) -> int | None:
     """Register offset from a catalog/override entry; None when malformed."""
     try:
-        return int(str(item["offset"]).strip(), 16)
+        offset = int(str(item["offset"]).strip(), 16)
+        return offset if 0 <= offset <= 0xFFFFFFFF else None
     except (KeyError, TypeError, ValueError):
         return None
 
 
+def _valid_named_values(items) -> list[dict]:
+    """Preset/behavior entries need a display name and a numeric write value."""
+    if not isinstance(items, list):
+        return []
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name, value = item.get("name"), parse_int(item.get("value"))
+        if isinstance(name, str) and name.strip() and value is not None and 0 <= value < (1 << 64):
+            result.append(copy.deepcopy(item))
+    return result
+
+
+def _valid_fields(items) -> list[dict]:
+    """Keep only bit layouts within the 32-bit decoded register word."""
+    if not isinstance(items, list):
+        return []
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        low, width = parse_int(item.get("low")), parse_int(item.get("width"))
+        if (isinstance(name, str) and name.strip() and low is not None and width is not None
+                and 0 <= low < 32 and 1 <= width <= 32 - low):
+            result.append(dict(item, low=low, width=width))
+    return result
+
+
+def _normalize_catalog_entry(entry) -> dict | None:
+    """Validate external register tables before they reach GUI/command code."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("registers"), list):
+        return None
+    registers = []
+    for item in entry["registers"]:
+        if not isinstance(item, dict) or _parse_offset(item) is None:
+            continue
+        name, width = item.get("name"), parse_int(item.get("width", 32))
+        if not isinstance(name, str) or not name.strip() or width is None or not 1 <= width <= 64:
+            continue
+        register = copy.deepcopy(item)
+        register["width"] = width
+        for key in ("aliases", "buttons"):
+            if key in register:
+                register[key] = _valid_named_values(register[key])
+        if "fields" in register:
+            register["fields"] = _valid_fields(register["fields"])
+        registers.append(register)
+    if not registers:
+        return None
+    normalized = copy.deepcopy(entry)
+    normalized["registers"] = registers
+    return normalized
+
+
+def _type_entry(catalog, module_type) -> dict:
+    types = catalog.get("types") if isinstance(catalog, dict) else None
+    entry = types.get(module_type) if isinstance(types, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
 def registers_for(catalog: dict | None, module_type: str) -> tuple[list[dict], bool]:
     """Register table for a component type; False when using the generic fallback."""
-    entry = (catalog or {}).get("types", {}).get(module_type)
-    if entry and isinstance(entry.get("registers"), list) and entry["registers"]:
-        # User-edited override JSON may carry a broken offset ("0xZZ"); skip such
-        # items instead of crashing the register-table rebuild with a ValueError.
-        registers = sorted((dict(item) for item in entry["registers"]
-                            if isinstance(item, dict) and _parse_offset(item) is not None),
-                           key=lambda item: _parse_offset(item))
-        if not registers:
-            return copy.deepcopy(FALLBACK_REGISTERS), False
+    entry = _normalize_catalog_entry(_type_entry(catalog, module_type))
+    if entry:
+        registers = sorted(entry["registers"], key=_parse_offset)
         # Every component implements the shared IRQ header; guarantee it even for odd tables.
         present = {item["name"] for item in registers}
         for name, offset in (("IRQ_REG1", "0x000"), ("IRQ_REG2", "0x004")):
@@ -394,11 +477,10 @@ def view_registers(registers: list[dict], view: str) -> list[dict]:
 
 def type_metadata(catalog: dict | None, module_type: str) -> dict:
     """Harvested per-type semantics: register notes, behavior presets, debug notes."""
-    entry = (catalog or {}).get("types", {}).get(module_type) or {}
+    entry = _type_entry(catalog, module_type)
     notes = entry.get("notes") if isinstance(entry.get("notes"), dict) else {}
     behaviors = entry.get("behaviors") if isinstance(entry.get("behaviors"), dict) else {}
     debug_notes = entry.get("debug_notes") if isinstance(entry.get("debug_notes"), dict) else {}
     return {"notes": {str(key): str(value) for key, value in notes.items()},
-            "behaviors": {channel: [dict(item) for item in behaviors.get(channel, [])
-                                    if isinstance(item, dict)] for channel in "ABC"},
+            "behaviors": {channel: _valid_named_values(behaviors.get(channel)) for channel in "ABC"},
             "debug_notes": {str(key): str(value) for key, value in debug_notes.items()}}

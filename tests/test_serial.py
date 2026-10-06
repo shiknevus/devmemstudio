@@ -253,6 +253,62 @@ class SerialSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, "Login incorrect"):
             self.session.run("ls", timeout=0.5)
 
+    def test_connect_at_password_prompt_sends_password_not_shell_command(self):
+        class PasswordBoard(FakeBoard):
+            def __init__(self):
+                super().__init__(require_login=True)
+                self._login = "password"
+                self._out = bytearray(b"Password: ")
+                self.lines = []
+
+            def write_line(self, text):
+                self.lines.append(text)
+                return super().write_line(text)
+
+        board = PasswordBoard()
+        with patch("devmem_studio.serial_session.serial.serial_for_url", return_value=board):
+            self.session.connect("fake://port", 115200, "root", "secret", timeout=1)
+        self.assertEqual(board.lines[0], "secret")
+        self.assertEqual(self.session.run("whoami", timeout=1), "out:whoami")
+
+    def test_password_prompt_rejection_does_not_report_connected(self):
+        class RejectPassword(FakeBoard):
+            def __init__(self):
+                super().__init__(require_login=True)
+                self._login = "password"
+                self._out = bytearray(b"Password: ")
+
+            def write_line(self, text):
+                if self._login == "password":
+                    self._out += b"\r\nLogin incorrect\r\nboard login: "
+                    self._login = "login"
+                    return
+                return super().write_line(text)
+
+        board = RejectPassword()
+        with patch("devmem_studio.serial_session.serial.serial_for_url", return_value=board):
+            with self.assertRaisesRegex(CommandError, "用户名或密码错误"):
+                self.session.connect("fake://port", 115200, "root", "bad", timeout=1)
+        self.assertFalse(self.session.alive)
+        self.assertTrue(board.closed)
+
+    def test_late_login_prompt_is_handled_before_enabling_shell(self):
+        with patch.object(self.session, "_recv_text", side_effect=["", "", "board login: "]), \
+                patch.object(self.session, "_read_raw", return_value=b"Password: "), \
+                patch.object(self.session, "_await_shell") as await_shell, \
+                patch.object(self.session, "_send") as send:
+            self.session._auto_login("root", "secret", timeout=1)
+        self.assertEqual([call.args[0] for call in send.call_args_list],
+                         [b"\n", b"root\n", b"secret\n"])
+        await_shell.assert_called_once()
+
+    def test_disconnect_while_waiting_for_password_is_not_swallowed(self):
+        with patch.object(self.session, "_recv_text", return_value="board login: "), \
+                patch.object(self.session, "_read_raw", side_effect=CommandError("port disconnected")), \
+                patch.object(self.session, "_send"):
+            with self.assertRaisesRegex(CommandError, "port disconnected"):
+                self.session._auto_login("root", "secret", timeout=1)
+
     def test_run_before_connect_raises(self):
         with self.assertRaisesRegex(CommandError, "串口未连接"):
             self.session.run("echo hi", timeout=0.5)

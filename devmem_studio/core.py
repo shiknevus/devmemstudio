@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import codecs
+from contextlib import contextmanager
 import copy
 import hashlib
 import hmac
@@ -204,12 +205,22 @@ class ConfigStore:
         cfg["serial_baud"] = baud if baud is not None and 1200 <= baud <= 10000000 else 115200
         for field in ("base", "last_address"):
             try:
+                # Numeric JSON values are ambiguous for hexadecimal addresses and
+                # cannot be passed to QLineEdit.setText. Do not guess an address.
+                if not isinstance(cfg[field], str):
+                    raise ValueError("地址配置须为字符串")
                 validated_address(cfg[field])
             except (ValueError, TypeError):
                 cfg[field] = default_config()[field]
         for field in ("host", "username", "password", "log_path", "top_path",
                       "serial_port", "serial_username", "serial_password"):
             cfg[field] = str(cfg.get(field) or "")
+        for flag, secret in (("remember_password", "password"),
+                             ("remember_serial_password", "serial_password")):
+            # Only an explicit JSON true opts into retaining credentials.
+            cfg[flag] = cfg.get(flag) is True
+            if not cfg[flag]:
+                cfg[secret] = ""
         if not isinstance(cfg.get("write_cache"), dict):
             cfg["write_cache"] = {}
         if cfg.get("inspector_mode") not in ("bits", "write"):
@@ -220,10 +231,11 @@ class ConfigStore:
         data = copy.deepcopy(cfg)
         data.pop("types", None)
         data.pop("categories", None)
-        if not data.get("remember_password"):
-            data["password"] = ""
-        if not data.get("remember_serial_password"):
-            data["serial_password"] = ""
+        for flag, secret in (("remember_password", "password"),
+                             ("remember_serial_password", "serial_password")):
+            data[flag] = data.get(flag) is True
+            if not data[flag]:
+                data[secret] = ""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Replace atomically so loss of power doesn't leave half a JSON document.
         temp_name = None
@@ -310,6 +322,24 @@ def _sftp_remove_quietly(sftp, path):
         sftp.remove(path)
     except Exception:
         pass
+
+
+@contextmanager
+def _atomic_download_target(local_path):
+    """Replace the chosen file only after a complete download; remove partials."""
+    target = Path(local_path)
+    temporary = None
+    try:
+        # Same directory keeps os.replace atomic, including on Windows. Close
+        # this handle before SFTP opens the file (Windows does not share it).
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.",
+                                         suffix=".part", delete=False) as handle:
+            temporary = Path(handle.name)
+        yield temporary
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class SshSession:
@@ -750,7 +780,8 @@ class SshSession:
                     progress(transferred, total)
 
             self.log("CMD", f"get {remote_path} -> {local_path}")
-            sftp.get(remote_path, local_path, callback=callback)
+            with _atomic_download_target(local_path) as temporary:
+                sftp.get(remote_path, str(temporary), callback=callback)
             self.log("INFO", f"{local_path}: {os.path.getsize(local_path)} 字节")
         finally:
             if sftp is not None:
@@ -942,18 +973,19 @@ class DemoSession:
         self.log("CMD", f"get {remote_path} -> {local_path}")
         chunk = max(1, total // 20)
         written = 0
-        with open(source, "rb") as src, open(local_path, "wb") as dst:
-            while True:
-                block = src.read(chunk)
-                if not block:
-                    break
-                dst.write(block)
-                written += len(block)
-                if progress:
-                    progress(min(written, total), total)
-                time.sleep(0.03)
-        if progress:
-            progress(total, total)
+        with _atomic_download_target(local_path) as temporary:
+            with open(source, "rb") as src, open(temporary, "wb") as dst:
+                while True:
+                    block = src.read(chunk)
+                    if not block:
+                        break
+                    dst.write(block)
+                    written += len(block)
+                    if progress:
+                        progress(min(written, total), total)
+                    time.sleep(0.03)
+            if progress:
+                progress(total, total)
         self.log("INFO", f"{local_path}: {os.path.getsize(local_path)} 字节")
 
     def connect(self, *args, **kwargs):
@@ -963,8 +995,9 @@ class DemoSession:
     def read(self, address, quiet=False):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
+        command = read_command(address)
         if not quiet:
-            self.log("CMD", read_command(address))
+            self.log("CMD", command)
         time.sleep(0.008)
         if address not in self.memory:
             offset = address & 0x1FF
@@ -977,8 +1010,9 @@ class DemoSession:
     def write(self, address, width, value, quiet=False):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
+        command = write_command(address, width, value)
         if not quiet:
-            self.log("CMD", write_command(address, width, value))
+            self.log("CMD", command)
         self.memory[address] = value
         return self.read(address, quiet=quiet)
 

@@ -122,51 +122,49 @@ class SerialSession:
         self._recv_text(seconds)
 
     def _auto_login(self, username, password, timeout):
-        """Detect login:/Password: prompts and feed credentials when present.
+        """Handle login/password prompts before declaring the console ready.
 
-        Without prompts the console is treated as an already-logged-in root
-        shell. The handshake stays snappy on quiet consoles: data arrival breaks
-        the wait immediately, and an empty line only needs a short settle before
-        concluding it is a root shell."""
-        # First beat: a console that broadcasts a login:/banner answers fast, so
-        # settle early on data; a truly quiet UART returns in the short window.
+        Quiet consoles are still treated as an already-logged-in shell, but a
+        detected credential prompt must complete the handshake or fail.
+        """
         text = self._recv_text(min(timeout, 0.5))
         if not text.strip():
-            # getty sits silently at login: until it sees Enter: poke it once.
+            # getty may wait for Enter before emitting its login prompt.
             self._send(b"\n")
             text = self._recv_text(min(timeout, 0.5))
-        if _LOGIN_RE.search(text):
-            if not username:
-                raise CommandError("串口控制台停在 login: 提示，请填写串口用户名/密码后重新连接。")
-            self._send((username + "\n").encode())
-            # The password phase honours the connect timeout: a slow board may
-            # take seconds before asking for the password, and a console that
-            # never completes the handshake must fail instead of half-connect.
-            deadline = time.monotonic() + timeout
-            buffer = bytearray(text.encode("utf-8", "replace"))
-            while time.monotonic() < deadline:
-                if self._cancel.is_set():
-                    raise CommandError("连接已取消。")
-                decoded = strip_ansi(buffer.decode("utf-8", "replace"))
-                if _PASSWORD_RE.search(decoded):
-                    self._send((password + "\n").encode())
-                    self._await_shell(deadline)
-                    return
-                if re.search(r"[#$>]\s*$", decoded) and "\n" in decoded:
-                    return  # shell prompt behind us: login completed without password
-                try:
-                    chunk = self._read_raw()
-                except CommandError:
-                    return
-                if chunk:
-                    buffer += chunk
-                time.sleep(0.01)
-            raise CommandError(f"串口登录超时（{timeout:g} 秒未完成握手），请检查控制台状态。")
-        # No login prompt: an async transport may still be surfacing the banner.
-        if not text.strip() and not re.search(r"[#$>]\s", text):
-            text = self._recv_text(0.2, settled=False)
+        if not text.strip():
+            # Inspect this late response *before* choosing the login state.
+            text = self._recv_text(min(timeout, 0.2), settled=False)
+        deadline = time.monotonic() + timeout
+        if _PASSWORD_RE.search(text):
+            # The username may have been entered before this session opened.
+            self._send((password + "\n").encode())
+            self._await_shell(deadline)
+            return
         if not _LOGIN_RE.search(text):
-            return  # quiet console: treat as an already-logged-in root shell
+            return
+        if not username:
+            raise CommandError("串口控制台停在 login: 提示，请填写串口用户名/密码后重新连接。")
+        self._send((username + "\n").encode())
+        buffer = bytearray()
+        while time.monotonic() < deadline:
+            if self._cancel.is_set():
+                raise CommandError("连接已取消。")
+            decoded = strip_ansi(buffer.decode("utf-8", "replace"))
+            if re.search(r"[Ll]ogin incorrect|[Ll]ogin:\s*$", decoded):
+                raise CommandError("串口登录失败：用户名或密码错误。")
+            if _PASSWORD_RE.search(decoded):
+                self._send((password + "\n").encode())
+                self._await_shell(deadline)
+                return
+            if re.search(r"[#$>]\s*$", decoded) and "\n" in decoded:
+                return  # login completed without asking for a password
+            # A dead port is a connection failure, never a successful login.
+            chunk = self._read_raw()
+            if chunk:
+                buffer += chunk
+            time.sleep(0.01)
+        raise CommandError(f"串口登录超时（{timeout:g} 秒未完成握手），请检查控制台状态。")
 
     def _await_shell(self, deadline):
         """After the password: wait for a shell prompt; login rejects slowly (~3s)."""
