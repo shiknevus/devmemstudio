@@ -108,18 +108,19 @@ class UiTests(unittest.TestCase):
         self.window.resize(1280, 800)
         self.settle()
         self.assertTrue(self.window._compact_layout)
-        self.assertFalse(self.window.target_label.isVisible())
         self.assertEqual(self.window.inspector.minimumWidth(), 240)
         self.assertEqual(self.window.search.minimumWidth(), 105)
-        self.assertEqual(self.window.log_search.minimumWidth(), 140)
+        self.assertEqual(self.window.log_search.minimumWidth(), 100)
 
         self.window.resize(1540, 960)
         self.settle()
         self.assertFalse(self.window._compact_layout)
-        self.assertTrue(self.window.target_label.isVisible())
+        title = self.window.module_title
+        self.assertGreaterEqual(title.width(), min(title.maximumWidth(), title.sizeHint().width()) - 1,
+                                "the component title keeps its room in the desktop title row")
         self.assertEqual(self.window.inspector.minimumWidth(), 270)
         self.assertEqual(self.window.search.minimumWidth(), 145)
-        self.assertEqual(self.window.log_search.minimumWidth(), 240)
+        self.assertEqual(self.window.log_search.minimumWidth(), 120)
 
     def test_inspector_tab_is_remembered_across_selection(self):
         window = self.window
@@ -190,7 +191,10 @@ class UiTests(unittest.TestCase):
         self.assertTrue(self.window.serial_connected)
         self.assertEqual(connected_serial, {"port": "COM9", "baud": 115200,
                                             "username": "root", "password": "secret"})
-        self.assertEqual(self.window.serial_connect_button.text(), "断开连接")
+        self.assertEqual(self.window.serial_connect_button.text(), "断开")
+        self.assertEqual(self.window.serial_section.summary.text(), "COM9 · 115200")
+        self.assertEqual(self.window.serial_section.dot.property("state"), "connected")
+        self.assertFalse(self.window.serial_section.is_expanded())
         # 连接成功路径必须清掉竞态残留的取消标志（否则下一次失败会被误报为“已取消”）。
         self.assertFalse(self.window._serial_cancel_requested)
         # 终端来源=serial 时终端提示符可输入、命令走串口会话。
@@ -226,9 +230,16 @@ class UiTests(unittest.TestCase):
         class SlowSerial(SerialSession):
             def connect(self, port, baud, username, password, timeout):
                 release.wait(5)   # hold the handshake open so the busy state is observable
+                self._test_alive = True
+
+            @property
+            def alive(self):
+                # A mock handshake has no real serial handle. Model liveness so
+                # the periodic heartbeat cannot randomly disconnect this fixture.
+                return getattr(self, "_test_alive", False)
 
             def close(self):
-                pass
+                self._test_alive = False
 
         with patch("devmem_studio.window.SerialSession", SlowSerial):
             self.window.serial_port.addItem("USB Serial Port (COM9)", "COM9")
@@ -237,13 +248,13 @@ class UiTests(unittest.TestCase):
             self.settle(lambda: self.window._serial_busy)
             self.assertTrue(self.window.progress.isVisible())
             self.assertEqual(self.window.progress.maximum(), 0)   # 0..0 = indeterminate
-            self.assertIn("连接中", self.window.com_badge.text())
-            self.assertEqual(self.window.com_badge.property("state"), "connecting")
+            self.assertIn("连接中", self.window.serial_section.dot.toolTip())
+            self.assertEqual(self.window.serial_section.dot.property("state"), "connecting")
             release.set()
             self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
         self.assertTrue(self.window.progress.isHidden())
-        self.assertIn("已连接", self.window.com_badge.text())
-        self.assertEqual(self.window.com_badge.property("state"), "connected")
+        self.assertIn("已连接", self.window.serial_section.dot.toolTip())
+        self.assertEqual(self.window.serial_section.dot.property("state"), "connected")
 
     def test_esc_cancels_serial_handshake(self):
         """Esc（cancel_task）必须能中止串口握手：serial 独立于 _busy 门控运行，

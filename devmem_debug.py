@@ -64,6 +64,15 @@ def main():
     window.show()
     if available.width() <= 1400 or available.height() <= 850:
         window.showMaximized()
+    launcher = os.environ.get('DEVMEMSTUDIO_LAUNCHER')
+    if launcher and sys.platform == 'win32' and not args.offscreen:
+        from devmem_studio.taskbar import bind_relaunch
+        bind_relaunch(int(window.winId()), launcher)   # pin the single EXE, not its runtime cache
+    from PySide6.QtCore import QTimer
+    import threading
+    from devmem_studio.core import preload_ssh
+    # SSH stack warms up once the window is painted; a connect issued earlier just waits on the import.
+    QTimer.singleShot(300, lambda: threading.Thread(target=preload_ssh, name='ssh-preload', daemon=True).start())
     return app.exec()
 
 

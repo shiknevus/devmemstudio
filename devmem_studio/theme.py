@@ -22,6 +22,10 @@ PATHS = {
     "refresh": '<path d="M20 7v5h-5M4 17v-5h5M6 7a7 7 0 0 1 12-2l2 3M4 16l2 3a7 7 0 0 0 12-2"/>',
     "terminal": '<path d="m4 6 5 6-5 6m8 0h8"/>',
     "export": '<path d="M14 3h7v7m-1-6-9 9M10 4H4v16h16v-6"/>',
+    "import": '<path d="M14 3h5v18H5v-5M3 10h10m-4-4 4 4-4 4"/>',
+    "folder": '<path d="M3 6h7l2 3h9v11H3z"/>',
+    "package": '<path d="m3 7 9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4m-9 4v10m-5-16 10 4"/>',
+    "clear": '<path d="M4 7h16M9 7V3h6v4M6 7l1 14h10l1-14M10 10v7m4-7v7"/>',
     "play": '<path d="m8 4 12 8-12 8z"/>',
     "stop": '<rect x="5" y="5" width="14" height="14" rx="1"/>',
     "help": '<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5m0 3h.01"/>',
@@ -51,8 +55,6 @@ STYLE = """
 QMainWindow, QDialog { background: #EFF3F7; }
 QWidget#workspace { background: #EFF3F7; }
 QWidget#sidebar { background: #142635; }
-QScrollArea#sidebarScroll, QScrollArea#sidebarScroll > QWidget { background: #142635; border: none; }
-QScrollArea#sidebarScroll QScrollBar::handle:vertical { background: #3A5468; }
 QWidget#sidebar QLabel { color: #ACBCCB; background: transparent; }
 QWidget#sidebar QLabel#brand { color: white; font-family: "Microsoft YaHei UI"; font-size: 20px; font-weight: 600; }
 QWidget#sidebar QLabel#sideCaption { color: #8097AA; font-size: 11px; }
@@ -66,11 +68,34 @@ QWidget#sidebar IpAddressField[focused="true"] { border-color: #74A7F5; }
 QWidget#sidebar IpAddressField:disabled { background: #1C303F; }
 QWidget#sidebar QLineEdit#ipOctet { background: transparent; border: none; min-height: 22px; max-height: 22px; padding: 0; }
 QWidget#sidebar QLabel#ipDot { background: transparent; color: #ACBCCB; font-size: 13px; }
-/* Sidebar combos keep the light combo form; their embedded edit must not pick
-   up the dark sidebar QLineEdit style (the id selector would otherwise win). */
-QWidget#sidebar QComboBox QLineEdit { background: transparent; border: none; padding: 0; min-height: 0; color: #23374A; }
-QWidget#sidebar QComboBox QLineEdit:disabled { color: #91A0B0; }
+/* Sidebar combos share the dark field form; the popup list keeps the same palette. */
+QWidget#sidebar QComboBox { background: #203747; color: #EBF1F8; border: 1px solid #365061; padding: 0 2px 0 9px; }
+QWidget#sidebar QComboBox:hover, QWidget#sidebar QComboBox:focus { border-color: #74A7F5; }
+QWidget#sidebar QComboBox:disabled { background: #1C303F; color: #839AAB; }
+QWidget#sidebar QComboBox::down-arrow { border-top-color: #8FA4B6; }
+QWidget#sidebar QComboBox QAbstractItemView { background: #203747; color: #EBF1F8; border: 1px solid #365061; selection-background-color: #2F6FBF; selection-color: #FFFFFF; }
+QWidget#sidebar QComboBox QLineEdit { background: transparent; border: none; padding: 0; min-height: 0; color: #EBF1F8; }
+QWidget#sidebar QComboBox QLineEdit:disabled { color: #839AAB; }
 QWidget#sidebar QCheckBox { color: #ACBCCB; font-size: 11px; }
+QWidget#sidebar QCheckBox::indicator { background: #203747; border: 1px solid #4A6476; }
+QWidget#sidebar QCheckBox::indicator:checked { background: #2463DC; border-color: #2463DC; }
+QWidget#sidebar QCheckBox::indicator:disabled { background: #1C303F; border-color: #2E4555; }
+QWidget#sidebar QCheckBox::indicator:checked:disabled { background: #3A5C8E; border-color: #3A5C8E; }
+/* Connection card: one line per channel (status dot, name, target, action). */
+QFrame#connectionCard { background: #192E3D; border: 1px solid #2B4456; border-radius: 8px; }
+QFrame#channelDivider { background: #2B4456; max-height: 1px; border: none; }
+QPushButton#channelToggle { background: transparent; border: none; border-radius: 5px; min-height: 30px; max-height: 30px; padding: 0; }
+QPushButton#channelToggle:hover { background: #22394A; }
+QWidget#sidebar QLabel#channelName { color: #EAF1F8; font-size: 12px; font-weight: 600; }
+QWidget#sidebar QLabel#channelSummary { color: #8EA3B5; font-size: 11px; }
+QWidget#sidebar QLabel#statusDot { background: #5C7488; border-radius: 4px; }
+QWidget#sidebar QLabel#statusDot[state="connected"] { background: #3CCB8A; }
+QWidget#sidebar QLabel#statusDot[state="connecting"] { background: #74A7F5; }
+QWidget#sidebar QLabel#statusDot[state="demo"] { background: #E0A84A; }
+QFrame#connectionCard QPushButton#primary, QFrame#connectionCard QPushButton#danger { min-height: 26px; max-height: 26px; padding: 0 10px; }
+QFrame#connectionCard QPushButton#danger { background: transparent; color: #F49A9A; border: 1px solid #6E3E4A; }
+QFrame#connectionCard QPushButton#danger:hover { background: #3A2733; color: #FFB4B4; }
+QFrame#connectionCard QPushButton#danger:pressed { background: #4A2C38; }
 QWidget#sidebar QPushButton#demo { background: transparent; color: #ACBDD0; border: 1px solid #3B5264; }
 QWidget#sidebar QPushButton#demo:hover { background: #233D50; color: white; }
 QWidget#sidebar QPushButton#nav { background: transparent; color: #AEBDCC; border: none; border-radius: 6px; text-align: left; padding: 9px 12px; min-height: 24px; }
@@ -108,6 +133,9 @@ QComboBox { padding-right: 22px; }
    combo looks like a field nested inside a field. Same form as the plain ones. */
 QComboBox QLineEdit { background: transparent; border: none; padding: 0; min-height: 0; selection-background-color: #DCE9FF; }
 QComboBox::drop-down { width: 22px; border: none; }
+/* Compact controls need smaller padding as well as a narrower outer box. */
+QComboBox[compact="true"] { padding: 0 5px; padding-right: 16px; }
+QComboBox[compact="true"]::drop-down { width: 16px; }
 QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #7B8EA0; width: 0; height: 0; }
 QComboBox QAbstractItemView { background: white; selection-background-color: #E5EEFC; selection-color: #2463DC; border: 1px solid #D5DEE7; padding: 4px; }
 QComboBox QAbstractItemView::item { padding: 2px 8px; min-height: 19px; }
@@ -128,6 +156,7 @@ QPushButton#flat { background: transparent; border: 1px solid transparent; color
 QPushButton#flat:hover { background: #E9F0FA; color: #2463DC; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #718397; min-height: 28px; padding: 0 11px; }
 QPushButton#tab:checked { background: #E4EDFC; color: #245DC4; border: 1px solid #D2E1FA; }
+QPushButton#tab[compact="true"] { padding: 0 3px; }
 QPushButton#rowRead { background: transparent; border: none; min-height: 26px; padding: 0 4px; color: #2463DC; }
 QPushButton#rowRead:hover { background: #DDEAFE; }
 QTableWidget { background: white; alternate-background-color: #F8FAFC; border: none; outline: none; gridline-color: #EFF3F7; selection-background-color: #E6EFFD; selection-color: #1F4F9B; }

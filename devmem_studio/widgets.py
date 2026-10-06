@@ -2,7 +2,8 @@
 from PySide6.QtCore import QEvent, Qt, QRectF, Signal, QObject, QRunnable
 from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
-                               QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy)
+                               QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy, QStyle,
+                               QStyleOptionComboBox, QStylePainter)
 from . import completion
 from .theme import icon
 
@@ -14,6 +15,62 @@ def label(text, name=None):
     if name == "badge":
         item.setFixedHeight(32)   # matches QPushButton/QComboBox: min-height 30 + 1px border
     return item
+
+
+class ElidedLabel(QLabel):
+    """Plain-text label that elides visually but retains full text and tooltip."""
+    def __init__(self, text="", name=None, parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self._extra_tooltip = ""
+        self.setTextFormat(Qt.PlainText)
+        if name:
+            self.setObjectName(name)
+        if name == "badge":
+            self.setFixedHeight(32)
+        self.setMinimumWidth(0)
+        self.setText(text)
+
+    def text(self):
+        return self._full_text
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self.setAccessibleName(self._full_text)
+        self._render_text()
+        self.updateGeometry()
+
+    def setToolTip(self, text):
+        self._extra_tooltip = str(text)
+        self._render_text()
+
+    def _render_text(self):
+        if not hasattr(self, "_full_text"):
+            return
+        # contentsRect already excludes QSS padding (badges), so only margin() is left to remove.
+        available = max(0, self.contentsRect().width() - self.margin() * 2)
+        displayed = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, available)
+        super().setText(displayed)
+        tooltip = self._full_text
+        if self._extra_tooltip and self._extra_tooltip != tooltip:
+            tooltip += "\n" + self._extra_tooltip
+        super().setToolTip(tooltip)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        margins = self.contentsMargins()
+        hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._full_text)
+                          + margins.left() + margins.right() + self.margin() * 2))
+        return hint
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_text()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._render_text()
 
 
 def button(text, slot=None, name=None, glyph=None):
@@ -58,6 +115,8 @@ class IpAddressField(QWidget):
     Typing into one octet moves the caret to the next when it fills, and the
     surrounding QSS treats the whole group as one input (the rounded border
     wraps all four octets with the dots between them)."""
+    changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # Plain QWidget subclasses don't paint their QSS box (border/background)
@@ -75,6 +134,7 @@ class IpAddressField(QWidget):
             edit.setAlignment(Qt.AlignCenter)
             edit.setValidator(QIntValidator(0, 255))
             edit.textEdited.connect(lambda text, idx=i: self._on_edited(idx, text))
+            edit.textChanged.connect(self.changed)
             # QSS has no :focus-within; toggle a dynamic property on group focus so
             # the whole field highlights like a plain QLineEdit.
             edit.installEventFilter(self)
@@ -125,16 +185,22 @@ class IpAddressField(QWidget):
         self.octets[0].setFocus()
 
 
-def password_field(title, echo=QLineEdit.Password):
+def password_field(title, echo=QLineEdit.Password, extra=None):
     """QLineEdit with the eyes action drawn inside the field's trailing edge.
 
     addAction renders the icon inside the input box (integrated, not an attached
-    button); clicking it toggles mask/plain and swaps the icon for feedback."""
+    button); clicking it toggles mask/plain and swaps the icon for feedback.
+    `extra` (e.g. a remember checkbox) sits right-aligned on the title line."""
     container = QWidget()
     outer = QVBoxLayout(container)
     outer.setContentsMargins(0, 0, 0, 0)
     outer.setSpacing(5)
-    outer.addWidget(label(title, "muted"))
+    title_label = label(title, "muted")
+    if extra is None:
+        outer.addWidget(title_label)
+    else:
+        extra.setFixedHeight(title_label.sizeHint().height())   # keeps the edit aligned with its row peers
+        outer.addLayout(row(title_label, 1, extra, spacing=6))
     edit = QLineEdit()
     edit.setEchoMode(echo)
     reveal = edit.addAction(icon("eye", "#9DB3C5", 17), QLineEdit.TrailingPosition)
@@ -149,9 +215,9 @@ def password_field(title, echo=QLineEdit.Password):
     return edit, container
 
 
-def divider():
+def divider(name="divider"):
     line = QFrame()
-    line.setObjectName("divider")
+    line.setObjectName(name)
     line.setFixedHeight(1)
     return line
 
@@ -165,6 +231,89 @@ def restyle(widget):
 class ComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
+
+
+class ElidedComboBox(ComboBox):
+    """Closed state elides long item text; the popup widens to show it in full."""
+    def paintEvent(self, event):
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        painter.drawComplexControl(QStyle.CC_ComboBox, option)
+        text_rect = self.style().subControlRect(QStyle.CC_ComboBox, option, QStyle.SC_ComboBoxEditField, self)
+        option.currentText = self.fontMetrics().elidedText(option.currentText, Qt.ElideRight,
+                                                           max(0, text_rect.width() - 2))
+        painter.drawControl(QStyle.CE_ComboBoxLabel, option)
+
+    def showPopup(self):
+        widest = max((self.fontMetrics().horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        self.view().setMinimumWidth(max(self.width(), widest + 36))
+        super().showPopup()
+
+
+class ChannelSection(QFrame):
+    """One connection channel: status dot, name, target summary and its connect
+    button on a single line; the settings body folds away below it."""
+    expandedChanged = Signal(bool)
+
+    def __init__(self, name, body, action, parent=None):
+        super().__init__(parent)
+        self.setObjectName("channel")
+        self.body = body
+        self.toggle = QPushButton()
+        self.toggle.setObjectName("channelToggle")
+        self.toggle.setCheckable(True)
+        self.toggle.setCursor(Qt.PointingHandCursor)
+        self.toggle.setFocusPolicy(Qt.NoFocus)
+        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.toggle.setAccessibleName(f"{name} 连接设置")
+        inner = QHBoxLayout(self.toggle)
+        inner.setContentsMargins(8, 0, 4, 0)
+        inner.setSpacing(7)
+        self.dot = QLabel()
+        self.dot.setObjectName("statusDot")
+        self.dot.setFixedSize(8, 8)
+        self.name = label(name, "channelName")
+        self.summary = ElidedLabel("", "channelSummary")
+        self.summary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.chevron = QLabel()
+        self.chevron.setFixedSize(14, 14)
+        for part in (self.dot, self.name, self.summary, self.chevron):
+            part.setAttribute(Qt.WA_TransparentForMouseEvents)   # the whole line is the toggle
+            inner.addWidget(part, 1 if part is self.summary else 0)
+        header = QHBoxLayout()
+        header.setContentsMargins(4, 5, 8, 5)
+        header.setSpacing(6)
+        header.addWidget(self.toggle, 1)
+        header.addWidget(action)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addLayout(header)
+        layout.addWidget(body)
+        self.toggle.toggled.connect(self._apply)
+        self._apply(False)
+
+    def _apply(self, expanded):
+        self.body.setVisible(expanded)
+        self.chevron.setPixmap(icon("down" if expanded else "chevron", "#8FA4B6", 14).pixmap(14, 14))
+        self.expandedChanged.emit(expanded)
+
+    def is_expanded(self):
+        return self.toggle.isChecked()
+
+    def set_expanded(self, expanded):
+        self.toggle.setChecked(bool(expanded))
+
+    def set_state(self, state, text):
+        if self.dot.property("state") != state:
+            self.dot.setProperty("state", state)
+            restyle(self.dot)
+        self.dot.setToolTip(text)
+
+    def set_summary(self, text, tooltip=""):
+        self.summary.setText(text)
+        self.toggle.setToolTip((tooltip or text) + "\n点击展开 / 收起连接参数")
 
 
 class DecodedFieldsView(QFrame):

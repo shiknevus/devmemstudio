@@ -26,15 +26,16 @@ DROP_BIN_SUBSTR = (
     '/imageformats/qpdf.dll',    # 0.04 MB —— 无 PDF 图像加载
     'libssl-3.dll',              # 0.79 MB OpenSSL TLS —— SSH 用 cryptography，无需 ssl 模块
     '_ssl.pyd',                  # 0.18 MB —— 无代码 import ssl（见 excludes 'ssl'）
+    'ucrtbase.dll',              # 1.1 MB —— Win10+ 始终使用系统 UCRT，随包副本不会被加载
+    'libcrypto-3.dll',           # 5.2 MB —— 唯一 importer 是 _hashlib；hashlib 回退内置 _sha2/_md5 等，paramiko 走 cryptography
+    '_hashlib.pyd',              # 0.07 MB —— 见 excludes '_hashlib'（无 pbkdf2_hmac/scrypt 使用）
+    '/qminimal.dll',             # 0.06 MB 平台插件 —— 仅用 qwindows/qoffscreen
 )
-# 仅保留 zh_CN 与 en 的 Qt 翻译，其余 ~100 个 qm 不打包
-KEEP_TRANSLATION = ('qt_zh_CN.qm', 'qtbase_zh_CN.qm', 'qt_en.qm', 'qtbase_en.qm')
-KEEP_TRANSLATION_BASE = ('qtbase_zh_CN.qm', 'qtbase_en.qm')
 
-
-def _keep_translation(name: str) -> bool:
-    n = name.rstrip('/').rsplit('/', 1)[-1].lower()
-    return any(k.lower() == n for k in KEEP_TRANSLATION)
+# 单文件启动器对整个运行库做 LZMS 压缩；PYZ/PKG 先存储不压缩，避免 zlib 后再压不动
+from PyInstaller.archive.writers import CArchiveWriter, ZlibArchiveWriter
+ZlibArchiveWriter._COMPRESSION_LEVEL = 0
+CArchiveWriter._COMPRESSION_LEVEL = 0
 
 
 a = Analysis(
@@ -42,9 +43,11 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=[(str(root / 'assets/logo.svg'), 'assets'),
+           (str(root / 'assets/bitpack/pack_bit.exe'), 'assets/bitpack'),
+           (str(root / 'assets/bitpack/使用说明.txt'), 'assets/bitpack'),
            (str(root / 'THIRD_PARTY_NOTICES.md'), '.'),
            (str(root / 'devmem_studio/data/component_catalog.json'), 'devmem_studio/data')],
-    hiddenimports=['devmem_studio.smoke'],
+    hiddenimports=['devmem_studio.smoke', 'devmem_studio.taskbar'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -53,6 +56,8 @@ a = Analysis(
               'PySide6.QtPdf', 'PySide6.QtVirtualKeyboard', 'PySide6.QtNetwork',
               'PySide6.QtOpenGL', 'PySide6.QtWebChannel', 'PySide6.QtWebSockets',
               'ssl',  # SSH 走 paramiko(用 cryptography)，无 TLS；排除后一并剔除 _ssl.pyd / libssl-3.dll
+              'invoke',  # paramiko 仅在 ssh_config "Match exec" 时可选导入；本程序不解析 ssh_config
+              '_hashlib',  # OpenSSL 版 hashlib；内置 _sha2/_md5/_sha1/_sha3/_blake2 覆盖全部所用算法
               'PySide6.QtBluetooth', 'PySide6.QtNfc', 'PySide6.QtPositioning',
               'PySide6.QtSerialPort', 'PySide6.QtSql', 'PySide6.QtTest', 'PySide6.QtCharts',
               'PySide6.QtDataVisualization', 'PySide6.QtHelp', 'PySide6.QtDesigner',
@@ -73,14 +78,13 @@ for dest, src, typecode in a.binaries:
     kept.append((dest, src, typecode))
 a.binaries = kept
 
-# ---- 精简 datas：translations 只留 zh_CN/en ----
+# ---- 精简 datas：程序不安装 QTranslator，Qt 翻译全部不打包 ----
 kept_datas = []
 for dest, src, typecode in a.datas:
     srcL = src.replace('\\', '/').lower()
     if 'pyside6' in srcL and '/translations/' in srcL:
-        if not _keep_translation(srcL):
-            dropped.append(('translation', src.split('\\')[-1]))
-            continue
+        dropped.append(('translation', src.split('\\')[-1]))
+        continue
     kept_datas.append((dest, src, typecode))
 a.datas = kept_datas
 
@@ -89,16 +93,12 @@ if dropped:
     for d in dropped:
         print(f'  - {d[0]}  {d[1]}')
 
+# Runtime staging directory; tools/build_singlefile.py embeds it into the single distributed EXE.
 pyz = PYZ(a.pure)
 exe = EXE(
-    pyz, a.scripts, a.binaries, a.datas, [],
-    name='DevmemStudio',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    disable_windowed_traceback=False,
-    icon=str(root / 'assets/devmem.ico'),
-    version=str(root / 'assets/version_info.txt'),
+    pyz, a.scripts, [], exclude_binaries=True,
+    name='DevmemStudio', debug=False, bootloader_ignore_signals=False,
+    strip=False, upx=False, console=False, disable_windowed_traceback=False,
+    icon=str(root / 'assets/devmem.ico'), version=str(root / 'assets/version_info.txt'),
 )
+bundle = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='_runtime')

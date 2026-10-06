@@ -1,4 +1,4 @@
-# 寄存器调试工作台 4.1.8
+# 寄存器调试工作台 4.2.0
 
 作者：szzhang / cgliu / bxli
 
@@ -30,6 +30,55 @@
 - 解析出的寄存器表/信号名/行为表/DEBUG 语义**立即覆盖**内置定义并作用于该类型组件（正在查看的组件自动刷新）
 - 定义持久化到 `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json`，重启自动加载；删除该文件即恢复内置定义
 - 与生成器同源（`devmem_studio/component_parse.py`），两端解析结果一致
+
+## 4.2.0 发布（2026-10-07）
+
+**连接卡片重做 · 单文件更小更快 · 集成打包工具 · 单行响应式工具栏**
+
+### 连接卡片：每个通道一行，一键连接
+
+![连接卡片：离线收起、展开参数、已连接三种状态](docs/connection-card.png)
+
+- 左栏「设备连接」改为一张卡片，**SSH 与 serial 各占一行**：状态圆点（灰＝离线、蓝＝连接中、绿＝已连接、橙＝演示）＋通道名＋连接目标摘要（如 `192.168.1.10`、`COM35 · 115200`）＋右侧「连接 / 断开 / 取消」按钮。已保存过参数时，打开软件直接点该行的「连接」即可，不必展开表单。
+- 点击通道行展开参数，**一次只展开一个通道**（手风琴式），另一行自动收起，组件目录始终保留足够高度；连接成功后该通道自动收起，连接失败（非用户取消）自动展开以便修改参数；主板地址或用户名为空、或未选择串口时点「连接」，会展开对应通道并定位到待填项。首次使用（未填主板地址）默认展开 SSH。
+- 参数区更紧凑：「记住密码」移到密码标题右侧，不再单独占一行；串口下拉、波特率、复选框统一为侧栏深色样式；串口列表以 `COM35 · 设备描述` 显示，端口号在前，过长时省略号截断、展开列表可看全名；未接串口时摘要显示「未检测到串口」。
+- 在任一参数输入框中按 **Enter** 即连接该通道；Esc 仍可取消正在进行的连接。
+- 小窗口不再弹出独立的「连接设置」对话框：卡片收起后只占两行，直接在左栏操作。连接状态统一在卡片上显示，寄存器标题行去掉了重复的 SSH / serial 徽章和会话摘要，组件标题与类型徽标在常规窗口下完整显示（同时修复类型徽标在空间足够时仍被省略的问题）。
+
+### 集成打包工具与响应式工具栏
+
+- 会话终端新增「打包bit」（「上传bit」左侧），打开与工作台共用配色、字体、卡片、输入框和蓝色主按钮的 **PySide6 打包弹窗**。Bit_pack 2.0.1 仅作为后台 CLI 引擎，不显示原生窗口或控制台；无需连接设备，寄存器任务也不影响本地打包。
+- 支持「选择文件」与「选择文件夹」：选择/拖入文件夹后，在后台递归扫描 `.bit`，从下拉列表选择要打包的文件（包含子目录，跳过目录联接和符号链接）。也可直接选择、粘贴或拖入 `.bit`。填写项目号与输出目录，生成 `项目号_bit_yyyyMMddHHmmss.zip`，ZIP 根目录只有 `sunny_fpga.bit`；也可勾选仅复制。沿用原引擎的源文件保留、快照、防重名、内容校验、超时与安全清理。
+- **项目号、上次选择目录（文件/文件夹）、输出目录及所选文件自动记忆**，保存于工作台 `registers.json` 的 `bitpack_settings`；软件重启后恢复。曾选择文件夹时重新扫描并恢复上次选中的文件，已记忆的输出目录不会被新源文件自动覆盖。
+- 任务阶段实时显示。复制已有 `sunny_fpga.bit` 前须确认；取消或关闭弹窗/工作台时，通过每个任务独立的 Windows 命名事件请求取消，**等待引擎清理完毕后关闭**，不直接杀死打包进程。重复点击复用弹窗并保留已填写的字段。
+- 打包按钮与日志搜索、筛选等保持 **同一行**，不拆为两行。空间不足时次要按钮显示图标，极小窗口下 bit 操作也切换为图标；寄存器工具栏与窄侧栏的导入按钮同样响应可用宽度；悬停与无障碍名称始终保留完整说明。窗口变宽后恢复文字。
+- 紧凑模式日志筛选显示「全部 / 错误 / 命令」，来源显示「log / ssh / serial / sys」，完整名称可在悬停中查看；长设备名、组件类型和连接目标以省略号显示但保留原始文本与完整提示。搜索箭头隐藏时仍可用 Enter / Shift+Enter 跳到下一个/上一个匹配。
+- **小窗口左栏固定为 300 px**，连接卡片两个通道均收起，组件目录树占据主要空间；左栏不再是滚动区，只有目录树自身滚动，避免嵌套上下滚动条；放大窗口后恢复可拖动左栏。
+- 选择框按可用宽度压缩：权限选择显示「全部 / 只读 / 读写」，轮询预设省去空格，位宽/进制选择框收窄；完整说明放在悬停提示中。显示压缩不改变实际访问位宽、进制或正在输入的轮询草稿。
+- 图标语义区分：**导入 top＝箭头进入文件；上传 bit＝向上箭头；下载 log＝向下箭头；打包 bit＝包裹**。
+- 打包引擎与说明随单文件 EXE 一同分发，不依赖 `D:\bitfile` 或本机 Python。引擎按内容哈希原子释放到 `%LOCALAPPDATA%\DevmemStudio\tools\bitpack\<SHA256>\pack_bit.exe`。弹窗优先恢复上次选择与输出目录；首次使用时选择目录取已导入 top 的所在目录（无 top 时取工作台目录），未指定的输出目录自动跟随源文件。
+
+![统一风格的打包窗口](docs/bitpack-dialog.png)
+
+### 单文件发布：更小、启动更快
+
+发布物仍是**一个** `DevmemStudio.exe`，复制这一个文件即可使用，无需 `_internal/`、Python 或任何安装。
+
+| 指标 | 4.1.8 单文件 | 4.2.0 单文件 |
+|---|---:|---:|
+| EXE 体积 | 31.5 MB | **19.6 MB**（-38%） |
+| 日常启动（中位数） | 3.09 秒（每次都解压） | **0.75 秒**（-76%） |
+| 新版本首次启动 | 3.27 秒 | 3.50 秒（仅一次，含解压与杀毒扫描） |
+
+同一台机器、同一时段交替实测，每个版本 2 轮 × 5 次，计时到主窗口可响应。
+
+- **原理**：外层是一个约 140 KB 的原生启动器，内嵌用 Windows 自带 LZMS 算法压缩的运行库（不额外携带解压器）。每个版本只在首次启动时解压一次到 `%LOCALAPPDATA%\DevmemStudio\runtime\<版本-内容哈希>\`，之后每次启动只核对文件大小与时间戳后直接运行，省去旧单文件版每次启动都要解压几十 MB 的开销。首次启动的解压本身不到 1 秒，其余主要是杀毒软件扫描新释放的 DLL，一次性完成。
+- **安全与自愈**：解压前校验整个运行库的 SHA-256；先写入临时目录，完整后再原子改名生效，中途断电或被杀不会留下半成品；缓存文件被改动、缺失或损坏时自动重新解压；运行期间缓存文件以只读共享方式锁定。同时打开多个实例互不干扰。
+- **自动清理**：升级后，旧版本缓存在不被任何实例使用时自动删除（正在运行的旧版本不受影响）。
+- **设置位置不变**：`registers.json` 仍保存在 EXE 旁边（不可写时回落到 `%LOCALAPPDATA%\DevmemStudio\`），沿用旧版设置只需把原 `registers.json` 放到新 EXE 旁。发布包不含本机 `registers.json`、设备密码或日志。
+- **任务栏固定**：窗口属于缓存中的运行库进程，4.2.0 为窗口设置了应用标识与重新启动命令，固定到任务栏后再次点击启动的是外层 EXE，而不是缓存路径。
+- **启动更轻**：SSH 库（paramiko / cryptography）改为窗口出现后在后台预加载，首次连接无需等待；剔除未使用的 `invoke`、OpenSSL 版 hashlib（含 5.2 MB 的 `libcrypto-3.dll`，摘要算法由 Python 内置实现提供）、随包 UCRT 副本、Qt 翻译与多余平台插件。完整 SSH 回环测试在相同剔除条件下全部通过。
+- 测量方法与原始数据见 `docs/startup-performance.md`。
 
 ## 4.1.8 发布（2026-10-06）
 
@@ -320,18 +369,18 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 直接运行 EXE
 
-双击 **`dist/DevmemStudio.exe`**。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库以及所需的 Visual C++ 运行库，无需安装 Python 或配置 venv。首次启动需要将运行库解压到系统临时目录，通常比后续启动稍慢。
+解压发布 ZIP，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`（约 75 MB，仅一次），之后直接复用。
 
-可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
+可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
 
-本次产物已在当前 Windows 11 x64 系统上验收；验收时 EXE 被复制到独立目录，PATH 仅保留 Windows 系统目录，并清除了 Python / venv 环境变量。
+本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
 ## 使用流程
 
-1. 填写设备地址、端口、用户名和密码，点击「SSH连接」。设备端需要 SSH、可用的 shell 和 `devmem` 命令。需要串口控制台时，在下方 serial 区选本机端口、波特率与登录凭据，点击「serial连接」。安静且已经登录的控制台可以留空凭据；板端停在 `login:` 时必须填写用户名和密码，密码错误会在连接阶段直接失败。SSH 与 serial 两条连接相互独立、可同时在线，右上角徽章分别显示状态。Esc 可取消正在进行的连接。
+1. 左栏「设备连接」卡片：点 SSH 行展开，填写主板地址、端口、用户名和密码，点该行右侧「连接」（或在输入框中按 Enter）。设备端需要 SSH、可用的 shell 和 `devmem` 命令。需要串口控制台时，点 serial 行展开，选本机端口、波特率与登录凭据后连接。安静且已经登录的控制台可以留空凭据；板端停在 `login:` 时必须填写用户名和密码，密码错误会在连接阶段直接失败。SSH 与 serial 两条连接相互独立、可同时在线，各行的状态圆点分别显示状态；参数保存过之后，下次打开直接点该行「连接」即可。Esc 可取消正在进行的连接。
 2. 连接前点击左侧「导入 top」选择 `emcc_mix_top.sv` 等顶层文件；组件目录按类型列出全部组件（可按设备名 / 类型 / 地址搜索，禁用组件灰色），点击组件即加载该类型的精确寄存器表并自动读取。基地址自动取自 `components_param.vh`。
 3. 用「基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部」页签切换视图。选中寄存器后右侧显示完整地址、HEX / DEC、位状态及字段解析，并沿用上次的「写入设置 / 解析与位状态」（只读寄存器仍显示解析页）。在「写入设置」编辑数值或选预设，点击「写入并回读」。「批量写入」先预览再执行。
-4. 「上传bit」选择或拖入 `*.bit`（严格校验后缀，非 bit 文件提示「选中文件不是bit文件」），上传前确认文件路径与日期，确认后先传为 `sunny_fpga.bit.uploading`，传完再把旧文件备份为 `sunny_fpga.bit_时间戳` 并换入为 `sunny_fpga.bit`（传输失败时板端原 bit 不受影响）；「回退bit」列出板端时间戳备份，选择后当前 bit 先备份、所选版本恢复为 `sunny_fpga.bit`；「下载log」把板端 `sunny.log` 保存到本地。
+4. 本地发布包：点「打包bit」，选择或拖入 `.bit`，填写项目号并确认输出目录，点「开始打包」；无需连接设备，源文件保留。「上传bit」选择或拖入 `*.bit`（严格校验后缀，非 bit 文件提示「选中文件不是bit文件」），上传前确认文件路径与日期，确认后先传为 `sunny_fpga.bit.uploading`，传完再把旧文件备份为 `sunny_fpga.bit_时间戳` 并换入为 `sunny_fpga.bit`（传输失败时板端原 bit 不受影响）；「回退bit」列出板端时间戳备份，选择后当前 bit 先备份、所选版本恢复为 `sunny_fpga.bit`；「下载log」把板端 `sunny.log` 保存到本地。
 5. 会话终端即 shell：来源选择器切到 `ssh` / `serial`，在终端底部 `❯` 提示行输入 shell 命令。`←`/`→` 在行内移动光标，Tab 补全命令或板端路径，`↑`/`↓` 翻历史，回车执行。来源为 `tail log` 时查看板端 `sunny.log` 实时流（SSH 连上后自动后台打印），`system` 查看软件自身运行日志。点击「查找日志」随输随查，Ctrl+F 填充选中文字。点击「导出」保存当前终端内容。
 6. RTL 组件内部修改后点「导入组件」，选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义并立即生效，定义持久化到本机。
 
@@ -340,7 +389,8 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 ## 界面与功能
 
 - 石墨蓝侧栏、浅灰工作区、统一按钮和状态色、等宽地址与数据字体、矢量图标。
-- 可调整寄存器区、终端区与检查器尺寸；支持 Windows DPI 缩放，较小窗口中的侧栏和检查器可滚动。宽度或高度低于 1400×850 时自动收紧侧栏、检查器和标题行，窗口限制在当前屏幕工作区内。
+- 连接卡片：SSH / serial 每通道一行（状态圆点、连接目标、连接按钮），参数按需展开、一次一个。
+- 可调整寄存器区、终端区与检查器尺寸；支持 Windows DPI 缩放，较小窗口中的检查器可滚动。宽度或高度低于 1400×850 时自动收紧侧栏、检查器和标题行，窗口限制在当前屏幕工作区内。
 - 搜索名称、分组、偏移或完整地址；按全部、只读、可读写、动作筛选。
 - 待写入默认 HEX。切换 HEX / DEC 只改变解释方式，已填文本保持不变；预设按当前进制填入。访问位宽、写入值范围与地址对齐仍会校验。
 - 32 位状态视图以及 `irq1`、`irq2`、`a/b/c rpt` 的字段名、位区间和指定进制解析。
@@ -377,6 +427,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 | Enter | 查找下一处匹配 |
 | Ctrl+L | 聚焦会话终端 |
 | Ctrl+Shift+S | 导出寄存器快照 |
+| Enter（连接参数输入框内） | 连接该通道（SSH 或 serial） |
 | Esc | 停止后续批量操作 / 取消 SSH 或串口连接 |
 | ↑ / ↓ | 会话终端提示行浏览历史并执行 |
 | ← / → | 在提示行内移动光标 |
@@ -397,7 +448,9 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 重新打包
 
-双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller。构建后会隔离启动 EXE 验收，并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.1.8）。
+双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller 生成运行库目录（`build\dist\_runtime`，仅作中间产物），由 `tools\build_singlefile.py` 压缩并封装成单文件，随后隔离验收单文件 EXE 并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和发布包 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.2.0）。
+
+构建单文件启动器需要 MinGW-w64 的 **x86_64** 编译器（`x86_64-w64-mingw32-gcc` / `x86_64-w64-mingw32-windres` 在 PATH 中；本机 `D:\MinGW64\mingw-w64-gcc-14.3-stable-r43\bin` 已具备）。启动器源码在 `tools/runtime_launcher/launcher.c`，只依赖 Windows 自带的 Cabinet（LZMS 解压）、bcrypt（SHA-256）、kernel32 与 user32。
 
 也可手动执行：
 
@@ -406,12 +459,17 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 .\venv\Scripts\python.exe tools\make_icon.py
 .\venv\Scripts\python.exe -m unittest discover -s tests -v
 .\venv\Scripts\python.exe devmem_debug.py --offscreen --smoke-test artifacts\source-smoke
-.\venv\Scripts\python.exe -m PyInstaller --noconfirm DevmemStudio.spec
+.\venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build\dist DevmemStudio.spec
+.\venv\Scripts\python.exe tools\build_singlefile.py
 .\venv\Scripts\python.exe tools\verify_exe.py
 .\venv\Scripts\python.exe tools\make_release.py
 ```
 
-构建配置仅打包程序代码、图标和依赖，**不打包当前 `registers.json`、原版备份或测试中的设备配置**。完整依赖版本见 `requirements-lock.txt`。
+复测启动速度：`.\venv\Scripts\python.exe tools\benchmark_startup.py --exe dist\DevmemStudio.exe --output artifacts\startup-singlefile --runs 5`（独立桌面、隔离的配置与缓存目录，不影响本机设置）。
+
+内置引擎和说明位于 `assets/bitpack/`；C 源码已集成到 `tools/bitpack/`，保留原工程并增加阶段输出与命名事件取消接口。修改引擎后运行 `powershell -ExecutionPolicy Bypass -File tools/build_bitpack.ps1`（需要 MinGW-w64 gcc / windres），脚本更新内置 EXE；随后按上面步骤重新构建工作台。工作台构建直接使用已附带的引擎 EXE，不依赖外部 `D:\bitfile`。不要直接用未带集成接口的旧引擎替换内置 EXE。
+
+构建配置仅打包程序代码、图标、内置打包工具和依赖，**不打包当前 `registers.json`、原版备份或测试中的设备配置**。完整依赖版本见 `requirements-lock.txt`。
 
 打包实现参考 [PyInstaller 的独立运行机制](https://pyinstaller.org/en/stable/operating-mode.html)；界面基于 [Qt for Python](https://doc.qt.io/qtforpython-6/)。第三方组件说明见 `THIRD_PARTY_NOTICES.md`。
 
@@ -421,6 +479,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 |---|---|
 | 本机连接设置、模块地址、写入值记忆 | 程序旁 `registers.json` |
 | 程序目录不可写时的配置 | `%LOCALAPPDATA%\DevmemStudio\registers.json` |
+| 单文件运行库缓存（每版本一份，旧版自动清理） | `%LOCALAPPDATA%\DevmemStudio\runtime\<版本-哈希>\` |
 | SSH 已知主机指纹 | `%LOCALAPPDATA%\DevmemStudio\known_hosts` |
 | 主机密钥更新前的备份 | `%LOCALAPPDATA%\DevmemStudio\known_hosts.backup-时间-编号` |
 | 会话日志、异常日志 | `%LOCALAPPDATA%\DevmemStudio\logs\` |
@@ -437,7 +496,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 - 本机真实 SSH 回环测试：Paramiko 加密连接、读写回读、命令失败退出码、超时失效、断线检测、独立日志通道和分片 UTF-8 输出。
 - 主机密钥变化恢复：拒绝未确认的密钥、确认后重连、更新前备份、保留其他主机、默认端口和非默认端口、哈希主机名、记录变动保护及再次变化时重新核对。
 - 日志查找：分片高亮、普通文本与中文/表情定位、大小写、键盘跳转、循环查找、实时增量、旧行淘汰、清空和主窗口并行读写。
-- EXE 离线验收：模块切换、搜索筛选、预设与进制、自动轮询、取消、日志、导出、小窗口、DPI 和退出。
+- EXE 离线验收：模块切换、搜索筛选、预设与进制、自动轮询、取消、日志、导出、小窗口、DPI 和退出；单文件首次解压、缓存损坏自愈、旧版本缓存清理与并发首启。
 
 未连接或改写实际开发板。实际硬件上的权限、总线访问行为、寄存器副作用和板端日志路径仍需在现场验证。
 
@@ -457,11 +516,13 @@ devmem_studio/
   widgets.py / theme.py    控件、矢量图标与统一样式
   dialogs.py               批量预览、日志与使用指南
   log_view.py              日志高亮、匹配统计与查找跳转
+  taskbar.py               单文件版任务栏标识（固定后重新启动外层 EXE）
   smoke.py                 可在 EXE 内运行的离线验收
 assets/                    图标与 Windows 版本资源
 tests/                     核心、RTL、SSH、串口和界面回归
-tools/                     图标生成、组件目录生成及隔离 EXE 验证
-DevmemStudio.spec           单文件打包配置
+tools/                     图标生成、组件目录生成、单文件封装、隔离 EXE 验证与启动测速
+  runtime_launcher/        单文件原生启动器（LZMS 解压、缓存校验与清理）
+DevmemStudio.spec           运行库打包配置（单文件由 tools/build_singlefile.py 封装）
 ```
 
 刷新组件寄存器目录（RTL 寄存器定义变更后；schema 2 起同时收割参数注释与行为表）：
