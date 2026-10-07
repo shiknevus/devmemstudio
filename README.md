@@ -1,4 +1,4 @@
-# 寄存器调试工作台 4.2.0
+# 寄存器调试工作台 4.2.1
 
 作者：szzhang / cgliu / bxli
 
@@ -30,6 +30,12 @@
 - 解析出的寄存器表/信号名/行为表/DEBUG 语义**立即覆盖**内置定义并作用于该类型组件（正在查看的组件自动刷新）
 - 定义持久化到 `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json`，重启自动加载；删除该文件即恢复内置定义
 - 与生成器同源（`devmem_studio/component_parse.py`），两端解析结果一致
+
+## 4.2.1 发布（2026-10-07）
+
+- 修复 SSH 与 serial 连接设置中两个「记住密码」复选框底部被裁切的问题：标题行按控件实际尺寸自动布局，在 100%、125%、150%、200% 缩放下完整显示，用户名与密码输入框保持对齐。
+- 应用版本与 Windows 文件/产品版本同步更新为 **4.2.1**。发布包为 `DevmemStudio-4.2.1-win64.zip`，内含单文件 `DevmemStudio.exe`。
+- 本版本测试、构建与独立运行验收结果见 [4.2.1 验收记录](docs/VALIDATION_4.2.1.md)。
 
 ## 4.2.0 发布（2026-10-07）
 
@@ -450,7 +456,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 重新打包
 
-双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller 生成运行库目录（`build\dist\_runtime`，仅作中间产物），由 `tools\build_singlefile.py` 压缩并封装成单文件，随后隔离验收单文件 EXE 并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和发布包 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.2.0）。
+双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller 生成运行库目录（`build\dist\_runtime`，仅作中间产物），由 `tools\build_singlefile.py` 压缩并封装成单文件，随后隔离验收单文件 EXE 并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和发布包 `dist/DevmemStudio-<版本>-win64.zip`（当前 4.2.1）。
 
 构建单文件启动器需要 MinGW-w64 的 **x86_64** 编译器（`x86_64-w64-mingw32-gcc` / `x86_64-w64-mingw32-windres` 在 PATH 中；本机 `D:\MinGW64\mingw-w64-gcc-14.3-stable-r43\bin` 已具备）。启动器源码在 `tools/runtime_launcher/launcher.c`，只依赖 Windows 自带的 Cabinet（LZMS 解压）、bcrypt（SHA-256）、kernel32 与 user32。
 

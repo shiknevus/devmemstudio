@@ -199,7 +199,8 @@ def password_field(title, echo=QLineEdit.Password, extra=None):
     if extra is None:
         outer.addWidget(title_label)
     else:
-        extra.setFixedHeight(title_label.sizeHint().height())   # keeps the edit aligned with its row peers
+        # Let the title row fit both the label and the extra control after styling.
+        # A checkbox's indicator can be taller than the label's initial size hint.
         outer.addLayout(row(title_label, 1, extra, spacing=6))
     edit = QLineEdit()
     edit.setEchoMode(echo)
