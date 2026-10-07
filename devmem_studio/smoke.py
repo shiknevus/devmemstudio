@@ -161,14 +161,21 @@ def run_smoke(app, directory: Path):
             check(pack_dialog.status.property("state") == "connected", "Folder selection packs the chosen bit with the real engine")
             with zipfile.ZipFile(pack_dialog._result_path) as archive:
                 check(archive.read("sunny_fpga.bit") == b"nested fixture", "Folder-selected archive contains the selected file, not another bit")
+            pack_dialog.nopack.setChecked(True)
             preferences = pack_dialog.preference_snapshot()
             check(window.cfg.get("bitpack_settings") == preferences,
-                  "Project and selected/output directories are passed to the main configuration")
+                  "Project, copy-only mode and selected/output directories are passed to the main configuration")
             restored = BitPackDialog(window, directory, preferences)
             restored.show()
             settle(lambda: not restored.busy and restored.source_combo.count() == 2, timeout=30)
             check(restored.project.text() == "目录界面验收" and restored.output.text() == str(pack_directory)
                   and restored.source.text() == str(nested_bit), "New styled dialog restores project, directories and selected file")
+            check(restored.nopack.isChecked() and not restored.project.isEnabled(),
+                  "New styled dialog restores copy-only mode and keeps the remembered project disabled")
+            pack_dialog.nopack.setChecked(False)
+            check(window.cfg["bitpack_settings"]["nopack"] is False
+                  and pack_dialog.project.text() == "目录界面验收" and pack_dialog.project.isEnabled(),
+                  "Unchecking copy-only mode is remembered and re-enables the retained project")
             restored.close()
             restored.deleteLater()
             pack_dialog.grab().save(str(directory / "bitpack-folder.png"))

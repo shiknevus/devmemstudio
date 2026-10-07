@@ -154,7 +154,10 @@ class BitPackTests(unittest.TestCase):
         value = bitpack.normalize_preferences({"project": 123, "source_directory": [],
             "output_directory": {"bad": True}, "source_path": "x" * 33000, "source_mode": "unknown"})
         self.assertEqual(value, {"project": "", "source_directory": "", "output_directory": "",
-                                 "source_path": "", "source_mode": "file"})
+                                 "source_path": "", "source_mode": "file", "nopack": False})
+        for flag in (True, False, "false", "true", 1, None):
+            with self.subTest(nopack=flag):
+                self.assertEqual(bitpack.normalize_preferences({"nopack": flag})["nopack"], flag is True)
 
     def test_cancel_events_are_unique_and_idempotently_closed(self):
         first, second = bitpack.CancelEvent(), bitpack.CancelEvent()

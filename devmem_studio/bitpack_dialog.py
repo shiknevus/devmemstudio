@@ -99,6 +99,7 @@ class BitPackDialog(QDialog):
         fields.addLayout(row(self.output, self.choose_output))
         self.nopack = QCheckBox("仅复制为 sunny_fpga.bit，不压缩")
         self.nopack.toggled.connect(lambda on: self.project.setEnabled(not on and not self.busy))
+        self.nopack.setChecked(self._preferences["nopack"])
         self.timeout = QSpinBox()
         self.timeout.setRange(1, 86400)
         self.timeout.setValue(300)
@@ -139,6 +140,7 @@ class BitPackDialog(QDialog):
         QShortcut(QKeySequence("Alt+O"), self, self.output.setFocus)
         self.project.textChanged.connect(lambda _: self._remember_state())
         self.output.textChanged.connect(lambda _: self._remember_state())
+        self.nopack.toggled.connect(lambda _: self._remember_state())
         self.source_combo.currentIndexChanged.connect(self._source_selected)
         self.source.textEdited.connect(self._source_edited)
         self.source.editingFinished.connect(self._commit_source_edit)
@@ -151,7 +153,7 @@ class BitPackDialog(QDialog):
     def preference_snapshot(self):
         return {"project": self.project.text(), "source_directory": self._source_directory,
                 "output_directory": self.output.text(), "source_path": self.source.text(),
-                "source_mode": self._source_mode}
+                "source_mode": self._source_mode, "nopack": self.nopack.isChecked()}
 
     def _remember_state(self):
         if not self._updating_source:

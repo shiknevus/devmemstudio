@@ -107,6 +107,7 @@ def normalize_preferences(value) -> dict:
         limit = 63 if key == "project" else 32760
         result[key] = text if isinstance(text, str) and len(text) <= limit else ""
     result["source_mode"] = "folder" if raw.get("source_mode") == "folder" else "file"
+    result["nopack"] = raw.get("nopack") is True
     return result
 
 
