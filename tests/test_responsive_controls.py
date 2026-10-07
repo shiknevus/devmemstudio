@@ -169,7 +169,7 @@ class ResponsiveControlsTests(unittest.TestCase):
         self.assertEqual(self.window.log_filter.toolTip(), "仅错误")
         self.assertEqual(self.window.console_source_combo.currentData(), "com")
         self.assertEqual(self.window.console_source, "com")
-        self.assertIn("串口会话日志", self.window.console_source_combo.toolTip())
+        self.assertIn("串口终端", self.window.console_source_combo.toolTip())
         self.assertEqual(self.window.log_filter.width(), 88)
         self.resize(1540, 960)
         self.assertEqual(self.window.log_filter.currentText(), "仅错误")
@@ -180,7 +180,7 @@ class ResponsiveControlsTests(unittest.TestCase):
     def test_log_source_tooltip_tracks_each_selected_channel_in_tiny_mode(self):
         self.resize(960, 620)
         for key, text in (("log", "板端 sunny.log 流"), ("ssh", "SSH 会话日志"),
-                          ("com", "串口会话日志"), ("system", "软件运行日志")):
+                          ("com", "串口终端"), ("system", "软件运行日志")):
             self.window.console_source_combo.setCurrentIndex(self.window.console_source_combo.findData(key))
             self.assertEqual(self.window.console_source_combo.currentData(), key)
             self.assertEqual(self.window.console_source, key)

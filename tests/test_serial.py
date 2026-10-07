@@ -1,99 +1,73 @@
-"""Exercise SerialSession against a deterministic in-process fake serial port.
-
-The fake replaces ``serial.serial_for_url`` with a synchronous board emulator
-(line-driven console + marker protocol), so there is no TCP/thread timing to
-flake: the "board" responds the moment a line completes."""
-import re
+"""SerialSession against an in-process fake port: streaming, keystrokes, unplug,
+auto-login and the U-Boot catch. The fake board answers synchronously inside
+write(), so only the pump thread's own polling adds latency."""
+import threading
+import time
 import unittest
 from unittest.mock import patch
+
+from serial.serialutil import SerialException
 
 from devmem_studio.core import CommandError
 from devmem_studio.serial_session import SerialSession
 
-from serial.serialutil import SerialException
 
-
-class FakeBoard:
-    """Line-oriented console the client talks to, streaming UART-style output.
-
-    The console is fully synchronous: whatever the client writes is answered
-    before the next read, exactly like a real UART with echo off."""
-    def __init__(self, require_login=False):
-        self.require_login = require_login
-        self.commands = []
-        self._login = "login" if require_login else None
-        self._last_exit = 0
+class FakePort:
+    """Thread-safe UART stand-in; `script(written_bytes)` lets a test play the board."""
+    def __init__(self, script=None):
+        self.script = script or (lambda port, data: None)
+        self.written = bytearray()
         self._out = bytearray()
+        self._lock = threading.Lock()
         self.is_open = True
-        self.closed = False
-        if require_login:
-            # A console in login-wait actively broadcasts the prompt until creds.
-            self._out += b"board login: "
+        self.unplugged = False
 
-    def write_line(self, text):
-        if self._login == "login":
-            # The login: banner was already emitted at construction; a getty
-            # prompts for a password once the username has been submitted.
-            self._out += b"Password: "
-            self._login = "password"
-            return
-        if self._login == "password":
-            self._out += b"\r\nboard# \r\n"
-            self._login = None
-            return
-        if text == "stty -echo":
-            return
-        if text.startswith("printf ") and "__DM_" in text:
-            found = re.search(r"__DM_([0-9a-f]+)_", text)
-            if found:
-                self._out += ("\r\n__DM_%s_%d__\r\nboard# \r\n"
-                              % (found.group(1), self._last_exit)).encode()
-            return
-        self.commands.append(text)
-        self._last_exit = 0
-        if text == "fail":
-            self._out += b"Error 13: Permission denied\r\n"
-            self._last_exit = 7
-        else:
-            self._out += ("out:" + text + "\r\n").encode()
+    def emit(self, text):
+        with self._lock:
+            self._out += text.encode("utf-8") if isinstance(text, str) else text
 
-    # -- client-facing serial API --
+    def unplug(self):
+        self.unplugged = True
+
     @property
     def in_waiting(self):
-        return len(self._out)
+        if self.unplugged:
+            raise SerialException("ClearCommError failed (PermissionError(13, 'device gone'))")
+        with self._lock:
+            return len(self._out)
 
     def read(self, size):
-        if not self._out:
-            return b""
-        take = self._out[:size]
-        del self._out[:size]
-        return bytes(take)
+        with self._lock:
+            data = bytes(self._out[:size])
+            del self._out[:size]
+            return data
 
     def write(self, data):
-        if not self.is_open:
-            raise SerialException("port is not open")
-        buf = data
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            text = line.strip().decode("utf-8", "replace")
-            if text:
-                self.write_line(text)
+        if not self.is_open or self.unplugged:
+            raise SerialException("WriteFile failed")
+        self.written += data
+        self.script(self, bytes(data))
         return len(data)
 
-    def flush(self):
-        pass
-
     def close(self):
-        self._out.clear()
         self.is_open = False
-        self.closed = True
+
+
+def wait_for(condition, seconds=3.0):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
 
 
 class SerialSessionTests(unittest.TestCase):
     def setUp(self):
-        self.logs = []
-        self.session = SerialSession(lambda level, message: self.logs.append((level, message)))
-        self.board = None
+        self.logs, self.data, self.lost, self.uboot = [], [], [], []
+        self.session = SerialSession(lambda level, text: self.logs.append((level, text)),
+                                     on_data=self.data.append, on_lost=self.lost.append,
+                                     on_uboot=self.uboot.append)
         self._patcher = None
 
     def tearDown(self):
@@ -101,222 +75,140 @@ class SerialSessionTests(unittest.TestCase):
         if self._patcher:
             self._patcher.stop()
 
-    def connect(self, require_login=False, username="", password="", timeout=2):
-        self.board = FakeBoard(require_login=require_login)
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: self.board)
+    def connect(self, port, username="", password=""):
+        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url", lambda *a, **k: port)
         self._patcher.start()
-        self.session.connect("fake://port", 115200, username, password, timeout=timeout)
-        return self.board
+        self.session.connect("fake://port", 115200, username, password)
+        return port
 
-    def test_connect_auto_login_and_run(self):
-        board = self.connect()
+    def received(self):
+        return "".join(self.data)
+
+    def test_connect_sends_nothing_and_streams_unsolicited_output(self):
+        port = self.connect(FakePort())
+        port.emit("[  12.5] usb 1-1: new device\r\n")
+        port.emit("Hit any key to stop autoboot:  4 ")
+        self.assertTrue(wait_for(lambda: "autoboot" in self.received()))
+        self.assertEqual(bytes(port.written), b"")   # a connect must never stop autoboot by itself
         self.assertTrue(self.session.alive)
-        self.assertEqual(self.session.run("pwd", timeout=2), "out:pwd")
-        self.assertEqual(board.commands, ["pwd"])
-        self.assertEqual(self.session.last_exit, 0)
 
-    def test_login_prompt_without_password_times_out(self):
-        """A console that shows login: but never completes the handshake must
-        fail with a timeout instead of half-connecting as a silent shell."""
-        class StuckLogin(FakeBoard):
-            def write_line(self, text):
-                if self._login == "login":
-                    self._login = "password"   # consume the username, emit nothing
-                    return
-                return super().write_line(text)
+    def test_keystrokes_go_out_in_order(self):
+        port = self.connect(FakePort())
+        for key in (b"l", b"s", b"\t", b"\x1b[A", b"\r", b"&"):
+            self.session.send(key)
+        self.assertTrue(wait_for(lambda: bytes(port.written) == b"ls\t\x1b[A\r&"))
 
-        board = StuckLogin(require_login=True)
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: board)
-        self._patcher.start()
-        with self.assertRaisesRegex(CommandError, "串口登录超时"):
-            self.session.connect("fake://port", 115200, "root", "secret", timeout=0.5)
+    def test_split_utf8_is_decoded_across_reads(self):
+        port = self.connect(FakePort())
+        encoded = "中文".encode("utf-8")
+        port.emit(encoded[:2])
+        time.sleep(0.05)
+        port.emit(encoded[2:])
+        self.assertTrue(wait_for(lambda: self.received() == "中文"))
+
+    def test_unplug_reports_lost_once_and_closes(self):
+        port = self.connect(FakePort())
+        port.unplug()
+        self.assertTrue(wait_for(lambda: self.lost))
+        time.sleep(0.05)
+        self.assertEqual(len(self.lost), 1)
+        self.assertIn("已断开", self.lost[0])
         self.assertFalse(self.session.alive)
+        with self.assertRaises(CommandError):
+            self.session.send(b"x")
 
-    def test_run_captures_exit_code_and_raises_on_failure(self):
-        self.connect()
-        with self.assertRaisesRegex(CommandError, "退出码 7"):
-            self.session.run("fail", timeout=2)
-        self.assertEqual(self.session.last_exit, 7)
-        self.assertTrue(self.session.alive)  # a failed command does not drop the session
-
-    def test_login_prompt_feeds_credentials(self):
-        board = self.connect(require_login=True, username="root", password="secret")
-        self.assertTrue(self.session.alive)
-        self.assertEqual(self.session.run("whoami", timeout=2), "out:whoami")
-        # board saw the login handshake (username -> Password: -> password)
-        self.assertEqual(board.commands, ["whoami"])
-
-    def test_no_login_prompt_is_root_shell(self):
-        board = self.connect()
-        self.assertEqual(self.session.run("pwd", timeout=2), "out:pwd")
-        self.assertFalse(board.require_login)
-
-    def test_delayed_banner_still_detects_login(self):
-        """A transport that surfaces the boot banner a few reads late must not
-        miss the login handshake. The fake hides the prompt until read N."""
-        board = self.connect(require_login=True, username="root", password="secret")
-
-        class Delayed(FakeBoard):
-            def __init__(self, **kw):
-                super().__init__(**kw)
-                self._reads = 0
-                self._delay = 3
-                self._banner_sent = False
-
-            @property
-            def in_waiting(self):
-                self._reads += 1
-                if self._reads <= self._delay:
-                    return 0
-                return super().in_waiting
-
-            def read(self, size):
-                if self._reads <= self._delay:
-                    self._reads += 1
-                    return b""
-                return super().read(size)
-
-        delayed = Delayed(require_login=True)
-        self._patcher.stop()
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: delayed)
-        self._patcher.start()
+    def test_intentional_close_is_not_reported_as_lost(self):
+        self.connect(FakePort())
         self.session.close()
-        self.session.connect("fake://port", 115200, "root", "secret", timeout=2)
-        self.assertTrue(self.session.alive)
-        self.assertEqual(self.session.run("whoami", timeout=2), "out:whoami")
-        self.assertEqual(delayed.commands, ["whoami"])
-
-    def _quiet_login_board(self):
-        """Real getty: silent at login: until it receives an Enter."""
-        class QuietLogin(FakeBoard):
-            def __init__(self):
-                super().__init__(require_login=True)
-                self._out.clear()
-                self._poked = False
-
-            def write(self, data):
-                if not self._poked and data.strip() == b"":
-                    self._poked = True
-                    self._out += b"\r\nPetaLinux Sunny-Linux /dev/ttyPS0\r\n\rSunny-Linux login: "
-                    return len(data)
-                return super().write(data)
-
-        board = QuietLogin()
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: board)
-        self._patcher.start()
-        return board
-
-    def test_quiet_login_prompt_is_woken_and_logged_in(self):
-        board = self._quiet_login_board()
-        self.session.connect("fake://port", 115200, "root", "root", timeout=2)
-        self.assertTrue(board._poked)
-        self.assertEqual(self.session.run("ls", timeout=2), "out:ls")
-        self.assertEqual(board.commands, ["ls"])
-
-    def test_quiet_login_prompt_without_username_fails_fast(self):
-        self._quiet_login_board()
-        with self.assertRaisesRegex(CommandError, "请填写串口用户名"):
-            self.session.connect("fake://port", 115200, "", "", timeout=2)
+        time.sleep(0.05)
+        self.assertEqual(self.lost, [])
         self.assertFalse(self.session.alive)
 
-    def test_wrong_password_fails_connect(self):
-        class Reject(FakeBoard):
-            def write_line(self, text):
-                if self._login == "password":
-                    self._out += b"\r\nLogin incorrect\r\nboard login: "
-                    self._login = "login"
-                    return
-                return super().write_line(text)
+    def test_auto_login_answers_getty_with_saved_credentials(self):
+        def board(port, data):
+            if data == b"root\r":
+                port.emit("root\r\nPassword: ")
+            elif data == b"secret\r":
+                port.emit("\r\nroot@board:~# ")
+        port = self.connect(FakePort(board), "root", "secret")
+        port.emit("\r\nboard login: ")
+        self.assertTrue(wait_for(lambda: ("SYSTEM", "串口已自动登录。") in self.logs))
+        self.assertEqual(bytes(port.written), b"root\rsecret\r")
 
-        board = Reject(require_login=True)
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: board)
-        self._patcher.start()
-        with self.assertRaisesRegex(CommandError, "用户名或密码错误"):
-            self.session.connect("fake://port", 115200, "root", "bad", timeout=2)
-        self.assertFalse(self.session.alive)
+    def test_wrong_password_stops_auto_login(self):
+        def board(port, data):
+            if data == b"root\r":
+                port.emit("root\r\nPassword: ")
+            elif data == b"bad\r":
+                port.emit("\r\nLogin incorrect\r\nboard login: ")
+        port = self.connect(FakePort(board), "root", "bad")
+        port.emit("board login: ")
+        self.assertTrue(wait_for(lambda: any(level == "ERROR" for level, _ in self.logs)))
+        time.sleep(0.5)
+        self.assertEqual(bytes(port.written), b"root\rbad\r")   # no endless retry
+        self.assertIn("用户名或密码错误", self.logs[-1][1])
 
-    def test_timeout_reports_received_tail(self):
-        class Mute(FakeBoard):
-            def write_line(self, text):
-                self._out += b"Login incorrect\r\n"
+    def test_unrelated_password_prompt_is_never_answered(self):
+        port = self.connect(FakePort(), "root", "secret")
+        port.emit("root@board:~# passwd\r\nNew password: ")
+        time.sleep(0.5)
+        self.assertEqual(bytes(port.written), b"")
 
-        board = Mute()
-        self._patcher = patch("devmem_studio.serial_session.serial.serial_for_url",
-                              lambda *a, **k: board)
-        self._patcher.start()
-        self.session.connect("fake://port", 115200, timeout=0.5)
-        with self.assertRaisesRegex(TimeoutError, "Login incorrect"):
-            self.session.run("ls", timeout=0.5)
+    def test_login_prompt_without_username_is_left_to_the_user(self):
+        port = self.connect(FakePort())
+        port.emit("board login: ")
+        time.sleep(0.5)
+        self.assertEqual(bytes(port.written), b"")
 
-    def test_connect_at_password_prompt_sends_password_not_shell_command(self):
-        class PasswordBoard(FakeBoard):
-            def __init__(self):
-                super().__init__(require_login=True)
-                self._login = "password"
-                self._out = bytearray(b"Password: ")
-                self.lines = []
+    def test_uboot_catch_holds_key_until_prompt(self):
+        def board(port, data):
+            if data == b"&" and port.written.count(b"&") == 3:   # this U-Boot ignores a lone tap
+                port.emit("\x08\x08\x08 0 \r\nZynqMP> ")
+        port = self.connect(FakePort(board))
+        self.session.arm_uboot_stop(b"&")
+        port.emit("U-Boot 2018.01\r\n")
+        time.sleep(0.1)
+        self.assertEqual(bytes(port.written), b"")   # nothing before the countdown
+        port.emit("Hit any key to stop autoboot:  4 ")
+        self.assertTrue(wait_for(lambda: self.uboot == [True]))
+        self.assertEqual(bytes(port.written), b"&&&\x03")
+        self.assertFalse(self.session.uboot_armed)
 
-            def write_line(self, text):
-                self.lines.append(text)
-                return super().write_line(text)
+    def test_uboot_catch_gives_up_once_the_kernel_starts(self):
+        port = self.connect(FakePort())
+        self.session.arm_uboot_stop(b"&")
+        port.emit("Hit any key to stop autoboot:  4 ")
+        self.assertTrue(wait_for(lambda: b"&" in port.written))
+        port.emit("\x08\x08\x08 0 \r\nStarting kernel ...\r\n")
+        self.assertTrue(wait_for(lambda: self.uboot == [False]))
+        sent = len(port.written)
+        time.sleep(0.15)
+        self.assertEqual(len(port.written), sent)
 
-        board = PasswordBoard()
-        with patch("devmem_studio.serial_session.serial.serial_for_url", return_value=board):
-            self.session.connect("fake://port", 115200, "root", "secret", timeout=1)
-        self.assertEqual(board.lines[0], "secret")
-        self.assertEqual(self.session.run("whoami", timeout=1), "out:whoami")
+    def test_busy_or_missing_port_gives_actionable_message(self):
+        for error, hint in (("could not open port 'COM35': PermissionError(13, '拒绝访问。', None, 5)", "被占用"),
+                            ("could not open port 'COM99': FileNotFoundError(2, '系统找不到指定的文件。')", "找不到串口")):
+            def refuse(*args, **kwargs):
+                raise SerialException(error)
+            with patch("devmem_studio.serial_session.serial.serial_for_url", refuse):
+                with self.assertRaises(CommandError) as raised:
+                    self.session.connect("COM35", 115200)
+            self.assertIn(hint, str(raised.exception))
 
-    def test_password_prompt_rejection_does_not_report_connected(self):
-        class RejectPassword(FakeBoard):
-            def __init__(self):
-                super().__init__(require_login=True)
-                self._login = "password"
-                self._out = bytearray(b"Password: ")
+    def test_cancel_before_connect_wins(self):
+        self.session.cancel_connect()
+        with patch("devmem_studio.serial_session.serial.serial_for_url", lambda *a, **k: FakePort()):
+            with self.assertRaises(CommandError) as raised:
+                self.session.connect("COM35", 115200)
+        self.assertIn("已取消", str(raised.exception))
 
-            def write_line(self, text):
-                if self._login == "password":
-                    self._out += b"\r\nLogin incorrect\r\nboard login: "
-                    self._login = "login"
-                    return
-                return super().write_line(text)
+    def test_send_before_connect_raises(self):
+        with self.assertRaises(CommandError):
+            self.session.send(b"x")
 
-        board = RejectPassword()
-        with patch("devmem_studio.serial_session.serial.serial_for_url", return_value=board):
-            with self.assertRaisesRegex(CommandError, "用户名或密码错误"):
-                self.session.connect("fake://port", 115200, "root", "bad", timeout=1)
-        self.assertFalse(self.session.alive)
-        self.assertTrue(board.closed)
-
-    def test_late_login_prompt_is_handled_before_enabling_shell(self):
-        with patch.object(self.session, "_recv_text", side_effect=["", "", "board login: "]), \
-                patch.object(self.session, "_read_raw", return_value=b"Password: "), \
-                patch.object(self.session, "_await_shell") as await_shell, \
-                patch.object(self.session, "_send") as send:
-            self.session._auto_login("root", "secret", timeout=1)
-        self.assertEqual([call.args[0] for call in send.call_args_list],
-                         [b"\n", b"root\n", b"secret\n"])
-        await_shell.assert_called_once()
-
-    def test_disconnect_while_waiting_for_password_is_not_swallowed(self):
-        with patch.object(self.session, "_recv_text", return_value="board login: "), \
-                patch.object(self.session, "_read_raw", side_effect=CommandError("port disconnected")), \
-                patch.object(self.session, "_send"):
-            with self.assertRaisesRegex(CommandError, "port disconnected"):
-                self.session._auto_login("root", "secret", timeout=1)
-
-    def test_run_before_connect_raises(self):
-        with self.assertRaisesRegex(CommandError, "串口未连接"):
-            self.session.run("echo hi", timeout=0.5)
-
-    def test_file_transfer_methods_refused(self):
-        self.connect()
-        for name in ("upload_bitfile", "list_bit_backups", "rollback_bit", "download_file"):
-            self.assertFalse(hasattr(self.session, name), f"serial must not expose {name}")
+    def test_no_command_protocol_or_file_transfer(self):
+        for name in ("run", "upload_bitfile", "download_file", "list_bit_backups", "rollback_bit", "start_stream"):
+            self.assertFalse(hasattr(self.session, name), name)
 
 
 if __name__ == "__main__":

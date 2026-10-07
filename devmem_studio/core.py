@@ -14,6 +14,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
+import posixpath
 import re
 import select
 import shlex
@@ -47,6 +48,22 @@ def preload_ssh():
         pass   # the connect itself reports a broken SSH stack
 
 DEFAULT_LOG_PATH = "/run/media/sda/sunny.log"
+DEFAULT_BIT_DIR = "/run/media/sda"
+BIT_DIR_HISTORY = 10
+
+
+def normalize_remote_dir(text) -> str:
+    """Absolute board directory: ' /run/media/sda/ ' -> '/run/media/sda'."""
+    raw = str(text or "").strip().replace("\\", "/")
+    if not raw.startswith("/") or any(ord(char) < 0x20 for char in raw):
+        raise ValueError("板端目录须为以 / 开头的绝对路径，例如 /run/media/sda。")
+    return "/" + posixpath.normpath(raw).lstrip("/")
+
+
+def remember_dir(history, directory, limit=BIT_DIR_HISTORY) -> list[str]:
+    """Most-recent-first directory list with `directory` moved to the front."""
+    items = [item for item in history if isinstance(item, str) and item and item != directory]
+    return [directory, *items][:limit]
 
 # 寄存器按批读：每批一条 shell 命令一次往返，批大小兼顾 PTY 行缓冲与进度粒度
 BATCH_READ_CHUNK = 32
@@ -180,7 +197,8 @@ def default_config() -> dict:
             "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
             "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits",
-            "bitpack_settings": {}}
+            "bitpack_settings": {}, "bit_remote_dir": DEFAULT_BIT_DIR, "bit_remote_dirs": [DEFAULT_BIT_DIR],
+            "bit_local_dir": ""}
 
 
 class ConfigStore:
@@ -252,6 +270,18 @@ class ConfigStore:
             cfg["write_cache"] = {}
         if cfg.get("inspector_mode") not in ("bits", "write"):
             cfg["inspector_mode"] = "bits"
+        try:
+            cfg["bit_remote_dir"] = normalize_remote_dir(cfg.get("bit_remote_dir"))
+        except ValueError:
+            cfg["bit_remote_dir"] = DEFAULT_BIT_DIR
+        history = []
+        for item in cfg.get("bit_remote_dirs") if isinstance(cfg.get("bit_remote_dirs"), list) else []:
+            try:
+                history.append(normalize_remote_dir(item))
+            except ValueError:
+                pass
+        cfg["bit_remote_dirs"] = remember_dir(history or [DEFAULT_BIT_DIR], cfg["bit_remote_dir"])
+        cfg["bit_local_dir"] = cfg["bit_local_dir"] if isinstance(cfg.get("bit_local_dir"), str) else ""
         return cfg
 
     def save(self, cfg: dict):
@@ -750,6 +780,25 @@ class SshSession:
             if sftp is not None:
                 sftp.close()
 
+    def list_dirs(self, parent="/run/media"):
+        """Sub-directories of `parent` on the board, e.g. the mounts under /run/media."""
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        transport = self.client.get_transport()
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        try:
+            if sftp is None:
+                raise CommandError("SSH 通道不可用，无法读取板端目录。")
+            try:
+                entries = sftp.listdir_attr(parent)
+            except IOError:
+                return []
+            return sorted(f"{parent.rstrip('/')}/{entry.filename}" for entry in entries
+                          if (entry.st_mode or 0) & 0o170000 == 0o040000)
+        finally:
+            if sftp is not None:
+                sftp.close()
+
     def rollback_bit(self, backup_name, remote_dir="/run/media/sda",
                      dest_name="sunny_fpga.bit", timestamp=None, progress=None):
         """Move the current bit aside with a fresh timestamp and restore a chosen backup.
@@ -975,6 +1024,14 @@ class DemoSession:
         backups = sorted(({"name": n, "timestamp": n[len(prefix):]} for n in names
                           if n.startswith(prefix)), key=lambda item: item["timestamp"], reverse=True)
         return entries + backups
+
+    def list_dirs(self, parent="/run/media"):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        folder = self._to_remote(parent)
+        if not folder.is_dir():
+            return []
+        return sorted(f"{parent.rstrip('/')}/{path.name}" for path in folder.iterdir() if path.is_dir())
 
     def rollback_bit(self, backup_name, remote_dir="/run/media/sda",
                      dest_name="sunny_fpga.bit", timestamp=None, progress=None):

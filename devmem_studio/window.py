@@ -8,16 +8,17 @@ import io
 import json
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
+from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, QPoint, Slot
 from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
                                QPlainTextEdit, QProgressBar, QMessageBox, QFileDialog, QApplication,
-                               QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
+                               QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem, QMenu)
 
 from . import __version__
 from . import completion, component_parse, top_import
@@ -25,13 +26,16 @@ from .catalog import REGISTER_FIELDS
 from .bitpack_dialog import BitPackDialog
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
-                   resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK)
+                   resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
+                   normalize_remote_dir, remember_dir)
+from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
                       IpAddressField, ResizeAwareWidget, TerminalView)
-from .dialogs import BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
+from .dialogs import (BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, FileChoiceDialog,
+                      file_time, show_help)
 
 # Fixed connect timeout for both SSH and serial: impatient users hit the red
 # cancel button instead of tuning a number.
@@ -128,8 +132,14 @@ class MainWindow(QMainWindow):
         self.bridge.stream_ready.connect(self._stream_ready)
         self.bridge.stream_failed.connect(self._stream_failed)
         self.bridge.stream_worker_finished.connect(self._stream_worker_finished)
+        self.bridge.serial_data.connect(self._serial_output)
+        self.bridge.serial_lost.connect(self._serial_lost)
+        self.bridge.serial_uboot.connect(self._serial_uboot)
         self.session = SshSession(self._log_emit("ssh"))
-        self.serial = SerialSession(self._log_emit("com"))
+        self.serial = SerialSession(self._log_emit("system"))
+        self.serial_screen = ScreenBuffer()
+        self._serial_epoch = 0
+        self._serial_hint_at = 0.0
         self.serial_connected = False
         self._serial_device = None
         self._serial_busy = False   # serial connect runs outside the global task gate
@@ -137,6 +147,10 @@ class MainWindow(QMainWindow):
         self._completion_workers = set()   # keep refs: pool.start alone lets GC drop them
         self._serial_cancel_requested = False
         self._last_ports_scan = 0.0   # COM 口枚举有开销，节流到心跳间隔的倍数
+        self._ports_changed = QTimer(self)   # WM_DEVICECHANGE bursts → one rescan
+        self._ports_changed.setSingleShot(True)
+        self._ports_changed.timeout.connect(lambda: self._refresh_serial_ports(force=True))
+        self._bit_dir_workers = set()
         self._desktop_sidebar_width = 360
         self.bit_pack_dialog = None
         self.bit_dialog = None
@@ -151,7 +165,6 @@ class MainWindow(QMainWindow):
         # log_records aliases the SSH buffer (the historically flat list tests read).
         self.log_records = []
         self.log_records_ssh = self.log_records
-        self.log_records_com = []
         self.log_records_log = []
         self.log_records_system = []
         self.console_source = "system"
@@ -270,8 +283,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("设备连接", "sideCaption"))
         layout.addWidget(self._build_connection_card())
         layout.addSpacing(10)
-        self.import_button = button("导入 top", self.import_top, "demo", "import")
-        self.import_button.setToolTip("解析 emcc mix top 文件，按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
+        self.import_button = button("导入 top", self.show_import_top_menu, "demo", "import")
+        self.import_button.setToolTip("选择 emcc mix top 文件，或选文件夹自动查找其中的 top（多个时列表选择），"
+                                      "按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
         self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
         self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹导单个，"
                                                 "选上级目录（如 emcc_ctrl）批量导入其下全部组件。")
@@ -687,14 +701,20 @@ class MainWindow(QMainWindow):
         self.log_filter.currentIndexChanged.connect(lambda _: self._fit_console_toolbar())
         self.follow_log = QCheckBox("跟随")
         self.follow_log.setChecked(True)
+        self.follow_log.toggled.connect(self._follow_toggled)
+        self.uboot_catch = QCheckBox("拦截U-Boot")
+        self.uboot_catch.setToolTip("勾选后，板卡下次启动出现 autoboot 倒计时时自动按住 &（Shift+7），直到停在 U-Boot 提示符；"
+                                    "可先勾选再点「重启设备」或给板卡上电。也可在终端里直接按住 Shift+7。")
+        self.uboot_catch.setVisible(False)   # serial view only
+        self.uboot_catch.toggled.connect(self._uboot_catch_toggled)
         # Terminal source selector: log=板端 sunny.log 流, ssh=SSH 命令日志,
-        # serial=串口命令日志, system=软件自身运行日志.
+        # serial=串口终端（实时收发）, system=软件自身运行日志.
         self.console_source_combo = ComboBox()
         self.console_source_combo.setAccessibleName("日志来源")
         for key, text in (("log", "tail log"), ("ssh", "ssh"), ("com", "serial"), ("system", "system")):
             self.console_source_combo.addItem(text, key)
         self.console_source_combo.setFixedWidth(118)
-        self.console_source_combo.setToolTip("终端来源：tail log=板端 sunny.log 流（SSH tail），ssh=SSH 会话日志，serial=串口会话日志，system=软件运行日志。")
+        self.console_source_combo.setToolTip("终端来源：tail log=板端 sunny.log 流（SSH tail），ssh=SSH 会话日志，serial=串口终端（板卡输出实时显示，按键直发），system=软件运行日志。")
         self.console_source_combo.currentIndexChanged.connect(self._change_console_source)
         self.console_source_combo.currentIndexChanged.connect(self._refresh_selector_tooltips)
         self.log_search = QLineEdit()
@@ -722,9 +742,9 @@ class MainWindow(QMainWindow):
         self.bit_pack_button = button("打包bit", self.open_bit_pack, "flat", "package")
         self.bit_pack_button.setToolTip("打开内置 Bit_pack：选择或拖入 .bit，生成项目号_bit_时间戳.zip；本地工具，无需连接设备。")
         self.bit_upload_button = button("上传bit", self.open_bit_upload, "flat", "write")
-        self.bit_upload_button.setToolTip("选择或拖入 .bit 文件，重命名为 sunny_fpga.bit 上传到 /run/media/sda；传完后原文件备份为 sunny_fpga.bit_时间戳。")
+        self.bit_upload_button.setToolTip("选择文件 / 文件夹或拖入 .bit，重命名为 sunny_fpga.bit 上传到所选板端目录（默认 /run/media/sda，记住上次选择）；传完后原文件备份为 sunny_fpga.bit_时间戳。")
         self.bit_rollback_button = button("回退bit", self.open_bit_rollback, "flat", "refresh")
-        self.bit_rollback_button.setToolTip("列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份，选择后把所选版本恢复为 sunny_fpga.bit（当前版本先备份为时间戳）。")
+        self.bit_rollback_button.setToolTip("列出所选板端目录（默认 /run/media/sda）下的 sunny_fpga.bit* 备份，选择后把所选版本恢复为 sunny_fpga.bit（当前版本先备份为时间戳）。")
         self.log_download_button = button("下载log", self.download_board_log, "flat", "read")
         self.log_download_button.setToolTip("下载板端 /run/media/sda/sunny.log 到本地（选择保存位置）。")
         self.reboot_button = button("重启设备", self.reboot, "flat", "refresh")
@@ -738,7 +758,7 @@ class MainWindow(QMainWindow):
         # compact icons/tooltips rather than wrapping below the search field.
         self.console_toolbar = row(self.console_title, self.log_filter, self.console_source_combo,
                                    self.log_search, self.log_match_count, self.log_prev, self.log_next,
-                                   self.log_wrap, self.follow_log, 1,
+                                   self.log_wrap, self.follow_log, self.uboot_catch, 1,
                                    self.bit_pack_button, self.bit_upload_button, self.bit_rollback_button,
                                    self.log_download_button, self.reboot_button,
                                    self.log_export_button, self.log_clear_button, spacing=4)
@@ -799,18 +819,65 @@ class MainWindow(QMainWindow):
         self.log_search.setFocus()
         self.log_search.selectAll()
 
+    def show_import_top_menu(self):
+        """导入 top: pick the file directly, or a folder to search for top files."""
+        if self._closing or self._busy or self.connected:
+            return
+        self._import_top_menu().exec(self.import_button.mapToGlobal(QPoint(0, self.import_button.height())))
+
+    def _import_top_menu(self):
+        menu = QMenu(self)
+        menu.addAction(icon("import"), "选择 top 文件…", self.import_top)
+        menu.addAction(icon("folder"), "选择文件夹，自动查找 top…", lambda: self.import_top_folder())
+        return menu
+
     def import_top(self):
         if self._closing or self._busy or self.connected:
             return
         start = self.cfg.get("top_path") or ""
         path, _ = QFileDialog.getOpenFileName(self, "选择 top 文件", start, "SystemVerilog (*.sv *.v);;所有文件 (*)")
-        if not path:
-            return
+        if path:
+            self._confirm_import_top(path)
+
+    def _confirm_import_top(self, path):
         answer = QMessageBox.question(self, "确认导入 top",
                                       f"即将导入：{path}\n\n若 top 与连接设备不一致，操作寄存器可能导致主板卡死！\n确认导入？",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer == QMessageBox.Yes:
             self.load_top(Path(path))
+
+    def import_top_folder(self, folder=None):
+        """Search a folder (and sub-folders) for mix-top files; several → list to choose from."""
+        if self._closing or self._busy or self.connected:
+            return
+        if not folder:
+            top_path = self.cfg.get("top_path") or ""
+            start = str(Path(top_path).parent) if top_path else ""
+            folder = QFileDialog.getExistingDirectory(self, "选择包含 top 文件的文件夹", start)
+            if not folder:
+                return
+        folder = Path(folder)
+        self.append_log("SYSTEM", f"正在查找 {folder} 下的 top 文件…")
+        self._run_task(lambda progress: top_import.find_top_files(folder),
+                       lambda result: self._top_folder_scanned(folder, *result), "查找 top 文件")
+
+    def _top_folder_scanned(self, folder, candidates, complete):
+        partial = "" if complete else "（目录过深或文件过多，仅列出部分结果）"
+        if not candidates:
+            QMessageBox.warning(self, "未找到 top", f"{folder} 及其子目录下没有包含 ec_ 控件的 .sv/.v 文件{partial}。")
+            return
+        if len(candidates) == 1:
+            QTimer.singleShot(0, lambda: self._confirm_import_top(str(candidates[0]["path"])))
+            return
+        rows = [(item["path"], [f"{item['components']} 个控件", file_time(item["mtime"])]) for item in candidates]
+        QTimer.singleShot(0, lambda: self._choose_top(folder, rows, partial))
+
+    def _choose_top(self, folder, rows, partial):
+        chooser = FileChoiceDialog("选择要导入的 top", f"在 {folder} 下找到 {len(rows)} 个包含 ec_ 控件的文件{partial}，"
+                                   "按控件数量、修改时间排列，双击或点「选择」确定。", folder, rows,
+                                   ["控件", "修改时间"], self)
+        if chooser.exec() == QDialog.Accepted and chooser.selected_path():
+            self._confirm_import_top(chooser.selected_path())
 
     def import_component(self):
         """Re-parse component register definitions at runtime (RTL changed, no rebuild).
@@ -1611,6 +1678,7 @@ class MainWindow(QMainWindow):
         for control in (self.log_prev, self.log_next):
             control.setIconSize(QSize(14, 14))
             control.setFixedWidth(control.sizeHint().width())
+        self.uboot_catch.setText("U-Boot" if narrow else "拦截U-Boot")
         self.console_title.setVisible(not narrow)
         self.log_match_count.setVisible(not narrow)
         self.log_prev.setVisible(not narrow)
@@ -1722,7 +1790,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "console_source_combo"):
             source = self.console_source_combo.currentData()
             descriptions = {"log": "tail log：板端 sunny.log 流", "ssh": "ssh：SSH 会话日志",
-                            "com": "serial：串口会话日志", "system": "system：软件运行日志"}
+                            "com": "serial：串口终端（实时收发）", "system": "system：软件运行日志"}
             self.console_source_combo.setToolTip(descriptions.get(source, "选择日志来源"))
         if hasattr(self, "width_combo"):
             self.width_combo.setToolTip(f"访问位宽：{self.width_combo.currentText()} 位")
@@ -2059,7 +2127,12 @@ class MainWindow(QMainWindow):
         port, baud, user, password, timeout = request
         self.serial.close()
         self._serial_cancel_requested = False   # a cancel that lost the race to success must not linger
-        session = SerialSession(self._log_emit("com"))
+        self._serial_epoch += 1
+        token = self._serial_epoch   # output of an older session is dropped by token
+        session = SerialSession(self._log_emit("system"),
+                                on_data=lambda text: self.bridge.serial_data.emit(token, text),
+                                on_lost=lambda message: self.bridge.serial_lost.emit(token, message),
+                                on_uboot=lambda caught: self.bridge.serial_uboot.emit(token, caught))
         self._task_serial = session
         self.save_settings()
         self._serial_busy = True
@@ -2090,6 +2163,9 @@ class MainWindow(QMainWindow):
             self._serial_device = port
             self._reflect_serial(True)
             self.append_log("SUCCESS", "serial 连接成功。")
+            self._serial_note(f"[serial 已连接 {port} @ {baud} bps；在此直接按键输入，控制台无输出时按回车唤醒]")
+            self._set_console_source("com")   # the live console is what a serial connect is for
+            self.console.setFocus()
         def failed(message):
             if self._closing:
                 return
@@ -2124,8 +2200,84 @@ class MainWindow(QMainWindow):
         self.serial.close()
         self.serial_connected = False
         self._serial_device = None
+        self._set_uboot_catch(False)
         self._reflect_serial(False)
         self.append_log("SYSTEM", "serial 会话已断开。")
+        self._serial_note("[serial 已断开]")
+
+    def _serial_dropped(self, message):
+        """The port died under us (unplugged): tear the session down at once."""
+        if not self.serial_connected:
+            return
+        device = self._serial_device or self.serial.port
+        self.serial.close()
+        self.serial_connected = False
+        self._serial_device = None
+        self._set_uboot_catch(False)
+        self._reflect_serial(False)
+        self.append_log("ERROR", message)
+        self._serial_note(f"[serial {device} 已断开：串口线可能已拔出]")
+
+    @Slot(int, str)
+    def _serial_output(self, token, text):
+        if self._closing or token != self._serial_epoch:
+            return
+        committed = self.serial_screen.feed(text)
+        if self.console_source == "com":
+            self.console.raw_update(committed, self.serial_screen.current(), self.serial_screen.cursor(),
+                                    self.follow_log.isChecked())
+
+    @Slot(int, str)
+    def _serial_lost(self, token, message):
+        if not self._closing and token == self._serial_epoch:
+            self._serial_dropped(message)
+
+    def _uboot_catch_toggled(self, on):
+        if not on:
+            self.serial.disarm_uboot_stop()
+            return
+        if not (self.serial_connected and self.serial.alive):
+            self._set_uboot_catch(False)
+            self._serial_note("[serial 未连接：请先连接 serial 再勾选拦截U-Boot]")
+            return
+        self.serial.arm_uboot_stop(b"&")
+        self._serial_note("[拦截U-Boot 已开启：板卡启动出现倒计时时自动按住 &，可点「重启设备」或给板卡上电]")
+
+    def _set_uboot_catch(self, on):
+        self.uboot_catch.blockSignals(True)
+        self.uboot_catch.setChecked(on)
+        self.uboot_catch.blockSignals(False)
+
+    @Slot(int, bool)
+    def _serial_uboot(self, token, caught):
+        if self._closing or token != self._serial_epoch:
+            return
+        self._set_uboot_catch(False)
+        if caught:
+            self.append_log("SUCCESS", "已停在 U-Boot。")
+            self._serial_note("[已停在 U-Boot：可直接输入 U-Boot 命令，输入 boot 回车继续启动]")
+        else:
+            self.append_log("ERROR", "未能拦截 U-Boot：倒计时结束前未停住。")
+            self._serial_note("[未能拦截 U-Boot：倒计时已结束，可重启板卡后重试]")
+
+    def _serial_note(self, text):
+        committed = self.serial_screen.note(text)
+        if self.console_source == "com":
+            self.console.raw_update(committed, self.serial_screen.current(), self.serial_screen.cursor(),
+                                    self.follow_log.isChecked())
+
+    def _serial_send(self, data):
+        """Keystrokes typed in the serial view go straight to the board."""
+        if self.serial_connected and self.serial.alive:
+            try:
+                self.serial.send(data)
+                return
+            except CommandError:
+                pass
+        now = time.monotonic()
+        if now - self._serial_hint_at > 3:
+            self._serial_hint_at = now
+            self._serial_note("[serial 未连接，按键未发送：请先在左侧连接 serial]")
 
     def _reflect_serial(self, connected):
         self.serial_connected = connected
@@ -2185,14 +2337,56 @@ class MainWindow(QMainWindow):
         if self._closing or not self.connected or self._busy:
             return
         if self.bit_dialog is None:
-            self.bit_dialog = BitUploadDialog(self)
+            self.bit_dialog = BitUploadDialog(self, self.cfg["bit_remote_dirs"], self.cfg["bit_remote_dir"],
+                                              self.cfg.get("bit_local_dir", ""))
             self.bit_dialog.upload_requested.connect(self._start_bit_upload)
+            self.bit_dialog.remote_dir_changed.connect(self._select_bit_dir)
+            self.bit_dialog.local_dir_changed.connect(self._remember_bit_local_dir)
         if self.bit_dialog.isMinimized():
             self.bit_dialog.showNormal()
         else:
             self.bit_dialog.show()
         self.bit_dialog.raise_()
         self.bit_dialog.activateWindow()
+        self._discover_bit_dirs()
+
+    def _bit_dir_combos(self):
+        return [dialog.remote_dir for dialog in (self.bit_dialog, self.bit_rollback_dialog) if dialog is not None]
+
+    def _select_bit_dir(self, text, used=False):
+        """Remember the board directory picked in either bit dialog; `used` also
+        moves it to the front of the history. Returns the normalized path or None."""
+        try:
+            directory = normalize_remote_dir(text)
+        except ValueError:
+            return None   # a half-typed path is not remembered; upload/rollback report it
+        self.cfg["bit_remote_dir"] = directory
+        if used or directory not in self.cfg["bit_remote_dirs"]:
+            self.cfg["bit_remote_dirs"] = remember_dir(self.cfg["bit_remote_dirs"], directory)
+        for combo in self._bit_dir_combos():
+            combo.set_directories(self.cfg["bit_remote_dirs"], directory)
+        self._schedule_save()
+        return directory
+
+    def _remember_bit_local_dir(self, folder):
+        self.cfg["bit_local_dir"] = folder
+        self._schedule_save()
+
+    def _discover_bit_dirs(self):
+        """List the board's /run/media mounts into the directory pickers (outside the busy gate)."""
+        if not self.connected or self._closing:
+            return
+        session = self.session
+        worker = Worker(lambda progress: session.list_dirs("/run/media"))
+        self._bit_dir_workers.add(worker)
+        worker.signals.result.connect(self._merge_bit_dirs)
+        worker.signals.finished.connect(lambda: self._bit_dir_workers.discard(worker))
+        self.pool.start(worker)
+
+    def _merge_bit_dirs(self, found):
+        if not self._closing:
+            for combo in self._bit_dir_combos():
+                combo.merge_directories(found)
 
     def _start_bit_upload(self, local_path, remote_dir):
         if self._closing or self._busy or not self.connected:
@@ -2204,14 +2398,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self.bit_dialog, "上传失败", f"找不到文件：{local_path}")
             return
         try:
+            remote_dir = normalize_remote_dir(remote_dir)
+        except ValueError as exc:
+            QMessageBox.warning(self.bit_dialog, "板端目录无效", str(exc))
+            return
+        try:
             bit_date = datetime.fromtimestamp(Path(local_path).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except OSError:
             bit_date = "未知"
         answer = QMessageBox.question(self.bit_dialog, "确认上传bit",
-                                      f"{local_path}\n文件日期：{bit_date}\n\n确定上传？",
+                                      f"{local_path}\n文件日期：{bit_date}\n上传到：{remote_dir}/sunny_fpga.bit\n\n确定上传？",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        self._select_bit_dir(remote_dir, used=True)
         self.bit_dialog.upload_button.setEnabled(False)
         self.bit_dialog.set_reset()
         self.bit_dialog.status.setText("正在上传，传完后备份旧文件并换入，请勿断开连接。")
@@ -2280,8 +2480,9 @@ class MainWindow(QMainWindow):
         if self._closing or not self.connected or self._busy:
             return
         if self.bit_rollback_dialog is None:
-            self.bit_rollback_dialog = BitRollbackDialog(self)
+            self.bit_rollback_dialog = BitRollbackDialog(self, self.cfg["bit_remote_dirs"], self.cfg["bit_remote_dir"])
             self.bit_rollback_dialog.rollback_requested.connect(self._start_bit_rollback)
+            self.bit_rollback_dialog.remote_dir_changed.connect(self._bit_rollback_dir_changed)
         self.bit_rollback_dialog.set_reset()
         if self.bit_rollback_dialog.isMinimized():
             self.bit_rollback_dialog.showNormal()
@@ -2290,17 +2491,36 @@ class MainWindow(QMainWindow):
         self.bit_rollback_dialog.raise_()
         self.bit_rollback_dialog.activateWindow()
         self._refresh_bit_backups()
+        self._discover_bit_dirs()
 
-    def _refresh_bit_backups(self):
-        if self._closing or not self.connected or self._busy:
+    def _bit_rollback_dir_changed(self, text):
+        dialog = self.bit_rollback_dialog
+        if self._select_bit_dir(text) is None:
+            dialog.status.setText("板端目录须为以 / 开头的绝对路径，例如 /run/media/sda。")
+            return
+        self._refresh_bit_backups()
+
+    def _refresh_bit_backups(self, retries=10):
+        dialog = self.bit_rollback_dialog
+        if self._closing or not self.connected or dialog is None:
+            return
+        if self._busy:
+            # An auto-read tick holds the gate briefly: list once it is free.
+            if retries and dialog.isVisible():
+                QTimer.singleShot(300, lambda: self._refresh_bit_backups(retries - 1))
+            return
+        try:
+            remote_dir = normalize_remote_dir(dialog.remote_dir.path_text())
+        except ValueError as exc:
+            dialog.status.setText(str(exc))
             return
         session = self.session
-        dialog = self.bit_rollback_dialog
+        dialog.set_listed_dir(remote_dir)
         dialog.set_busy(True)
-        dialog.status.setText("正在读取板端 bit 备份列表…")
+        dialog.status.setText(f"正在读取 {remote_dir} 下的 bit 备份列表…")
 
         def task(progress):
-            return session.list_bit_backups()
+            return session.list_bit_backups(remote_dir)
 
         def done(entries):
             if self._closing or not dialog:
@@ -2308,16 +2528,15 @@ class MainWindow(QMainWindow):
             dialog.set_reset()
             backups = sum(1 for entry in entries if entry["timestamp"] is not None)
             current = "当前版本 + " if len(entries) > backups else "无当前版本，"
-            dialog.populate(entries, f"共 {len(entries)} 个 bit 文件：{current}{backups} 个备份（双击可直接回退）。"
-                             if entries else "板端没有可回退的 bit 备份。")
-            self.append_log("INFO", f"读取到 {len(entries)} 个板端 bit 文件。")
+            dialog.populate(entries, f"{remote_dir}：共 {len(entries)} 个 bit 文件：{current}{backups} 个备份（双击可直接回退）。"
+                             if entries else f"{remote_dir} 下没有可回退的 bit 备份。")
+            self.append_log("INFO", f"读取到 {remote_dir} 下 {len(entries)} 个板端 bit 文件。")
 
         def failed(message):
             if self._closing or not dialog:
                 return
             dialog.set_reset()
-            dialog.set_busy(False)
-            dialog.status.setText("读取备份列表失败：" + message)
+            dialog.populate([], "读取备份列表失败：" + message)
             self.append_log("ERROR", f"读取 bit 备份列表失败：{message}")
 
         worker = Worker(task)
@@ -2336,27 +2555,30 @@ class MainWindow(QMainWindow):
         dialog = self.bit_rollback_dialog
         if not dialog:
             return
+        remote_dir = dialog.listed_dir() or self.cfg["bit_remote_dir"]   # the folder whose list is shown
         answer = QMessageBox.question(self, "确认回退",
-                                      f"将把当前 sunny_fpga.bit 备份为 sunny_fpga.bit_时间戳，"
+                                      f"将把 {remote_dir} 下当前 sunny_fpga.bit 备份为 sunny_fpga.bit_时间戳，"
                                       f"然后把 {backup_name} 恢复为 sunny_fpga.bit。\n\n是否继续？",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        self._select_bit_dir(remote_dir, used=True)
         session = self.session
         dialog.set_busy(True)
         dialog.set_reset()
         dialog.status.setText(f"正在回退到 {backup_name} …")
 
         def task(progress):
-            session.rollback_bit(backup_name, progress=lambda done, total: progress({"current": done, "total": total}))
+            session.rollback_bit(backup_name, remote_dir,
+                                 progress=lambda done, total: progress({"current": done, "total": total}))
             return backup_name
 
         def done(name):
             if self._closing or not dialog:
                 return
             dialog.set_done()
-            dialog.status.setText(f"已回退：{name} 恢复为 sunny_fpga.bit（原当前版本已备份）。")
-            self.append_log("SUCCESS", f"bit 回退完成：{name} -> sunny_fpga.bit")
+            dialog.status.setText(f"已回退：{remote_dir}/{name} 恢复为 sunny_fpga.bit（原当前版本已备份）。")
+            self.append_log("SUCCESS", f"bit 回退完成：{remote_dir}/{name} -> sunny_fpga.bit")
 
         def failed(message):
             if self._closing or not dialog:
@@ -2688,33 +2910,38 @@ class MainWindow(QMainWindow):
             self.session.close()
             self._set_connection(False)
             self.append_log("ERROR", "设备连接已中断，请检查网络或设备状态后重新连接。")
-        if self.serial_connected and not self._busy and not self.serial.alive:
-            self.serial.close()
-            self.serial_connected = False
-            self._reflect_serial(False)
-            self.append_log("ERROR", "serial 连接已中断，请检查串口线缆后重新连接。")
+        if self.serial_connected and not self.serial.alive:
+            self._serial_dropped("serial 连接已中断，请检查串口线缆后重新连接。")
         self._refresh_serial_ports()
 
-    def _refresh_serial_ports(self):
+    def nativeEvent(self, event_type, message):
+        """WM_DEVICECHANGE (port arrival/removal) triggers an immediate port rescan."""
+        if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
+            try:
+                from ctypes import wintypes
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == 0x0219 and msg.wParam in (0x8000, 0x8004):
+                    self._ports_changed.start(150)
+            except (TypeError, ValueError, OSError):
+                pass
+        return False, 0   # never consumed: Qt keeps its default handling
+
+    def _refresh_serial_ports(self, force=False):
         """Rescan attached COM ports: pick up hot-plugs and drop the connected
         port when its device disappears from the system.
 
-        The enumeration walks the Windows setupapi tree and is throttled to
-        every few seconds from the heartbeat instead of every tick."""
-        if self._closing or self._busy:
+        The enumeration walks the Windows setupapi tree, so the heartbeat
+        throttles it; a device-change notification forces it at once."""
+        if self._closing:
             return
         now = time.monotonic()
-        if now - self._last_ports_scan < 5:
+        if not force and now - self._last_ports_scan < 3:
             return
         self._last_ports_scan = now
         ports = list_serial_ports()
         devices = [device for device, _ in ports]
         if self.serial_connected and self._serial_device and self._serial_device not in devices:
-            # The plugged-in port was unplugged: drop the session cleanly.
-            self.serial.close()
-            self.serial_connected = False
-            self._reflect_serial(False)
-            self.append_log("ERROR", f"serial {self._serial_device} 已拔出，连接已断开。")
+            self._serial_dropped(f"serial {self._serial_device} 已拔出，连接已断开。")
         if devices != self._serial_devices:
             current = self.serial_port.currentData()
             self.serial_port.blockSignals(True)
@@ -2733,22 +2960,19 @@ class MainWindow(QMainWindow):
         text = (text or "").strip()
         if not text:
             return
+        if self.console_source == "com":
+            self._serial_send((text + "\r").encode("utf-8"))   # the serial view is a live console
+            return
         if self._busy:
             # The prompt was already cleared on submit: give the command back instead of dropping it.
             if self.console.is_interactive():
                 self.console._set_prompt_input(text)
             self._status("正在执行其他操作（如自动读取），命令未发送，请稍后按回车重试。")
             return
-        if self.console_source == "com":
-            if not self.serial_connected:
-                self._status("serial 未连接，请先连接 serial。")
-                return
-            session = self.serial
-        else:  # ssh / log / system 视图的输入都走 SSH
-            if not self.connected:
-                self._status("SSH 未连接，请先连接 SSH。")
-                return
-            session = self.session
+        if not self.connected:   # ssh / log / system 视图的输入都走 SSH
+            self._status("SSH 未连接，请先连接 SSH。")
+            return
+        session = self.session
         def done(result):
             if not result:
                 session.log("INFO", "（命令无输出）")   # e.g. ls in an empty dir
@@ -2762,10 +2986,7 @@ class MainWindow(QMainWindow):
         word = completion.unescape(raw)
         command_pos = completion.is_command_position(head, word)
         local = completion.local_candidates(word, command_pos, self.console.history())
-        if self.console_source == "com":
-            session = self.serial if self.serial_connected else None
-        else:
-            session = self.session if self.connected and not self.demo else None
+        session = self.session if self.connected and not self.demo and self.console_source != "com" else None
         script = completion.remote_script(word, command_pos) if session else None
         if not script:
             reply(local)
@@ -2908,12 +3129,12 @@ class MainWindow(QMainWindow):
         return emit
 
     def _records_for(self, source):
-        return {"ssh": self.log_records_ssh, "com": self.log_records_com,
-                "log": self.log_records_log, "system": self.log_records_system}.get(source, self.log_records_ssh)
+        return {"ssh": self.log_records_ssh, "log": self.log_records_log,
+                "system": self.log_records_system}.get(source, self.log_records_ssh)
 
     def _log_visible(self, level):
-        # log stream has no levels; only the level filter applies to ssh/com.
-        if self.console_source == "log":
+        # Raw streams (sunny.log, serial console) have no levels; the filter applies to records.
+        if self.console_source in ("log", "com"):
             return True
         mode = self.log_filter.currentIndex()
         return mode == 0 or mode == 1 and level == "ERROR" or mode == 2 and level == "CMD"
@@ -2952,29 +3173,50 @@ class MainWindow(QMainWindow):
     def _render_logs(self, *args):
         if not hasattr(self, "console"):
             return
-        self.console.clear()
-        if self.console_source == "log":
-            cursor = QTextCursor(self.console.document())
-            cursor.movePosition(QTextCursor.End)
-            cursor.insertText("".join(self.log_records_log))
-            if self.follow_log.isChecked():
-                self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+        self.uboot_catch.setVisible(self.console_source == "com")
+        if self.console_source == "com":
+            # Serial is a character-mode terminal over the board's own output.
+            self.console.set_raw(self._serial_send)
+            self.console.raw_reset(self.serial_screen.text(), self.serial_screen.cursor(),
+                                   self.follow_log.isChecked())
         else:
-            for record in self._records_for(self.console_source):
-                if self._log_visible(record[1]):
-                    self._append_log_record(record)
-        # Session terminals are interactive (prompt at the bottom); log/system views are plain.
-        self.console.set_interactive(self.console_source in ("ssh", "com"))
+            self.console.set_interactive(False)
+            self.console.clear()
+            if self.console_source == "log":
+                cursor = QTextCursor(self.console.document())
+                cursor.movePosition(QTextCursor.End)
+                cursor.insertText("".join(self.log_records_log))
+                if self.follow_log.isChecked():
+                    self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+            else:
+                for record in self._records_for(self.console_source):
+                    if self._log_visible(record[1]):
+                        self._append_log_record(record)
+            # The SSH view is interactive (prompt at the bottom); log/system views are plain.
+            self.console.set_interactive(self.console_source == "ssh")
         # The visible content changed: refresh the search match counter.
         if getattr(self, "log_search", None) and self.log_search.text():
             self._log_search_changed()
 
     def clear_logs(self):
+        if self.console_source == "com":
+            self.serial_screen.clear()   # the live line (prompt) survives
+            self._render_logs()
+            return
         self._records_for(self.console_source).clear()
         self.console.clear()
-        self.console.set_interactive(self.console_source in ("ssh", "com"))   # re-adds the prompt
+        self.console.set_interactive(self.console_source == "ssh")   # re-adds the prompt
         if getattr(self, "log_search", None) and self.log_search.text():
             self._log_search_changed()
+
+    def _follow_toggled(self, on):
+        """Turning 跟随 on jumps to the newest output right away."""
+        if not on:
+            return
+        if self.console.is_raw():
+            self.console.raw_update([], self.serial_screen.current(), self.serial_screen.cursor(), True)
+        bar = self.console.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def _change_console_source(self, _index):
         source = self.console_source_combo.currentData() or "system"
@@ -3050,6 +3292,7 @@ class MainWindow(QMainWindow):
             try:
                 records = self._records_for(self.console_source)
                 text = ("".join(self.log_records_log) if self.console_source == "log"
+                        else self.serial_screen.text() if self.console_source == "com"
                         else "\n".join(f"{stamp} [{level}] {text}" for stamp, level, text in records))
                 Path(path).write_text(text, encoding="utf-8")
                 self._status("会话日志已导出。")

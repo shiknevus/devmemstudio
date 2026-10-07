@@ -2,6 +2,7 @@
 import csv
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -9,9 +10,10 @@ import traceback
 
 import paramiko
 from PySide6.QtCore import Qt, QCoreApplication, QEvent
-from PySide6.QtWidgets import QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit
 from unittest.mock import patch
-from . import bitpack, top_import
+from . import bitpack, file_scan, top_import
 from .core import ConfigStore, DemoSession, HostKeyChangedError
 from .dialogs import BatchDialog, HostKeyDialog
 from .bitpack_dialog import BitPackDialog
@@ -392,6 +394,41 @@ def run_smoke(app, directory: Path):
         window._stop_stream()
         settle(lambda: window._stream_state == "stopped")
         check(window.session.alive and window.read_all_button.isEnabled(), "Closing logs preserves the register session")
+        window._set_console_source("com")
+        settle()
+        check(window.console.is_raw() and window.uboot_catch.isVisible() and not window.console.is_interactive(),
+              "Serial view is a character-mode terminal with the U-Boot catch toggle")
+        window._serial_output(window._serial_epoch, "[    3.21] usb 1-1: new device\r\nroot@board:~# echo "
+                              + "x" * 61 + " \r" + "x" * 20)   # readline's " \r" at column 80
+        check(window.serial_screen.lines[-1] == "[    3.21] usb 1-1: new device"
+              and window.console.toPlainText().endswith("root@board:~# echo " + "x" * 81),
+              "Unsolicited board output streams live and readline wraps render as one line")
+        QApplication.sendEvent(window.console, QKeyEvent(QEvent.KeyPress, Qt.Key_Ampersand, Qt.ShiftModifier, "&"))
+        check("按键未发送" in window.console.toPlainText(), "Keys typed while serial is offline are flagged, not lost silently")
+        window.follow_log.setChecked(False)
+        window.console.verticalScrollBar().setValue(0)
+        window.follow_log.setChecked(True)
+        check(window.console.verticalScrollBar().value() == window.console.verticalScrollBar().maximum(),
+              "Turning 跟随 on jumps to the newest output")
+        window._set_console_source("system")
+        window.open_bit_upload()
+        settle(lambda: window.bit_dialog is not None and window.bit_dialog.isVisible())
+        combo = window.bit_dialog.remote_dir
+        check(combo.isEditable() and combo.path_text() == "/run/media/sda",
+              "Bit upload board directory is a picker defaulting to /run/media/sda")
+        window.bit_dialog.close()
+        scan_root = directory / "bit-scan"
+        for relative, stamp in (("old/a.bit", 1_700_000_000), ("x.runs/impl_1/b.bit", 1_700_000_100), (".Xil/c.bit", 1_700_000_200)):
+            target = scan_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"\x00" * 8)
+            os.utime(target, (stamp, stamp))
+        found, _ = file_scan.find_files(scan_root, (".bit",))
+        check([path.name for path, _, _ in found] == ["b.bit", "a.bit"],
+              "Folder scan lists nested .bit files newest first and skips hidden folders")
+        tops, _ = top_import.find_top_files(fixture.parent)
+        check(bool(tops) and tops[0]["path"] == fixture and tops[0]["components"] >= 2,
+              "Folder import finds the mix top among the folder's files")
         data = list(csv.reader(io.StringIO(window.snapshot_csv())))
         check(len(data) == len(window.regs) + 1 and data[1][0] == "离线演示", "CSV snapshot with honest demo provenance")
         (directory / "snapshot.csv").write_text(window.snapshot_csv(), encoding="utf-8-sig")
