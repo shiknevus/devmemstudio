@@ -5,12 +5,12 @@
 ## 构建与发布产物
 
 - 构建环境：本项目 venv，Python 3.12.2，Paramiko 4.0.0，PyInstaller 6.22.2，PySide6 6.11.2；单文件启动器由 MinGW-w64 `x86_64-w64-mingw32-gcc` 14.3 编译；Windows 10 x64。
-- 最终产物：`dist/DevmemStudio.exe`（单文件），**19,621,376 字节**（4.1.8 为 31,383,044 字节，-37.5%）。
+- 最终产物：`dist/DevmemStudio.exe`（单文件），**19,623,936 字节**（4.1.8 为 31,383,044 字节，-37.5%）。
 - 应用版本、Windows 文件/产品版本均为 **4.2.0**；固定版本资源为 `4.2.0.0`，PE 架构为 x64；启动器仅导入 Windows 自带的 kernel32、user32、Cabinet、bcrypt 与 msvcrt。
-- EXE SHA-256：`3814a1cbb8c3e5c32994cc53cc65dcb72c9c2e6b1ee4e40ce7ff27523165329a`。
-- 内嵌运行库：110 个文件、74.4 MB，LZMS 压缩后 19,482,634 字节；缓存目录 `%LOCALAPPDATA%\DevmemStudio\runtime\4.2.0-23ee15ccffc6`。
-- 发布包：`dist/DevmemStudio-4.2.0-win64.zip`，19,510,383 字节。
-- ZIP SHA-256：`814692ff54137f8740242c5f06d3d3572fba55a20e03afacef13e484a6ab94cd`。
+- EXE SHA-256：`d49e25f21ed8dfbca571eb7dc6ae3e41478ea1f3308dcca4f9a1d8c87005a83f`。
+- 内嵌运行库：110 个文件、74.4 MB，LZMS 压缩后 19,485,018 字节；缓存目录 `%LOCALAPPDATA%\DevmemStudio\runtime\4.2.0-f8df7b09f2c4`。
+- 发布包：`dist/DevmemStudio-4.2.0-win64.zip`，19,515,570 字节。
+- ZIP SHA-256：`96028ff2603b6e7f797d15247fb4198f7b32e59b05068723e0197df51a1cc2f9`。
 - 发布包只包含 `DevmemStudio/DevmemStudio.exe`，不含本机配置、凭据、日志或测试数据；ZIP CRC 校验通过，包内 EXE 的 SHA-256 与构建产物一致。
 
 ## 本次变更
@@ -20,6 +20,7 @@
 - 连接卡片：SSH / serial 每通道一行（状态圆点、目标摘要、连接按钮），参数按需展开、一次一个；Enter 连接；连接状态集中到卡片，标题行去掉重复徽章与会话摘要；修复类型徽标空间足够仍被省略。
 - 单文件封装：原生启动器 + Windows LZMS 压缩运行库，每版本首次解压到用户缓存，之后直接复用；SHA-256 校验、原子发布、损坏自愈、旧版本缓存自动清理、并发启动互斥；任务栏固定指向外层 EXE。
 - 启动与体积：SSH 库延迟到窗口出现后后台加载；剔除 `invoke`、OpenSSL 版 hashlib 与 `libcrypto-3.dll`、随包 UCRT 副本、Qt 翻译与多余平台插件；PYZ 以存储方式交给 LZMS 统一压缩。
+- 布局修复（用户反馈）：组件目录树与左栏其他控件同宽；寄存器筛选栏按自身实际宽度选择排布，权限选择与搜索框不再重叠或截断；标题行优先完整显示长组件名（最大化不再截断）。
 - 集成打包 bit 工具与单行响应式工具栏（4.2.0 前期工作）。
 
 内置组件目录未重生成或修改，保留 **57 个类型 / 2612 个寄存器**。
@@ -30,7 +31,7 @@
 
 | 验收项 | 结果 |
 | --- | --- |
-| 全量回归（含本机 SSH 回环、虚拟串口、GUI、连接卡片、启动导入约束） | **294 项通过**，365.7 秒 |
+| 全量回归（含本机 SSH 回环、虚拟串口、GUI、连接卡片、启动导入约束） | **296 项通过**，337.2 秒 |
 | 按发布包剔除条件（无 `invoke`、无 `_hashlib`）重跑 SSH 回环全套 | **24 项通过** |
 | 源码离线 smoke | **102 项检查全部通过** |
 | 单 EXE 隔离验收 第 1 轮（空缓存，首次解压） | **102 项检查全部通过**，`passed: true` / `frozen: true` |
@@ -63,7 +64,7 @@ README 中的 [工作台](workbench.png) 与 [连接卡片三种状态](connecti
 
 ## 证据位置
 
-- 流水线日志：`artifacts/claude-ui/build-exe-final.log`。
+- 流水线日志：`artifacts/claude-ui/build-exe-final4.log`。
 - 源码验收：`artifacts/build-smoke/report.json`。
 - EXE 隔离验收：`artifacts/exe-isolated/acceptance-1/report.json`、`acceptance-2/report.json`。
 - 单文件封装记录：`artifacts/singlefile-build.json`。
