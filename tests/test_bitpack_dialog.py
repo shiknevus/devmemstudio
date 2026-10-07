@@ -259,7 +259,7 @@ class CompactWindowTests(unittest.TestCase):
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.temp.cleanup()
 
-    def test_project_source_and_output_directories_persist_across_software_instances(self):
+    def test_project_directories_and_nopack_persist_across_software_instances(self):
         source_dir, output_dir = self.root / "输入", self.root / "输出"
         source_dir.mkdir()
         output_dir.mkdir()
@@ -272,23 +272,31 @@ class CompactWindowTests(unittest.TestCase):
         dialog.project.setText("REMEMBER测试")
         dialog.output.setText(str(output_dir))
         dialog._output_edited(str(output_dir))
-        self.window.save_settings()
-        saved = self.window.store.load()["bitpack_settings"]
-        self.assertEqual(saved["project"], "REMEMBER测试")
-        self.assertEqual(saved["source_directory"], str(source_dir))
-        self.assertEqual(saved["output_directory"], str(output_dir))
-        second = MainWindow(ConfigStore(self.window.store.path), persist=False)
-        try:
-            second.open_bit_pack()
-            self.assertEqual(second.bit_pack_dialog.project.text(), "REMEMBER测试")
-            self.assertEqual(second.bit_pack_dialog.source.text(), str(source))
-            self.assertEqual(second.bit_pack_dialog.output.text(), str(output_dir))
-            self.assertEqual(second.bit_pack_dialog._browse_directory, str(source_dir))
-        finally:
-            second.bit_pack_dialog.close()
-            second.bit_pack_dialog.deleteLater()
-            second.close()
-            second.deleteLater()
+        for nopack in (True, False):
+            with self.subTest(nopack=nopack):
+                dialog.nopack.setChecked(nopack)
+                self.assertEqual(self.window.cfg["bitpack_settings"]["nopack"], nopack)
+                self.assertTrue(self.window.save_timer.isActive())
+                self.window.save_settings()
+                saved = self.window.store.load()["bitpack_settings"]
+                self.assertEqual(saved["project"], "REMEMBER测试")
+                self.assertEqual(saved["source_directory"], str(source_dir))
+                self.assertEqual(saved["output_directory"], str(output_dir))
+                self.assertEqual(saved["nopack"], nopack)
+                second = MainWindow(ConfigStore(self.window.store.path), persist=False)
+                try:
+                    second.open_bit_pack()
+                    self.assertEqual(second.bit_pack_dialog.project.text(), "REMEMBER测试")
+                    self.assertEqual(second.bit_pack_dialog.source.text(), str(source))
+                    self.assertEqual(second.bit_pack_dialog.output.text(), str(output_dir))
+                    self.assertEqual(second.bit_pack_dialog._browse_directory, str(source_dir))
+                    self.assertEqual(second.bit_pack_dialog.nopack.isChecked(), nopack)
+                    self.assertEqual(second.bit_pack_dialog.project.isEnabled(), not nopack)
+                finally:
+                    second.bit_pack_dialog.close()
+                    second.bit_pack_dialog.deleteLater()
+                    second.close()
+                    second.deleteLater()
 
     def test_compact_sidebar_is_fixed_tree_only_and_has_no_outer_scroll_area(self):
         self.window.resize(1280, 800)
