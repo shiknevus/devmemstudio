@@ -79,6 +79,54 @@ class ResponsiveControlsTests(unittest.TestCase):
                 for section in (self.window.ssh_section, self.window.serial_section):
                     self.assertTrue(section.rect().contains(section.toggle.geometry()))
 
+    def assert_rail_columns_aligned(self):
+        side = self.window.sidebar_content
+
+        def span(widget):
+            left = widget.mapTo(side, widget.rect().topLeft()).x()
+            return left, left + widget.width()
+
+        card = self.window.ssh_section.parentWidget()
+        self.assertEqual(span(self.window.component_tree), span(card))
+        self.assertEqual(span(self.window.component_search), span(card))
+        self.assertEqual(span(self.window.base_field)[1], span(card)[1])
+
+    def test_component_tree_matches_rail_width_after_compact_start(self):
+        self.resize(1280, 800)
+        self.assert_rail_columns_aligned()
+        self.resize(1920, 1080)
+        self.assertGreaterEqual(self.window.sidebar_scroll.width(), 320)
+        self.assert_rail_columns_aligned()
+        self.window.side_split.setSizes([320, 1591])
+        self.app.processEvents()
+        self.assert_rail_columns_aligned()
+
+    def assert_filter_bar_fits(self, tag):
+        for _ in range(8):
+            self.app.processEvents()
+        bar, combo, search = self.window.register_filters, self.window.access_filter, self.window.search
+        last_tab = max(tab.geometry().right() for tab in self.window.view_buttons.values())
+        self.assertLess(last_tab, combo.geometry().left(), tag)
+        self.assertLess(combo.geometry().right(), search.geometry().left(), tag)
+        self.assertLessEqual(search.geometry().right(), bar.width(), tag)
+        for tab in self.window.view_buttons.values():
+            self.assertGreaterEqual(tab.width(), tab.minimumSizeHint().width(), tag)
+
+    def test_register_filter_bar_never_overlaps(self):
+        for size in ((2400, 1300), (1540, 960), (1420, 960), (1300, 800), (1200, 800),
+                     (1180, 740), (1100, 800), (960, 620)):
+            self.resize(*size)
+            self.assert_filter_bar_fits(f"window {size}")
+        self.resize(1540, 960)
+        self.window.side_split.setSizes([620, 911])
+        self.assert_filter_bar_fits("rail dragged wide")
+        self.window.side_split.setSizes([360, 1171])
+        total = sum(self.window.horizontal_split.sizes())
+        self.window.horizontal_split.setSizes([total - 350, 350])
+        self.assert_filter_bar_fits("inspector dragged wide")
+        self.resize(1200, 800)
+        self.assertEqual(self.window.view_buttons["irq"].text(), "中断")   # full labels before single letters
+
     def test_badge_shows_full_text_at_its_size_hint(self):
         badge = ElidedLabel("ec_slv_pul_axis", "badge")
         badge.resize(badge.sizeHint())
@@ -91,12 +139,26 @@ class ResponsiveControlsTests(unittest.TestCase):
         self.assertEqual(badge.text(), "ec_slv_pul_axis")
         badge.close()
 
-    def test_title_row_keeps_room_for_the_component_title(self):
-        self.window.module_title.setText("A0001_验收轴 · ec_slv_pul_axis")
-        self.window._set_register_count("69 / 69 项 · 全地址 0xB0106400")
-        self.resize(1540, 960)
-        title = self.window.module_title
-        self.assertGreaterEqual(title.width(), min(title.maximumWidth(), title.sizeHint().width()) - 1)
+    def test_title_row_keeps_long_component_names_whole(self):
+        name = "ec_superisys_485_modbus_rtu_27"
+        title, badge = self.window.module_title, self.window.module_badge
+        title.setText(f"{name} · 寄存器映射")
+        badge.setText("ec_superisys_485_modbus_rtu")
+        self.window._set_register_count("10 / 33 项 · 全地址 0xB0106C00")
+        for size in ((2560, 1440), (1920, 1080), (1540, 960), (1280, 800), (1180, 740), (960, 620)):
+            self.resize(*size)
+            shown = QLabel.text(title)
+            if size[0] >= 1540:
+                self.assertEqual(shown, title.text(), size)   # maximized / desktop: nothing elided
+                self.assertEqual(QLabel.text(badge), badge.text(), size)
+            elif size[0] >= 1180:
+                self.assertTrue(shown.startswith(name), size)   # the badge and suffix give way first
+            row = [widget for widget in (title, self.window.register_count, badge, self.window.poll_check,
+                                         self.window.interval, self.window.write_all_button,
+                                         self.window.read_all_button, self.window.export_button,
+                                         self.window.help_button) if widget.isVisible()]
+            for left, right in zip(row, row[1:]):
+                self.assertLess(left.geometry().right(), right.geometry().left(), size)
 
     def test_log_selectors_restore_width_and_keep_selection_and_source(self):
         self.resize(1540, 960)

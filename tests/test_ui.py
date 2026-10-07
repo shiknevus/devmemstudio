@@ -109,7 +109,8 @@ class UiTests(unittest.TestCase):
         self.settle()
         self.assertTrue(self.window._compact_layout)
         self.assertEqual(self.window.inspector.minimumWidth(), 240)
-        self.assertEqual(self.window.search.minimumWidth(), 105)
+        self.assertLessEqual(self.window.search.minimumWidth(), 105)   # preset follows the bar's real width
+        self.assertLess(self.window.access_filter.geometry().right(), self.window.search.geometry().left())
         self.assertEqual(self.window.log_search.minimumWidth(), 100)
 
         self.window.resize(1540, 960)
