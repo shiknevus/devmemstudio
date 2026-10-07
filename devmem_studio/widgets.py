@@ -233,6 +233,16 @@ class ComboBox(QComboBox):
         event.ignore()
 
 
+class ResizeAwareWidget(QWidget):
+    """Container that reports its own width changes (splitters move it without a window resize)."""
+    resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.resized.emit()
+
+
 class ElidedComboBox(ComboBox):
     """Closed state elides long item text; the popup widens to show it in full."""
     def paintEvent(self, event):

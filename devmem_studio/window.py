@@ -30,7 +30,7 @@ from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
-                      IpAddressField, TerminalView)
+                      IpAddressField, ResizeAwareWidget, TerminalView)
 from .dialogs import BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, show_help
 
 # Fixed connect timeout for both SSH and serial: impatient users hit the red
@@ -41,6 +41,15 @@ WINDOW_DESKTOP_MIN_SIZE = (1180, 740)
 WINDOW_COMPACT_MIN_SIZE = (960, 620)
 COMPACT_WIDTH = 1400
 COMPACT_HEIGHT = 850
+# Register filter bar presets, roomiest first: short tab labels, tab padding,
+# access combo width / short labels, search min / max width, spacing.
+REGISTER_FILTER_DENSITIES = ((False, "", 112, False, 145, 220, 3),
+                             (False, "", 80, True, 105, 180, 3),
+                             (False, "snug", 72, True, 80, 140, 2),
+                             (True, "tight", 72, True, 80, 110, 1),
+                             (True, "tight", 64, True, 56, 90, 1))
+SHORT_VIEW_LABELS = {"basic": "基", "task_a": "A", "task_b": "B", "task_c": "C",
+                     "irq": "IRQ", "param": "参", "debug": "调", "all": "全"}
 
 VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "basic": "身份、模块状态与安全链（公共寄存器头）",
@@ -276,8 +285,7 @@ class MainWindow(QMainWindow):
         self.component_tree = QTreeWidget()
         self.component_tree.setHeaderHidden(True)
         self.component_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.component_tree.setMinimumWidth(300)
-        self.component_tree.setMinimumHeight(120)
+        self.component_tree.setMinimumHeight(120)   # width follows the rail like its siblings
         # Flat single-column layout: the selection bar spans the full row with no
         # separate branch area, which QSS cannot paint consistently (torn selection).
         self.component_tree.setRootIsDecorated(False)
@@ -464,8 +472,11 @@ class MainWindow(QMainWindow):
         table_layout = QVBoxLayout(table_card)
         table_layout.setContentsMargins(0, 0, 0, 5)
         table_layout.setSpacing(0)
-        filters = QWidget()
+        filters = ResizeAwareWidget()
         filters.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        filters.resized.connect(lambda: QTimer.singleShot(0, self._fit_register_filters))
+        self.register_filters = filters
+        self._filter_density = None
         filters_layout = QHBoxLayout(filters)
         filters_layout.setContentsMargins(12, 9, 12, 9)
         filters_layout.setSpacing(3)
@@ -485,18 +496,16 @@ class MainWindow(QMainWindow):
         self.access_filter = ComboBox()
         self.access_filter.setAccessibleName("寄存器权限过滤")
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
-        self.access_filter.setFixedWidth(112)
         self.access_filter.currentIndexChanged.connect(self.filter_rows)
         self.access_filter.currentIndexChanged.connect(self._refresh_selector_tooltips)
         filters_layout.addWidget(self.access_filter)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索名称 / 偏移")
         self.search.setClearButtonEnabled(True)
-        self.search.setMaximumWidth(220)
-        self.search.setMinimumWidth(145)
         self.search.addAction(icon("search", size=16), QLineEdit.LeadingPosition)
         self.search.textChanged.connect(self.filter_rows)
         filters_layout.addWidget(self.search)
+        self._apply_filter_density(0)
         table_layout.addWidget(filters)
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["寄存器", "偏移", "权限", "当前值 · HEX", "当前值 · DEC", "待写入 · HEX", "读取"])
@@ -1101,6 +1110,7 @@ class MainWindow(QMainWindow):
             self.module_title.setText("寄存器映射")
             self.module_badge.setText("")
             self._set_register_count("")
+            QTimer.singleShot(0, self._fit_title_row)
             self.empty_label.setText("先点击左侧「导入 top」加载组件目录，再选择组件开始调试。" if not self.top_info
                                      else "从左侧「组件目录」选择一个组件开始调试。")
             self.empty_label.show()
@@ -1132,6 +1142,7 @@ class MainWindow(QMainWindow):
         self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
+        QTimer.singleShot(0, self._fit_title_row)
         if context == self._last_context:
             self._refresh_controls()
             return
@@ -1496,27 +1507,24 @@ class MainWindow(QMainWindow):
         compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
         if not force and compact == self._compact_layout:
             return
-        self._compact_layout = compact
+        previous, self._compact_layout = self._compact_layout, compact
         if compact:
             self.setMinimumSize(*(self._screen_min_size or WINDOW_COMPACT_MIN_SIZE))
-            self._desktop_sidebar_width = max(320, self.side_split.sizes()[0])
+            rail = self.side_split.sizes()[0]
+            if previous is False and rail >= 320:   # only a real desktop width is worth restoring
+                self._desktop_sidebar_width = rail
             self.workspace.setMinimumWidth(640)
             self.sidebar_scroll.setFixedWidth(300)
             self.side_split.setSizes([300, max(640, self.width() - 309)])
             self.side_split.handle(1).setEnabled(False)
             self._fold_channels()
-            self.component_tree.setMinimumWidth(250)
             self.component_tree.setMinimumHeight(80)
             self.inspector.setMinimumWidth(240)
             self.inspector.setMaximumWidth(320)
-            self.search.setMinimumWidth(105)
-            self.search.setMaximumWidth(180)
             self.log_search.setMinimumWidth(100)
             self.log_search.setMaximumWidth(140)
             self.register_title_row.setContentsMargins(8, 0, 8, 0)
             self.register_title_row.setSpacing(6)
-            self.module_title.setMaximumWidth(150)
-            self.module_badge.setMaximumWidth(100)
         else:
             self.setMinimumSize(*(self._screen_min_size or WINDOW_DESKTOP_MIN_SIZE))
             self.workspace.setMinimumWidth(840)
@@ -1524,18 +1532,13 @@ class MainWindow(QMainWindow):
             self.sidebar_scroll.setMinimumWidth(320)
             self.side_split.handle(1).setEnabled(True)
             self.side_split.setSizes([self._desktop_sidebar_width, max(840, self.width() - self._desktop_sidebar_width - 9)])
-            self.component_tree.setMinimumWidth(300)
             self.component_tree.setMinimumHeight(120)
             self.inspector.setMinimumWidth(270)
             self.inspector.setMaximumWidth(350)
-            self.search.setMinimumWidth(145)
-            self.search.setMaximumWidth(220)
             self.log_search.setMinimumWidth(120)
             self.log_search.setMaximumWidth(170)
             self.register_title_row.setContentsMargins(14, 0, 14, 0)
             self.register_title_row.setSpacing(10)
-            self.module_title.setMaximumWidth(240)
-            self.module_badge.setMaximumWidth(180)
 
     def _set_register_count(self, text):
         self._full_register_count = str(text)
@@ -1544,6 +1547,42 @@ class MainWindow(QMainWindow):
         if shown and self.workspace.width() < 1070:
             shown = shown.split("项", 1)[0].replace(" ", "") + "项"
         self.register_count.setText(shown)
+        QTimer.singleShot(0, self._fit_title_row)
+
+    def _set_action_labels(self, labelled):
+        for control, text in ((self.read_all_button, "读取全部"), (self.write_all_button, "批量写入"),
+                              (self.export_button, "导出快照"), (self.help_button, "使用指南")):
+            if control.text() != (text if labelled else ""):
+                control.setText(text if labelled else "")
+            control.setIconSize(QSize(16, 16))
+            control.setFixedWidth(control.sizeHint().width())
+            control.setAccessibleName(text)
+            control.setToolTip(text)
+
+    def _fit_title_row(self):
+        """Give way in order: type badge (to ~90 px), action button labels, then the component title."""
+        row = self.register_title_row
+        available = row.geometry().width()
+        if available <= 0:
+            return
+        margins = row.contentsMargins()
+        badge_shown = not self.module_badge.isHidden() and bool(self.module_badge.text())
+        title_full = self.module_title.sizeHint().width()
+        badge_full = self.module_badge.sizeHint().width() if badge_shown else 0
+        for labelled in (True, False):
+            self._set_action_labels(labelled)
+            fixed = [widget for widget in (self.register_count, self.poll_check, self.interval, self.write_all_button,
+                                           self.read_all_button, self.export_button, self.help_button)
+                     if not widget.isHidden()]
+            widths = (max(widget.minimumWidth(), min(widget.maximumWidth(), widget.sizeHint().width()))
+                      for widget in fixed)   # fixed-width controls report a smaller hint
+            free = (available - margins.left() - margins.right() - sum(widths)
+                    - row.spacing() * (len(fixed) + badge_shown))
+            if free >= title_full + min(badge_full, 90):
+                break
+        badge = min(badge_full, max(min(badge_full, 90), free - title_full))
+        self.module_badge.setMaximumWidth(max(0, badge))
+        self.module_title.setMaximumWidth(max(40, min(title_full, free - badge)))
 
     def _fit_console_toolbar(self):
         if not hasattr(self, "console_toolbar"):
@@ -1577,17 +1616,10 @@ class MainWindow(QMainWindow):
         self.log_prev.setVisible(not narrow)
         self.log_next.setVisible(not narrow)
         self.console_toolbar.setSpacing(0 if tiny else 3 if narrow else 4)
-        for control, text in ((self.read_all_button, "读取全部"), (self.write_all_button, "批量写入"),
-                              (self.export_button, "导出快照"), (self.help_button, "使用指南")):
-            control.setText("" if narrow else text)
-            control.setIconSize(QSize(16, 16))
-            control.setFixedWidth(control.sizeHint().width())
-            control.setAccessibleName(text)
-            control.setToolTip(text)
-        self.module_title.setMaximumWidth(100 if tiny else 150 if narrow else 240)
         self.module_badge.setVisible(not tiny)
         self.register_count.setVisible(not tiny)
         self._set_register_count(getattr(self, "_full_register_count", ""))
+        self._fit_title_row()
         sidebar_narrow = self.sidebar_scroll.viewport().width() < 320
         for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "导入组件")):
             control.setText("" if sidebar_narrow else text)
@@ -1602,6 +1634,7 @@ class MainWindow(QMainWindow):
                                    (self.console_source_combo, full_sources, short_sources)):
             self._set_combo_display_labels(combo, full, short, narrow)
         self._fit_compact_selectors(narrow, tiny)
+        self._fit_register_filters()
 
     @staticmethod
     def _set_combo_display_labels(combo, full_labels, short_labels, compact):
@@ -1628,28 +1661,49 @@ class MainWindow(QMainWindow):
         finally:
             combo.blockSignals(blocked)
 
+    def _apply_filter_density(self, level):
+        short_tabs, padding, access_width, short_access, search_min, search_max, spacing = REGISTER_FILTER_DENSITIES[level]
+        self._filter_density = level
+        for key, tab in self.view_buttons.items():
+            full = top_import.VIEW_LABELS[key]
+            tab.setText(SHORT_VIEW_LABELS.get(key, full) if short_tabs else full)
+            tab.setAccessibleName(full)
+            tab.setToolTip(full + "\n" + VIEW_TOOLTIPS.get(key, full))
+            if tab.property("density") != padding:
+                tab.setProperty("density", padding)
+                restyle(tab)
+                tab.updateGeometry()
+        self.register_filters_layout.setSpacing(spacing)
+        if self.access_filter.property("compact") != short_access:
+            self.access_filter.setProperty("compact", short_access)
+            restyle(self.access_filter)
+        self._set_combo_display_labels(self.access_filter,
+                                      ("全部权限", "只读", "可读写"), ("全部", "只读", "读写"), short_access)
+        self.access_filter.setFixedWidth(access_width)
+        self.search.setMinimumWidth(search_min)
+        self.search.setMaximumWidth(search_max)
+        self._refresh_selector_tooltips()
+
+    def _fit_register_filters(self):
+        """Pick the roomiest preset whose minimum fits the bar's real width (splitters
+        move it independently of the window), so the combo and search never overlap."""
+        if not hasattr(self, "register_filters"):
+            return
+        available = self.register_filters.width()
+        layout = self.register_filters.layout()
+        for level in range(len(REGISTER_FILTER_DENSITIES)):
+            if level != self._filter_density:
+                self._apply_filter_density(level)
+            layout.invalidate()
+            if layout.minimumSize().width() <= available:
+                return
+
     def _fit_compact_selectors(self, compact, tiny):
-        for combo in (self.access_filter, self.interval, self.width_combo, self.format_combo,
+        for combo in (self.interval, self.width_combo, self.format_combo,
                       self.preset_combo, self.log_filter, self.console_source_combo):
             if combo.property("compact") != compact:
                 combo.setProperty("compact", compact)
                 restyle(combo)
-        short_views = {"basic": "基", "task_a": "A", "task_b": "B", "task_c": "C",
-                       "irq": "IRQ", "param": "参", "debug": "调", "all": "全"}
-        for key, tab in self.view_buttons.items():
-            full = top_import.VIEW_LABELS[key]
-            tab.setText(short_views.get(key, full) if tiny else full)
-            tab.setAccessibleName(full)
-            tab.setToolTip(full + "\n" + VIEW_TOOLTIPS.get(key, full))
-            if tab.property("compact") != tiny:
-                tab.setProperty("compact", tiny)
-                restyle(tab)
-        self.register_filters_layout.setSpacing(1 if tiny else 3)
-        self.search.setMinimumWidth(80 if tiny else 105 if compact else 145)
-        self.search.setMaximumWidth(110 if tiny else 180 if compact else 220)
-        self._set_combo_display_labels(self.access_filter,
-                                      ("全部权限", "只读", "可读写"), ("全部", "只读", "读写"), compact)
-        self.access_filter.setFixedWidth(72 if tiny else 80 if compact else 112)
         periods = ("0.1 s", "0.2 s", "0.5 s", "1 s", "2 s", "5 s", "10 s")
         self._set_combo_display_labels(self.interval, periods,
                                       tuple(text.replace(" ", "") for text in periods), compact)

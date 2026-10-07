@@ -156,7 +156,8 @@ QPushButton#flat { background: transparent; border: 1px solid transparent; color
 QPushButton#flat:hover { background: #E9F0FA; color: #2463DC; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #718397; min-height: 28px; padding: 0 11px; }
 QPushButton#tab:checked { background: #E4EDFC; color: #245DC4; border: 1px solid #D2E1FA; }
-QPushButton#tab[compact="true"] { padding: 0 3px; }
+QPushButton#tab[density="snug"] { padding: 0 5px; }
+QPushButton#tab[density="tight"] { padding: 0 3px; }
 QPushButton#rowRead { background: transparent; border: none; min-height: 26px; padding: 0 4px; color: #2463DC; }
 QPushButton#rowRead:hover { background: #DDEAFE; }
 QTableWidget { background: white; alternate-background-color: #F8FAFC; border: none; outline: none; gridline-color: #EFF3F7; selection-background-color: #E6EFFD; selection-color: #1F4F9B; }
