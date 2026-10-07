@@ -165,15 +165,15 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.window.table.item(0, 3).text(), "读取错误")
 
     def test_serial_connect_flow_and_command_routing(self):
-        """串口连接按钮、字段禁用逻辑、命令目标下拉路由串口命令。"""
+        """串口连接后终端自动切到 serial 实时终端：板卡输出直接显示，按键逐个直发。"""
         from devmem_studio.serial_session import SerialSession
         connected_serial = {}
+        sent = []
         class FakeSerialSession(SerialSession):
             def connect(self, port, baud, username, password, timeout):
                 connected_serial.update(port=port, baud=baud, username=username, password=password)
-            def run(self, command, timeout=8, quiet=False):
-                self.last_command = command
-                return "out:" + command
+            def send(self, data):
+                sent.append(bytes(data))
             def close(self):
                 pass
             @property
@@ -198,30 +198,126 @@ class UiTests(unittest.TestCase):
         self.assertFalse(self.window.serial_section.is_expanded())
         # 连接成功路径必须清掉竞态残留的取消标志（否则下一次失败会被误报为“已取消”）。
         self.assertFalse(self.window._serial_cancel_requested)
-        # 终端来源=serial 时终端提示符可输入、命令走串口会话。
-        idx = self.window.console_source_combo.findData("com")
-        self.window.console_source_combo.setCurrentIndex(idx)
-        self.settle(lambda: self.window.console_source == "com")
-        self.assertTrue(self.window.console.is_interactive())
-        self.window.send_command("ls /")
-        self.settle(lambda: not self.window._busy)
-        self.assertEqual(self.window.serial.last_command, "ls /")
-        # Tab 补全：板端候选经串口静默查询，唯一候选补齐。
-        self.window.serial.run = lambda command, timeout=8, quiet=False: "media/\n" if "for f in" in command else ""
+        # 连接成功即切到 serial 视图：字符模式终端，不再有本地 ❯ 提示行。
+        self.assertEqual(self.window.console_source, "com")
         console = self.window.console
-        console._set_prompt_input("cd /run/me")
+        self.assertTrue(console.is_raw())
+        self.assertFalse(console.is_interactive())
+        self.assertTrue(self.window.uboot_catch.isVisible())
+        # 板卡自发打印（无命令）实时显示，光标停在板端光标处。
+        token = self.window._serial_epoch
+        self.window._serial_output(token, "[  3.2] usb 1-1: new device\r\nroot@board:~# ")
+        self.assertIn("usb 1-1: new device", console.toPlainText())
+        self.assertTrue(console.toPlainText().endswith("root@board:~# "))
+        self.assertEqual(console.textCursor().position(), len(console.toPlainText()))
+        # 按键逐个直发：Shift+7、Tab、方向键、回车、Ctrl+C。
+        QTest.keyClicks(console, "ls")
+        QTest.keyClick(console, Qt.Key_Ampersand, Qt.ShiftModifier)
         QTest.keyClick(console, Qt.Key_Tab)
-        self.settle(lambda: console._prompt_input() == "cd /run/media/")
-        # 多候选且无公共前缀可延伸：列在提示符上方。
-        self.window.serial.run = lambda command, timeout=8, quiet=False: "log\nlock/\n"
-        console._set_prompt_input("ls /run/lo")
-        QTest.keyClick(console, Qt.Key_Tab)
-        self.settle(lambda: "lock/  log" in console.toPlainText())
-        self.assertEqual(console._prompt_input(), "ls /run/lo")
-        # 断开串口后字段恢复可编辑
+        QTest.keyClick(console, Qt.Key_Up)
+        QTest.keyClick(console, Qt.Key_Return)
+        QTest.keyClick(console, Qt.Key_C, Qt.ControlModifier)
+        self.assertEqual(sent, [b"l", b"s", b"&", b"\t", b"\x1b[A", b"\r", b"\x03"])
+        sent.clear()
+        self.window.send_command("pwd")   # a programmatic command is typed as a line
+        self.assertEqual(sent, [b"pwd\r"])
+        # 旧会话的残留输出按 token 丢弃。
+        self.window._serial_output(token - 1, "stale output")
+        self.assertNotIn("stale output", console.toPlainText())
+        # 断开串口后字段恢复可编辑，终端留下断开标记
         self.window.disconnect_serial()
         self.assertFalse(self.window.serial_connected)
         self.assertTrue(self.window.serial_port.isEnabled())
+        self.assertIn("[serial 已断开]", console.toPlainText())
+        sent.clear()
+        QTest.keyClick(console, Qt.Key_A)
+        self.assertEqual(sent, [])
+        self.assertIn("按键未发送", console.toPlainText())
+
+    def _fake_serial_connected(self, device="COM9"):
+        from devmem_studio.serial_session import SerialSession
+        armed = []
+
+        class Connected(SerialSession):
+            def connect(self, port, baud, username, password, timeout):
+                self._test_alive = True
+            def send(self, data):
+                pass
+            def arm_uboot_stop(self, key=b"&", timeout=300.0):
+                armed.append(key)
+            def close(self):
+                self._test_alive = False
+            @property
+            def alive(self):
+                return getattr(self, "_test_alive", False)
+
+        with patch("devmem_studio.window.SerialSession", Connected):
+            self.window.serial_port.addItem(f"USB Serial Port ({device})", device)
+            self.window.serial_port.setCurrentIndex(self.window.serial_port.findData(device))
+            self.window._toggle_serial()
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
+        return armed
+
+    def test_serial_unplug_drops_the_session_at_once(self):
+        self._fake_serial_connected()
+        errors = self.window.error_count
+        self.window._serial_lost(self.window._serial_epoch, "串口 COM9 已断开（USB 串口线可能已拔出）：device gone")
+        self.assertFalse(self.window.serial_connected)
+        self.assertEqual(self.window.serial_section.dot.property("state"), "offline")
+        self.assertEqual(self.window.error_count, errors + 1)
+        self.assertIn("串口线可能已拔出", self.window.console.toPlainText())
+        # Port list fallback: the device vanishing from Windows also drops the link.
+        self._fake_serial_connected("COM8")
+        with patch("devmem_studio.window.list_serial_ports", return_value=[]):
+            self.window._refresh_serial_ports(force=True)
+        self.assertFalse(self.window.serial_connected)
+        self.assertEqual(self.window.serial_port.count(), 0)
+
+    def test_device_change_message_triggers_port_rescan(self):
+        import ctypes
+        from ctypes import wintypes
+        msg = wintypes.MSG()
+        msg.message, msg.wParam = 0x0219, 0x8004   # WM_DEVICECHANGE / DBT_DEVICEREMOVECOMPLETE
+        with patch.object(self.window, "_refresh_serial_ports") as rescan:
+            self.assertEqual(self.window.nativeEvent(b"windows_generic_MSG", ctypes.addressof(msg)), (False, 0))
+            self.settle(lambda: unittest.mock.call(force=True) in rescan.call_args_list, timeout=2)
+
+    def test_uboot_catch_checkbox_arms_and_resets(self):
+        self.window._set_console_source("system")
+        self.assertFalse(self.window.uboot_catch.isVisible())
+        self.window.uboot_catch.setChecked(True)   # not connected: refused
+        self.assertFalse(self.window.uboot_catch.isChecked())
+        armed = self._fake_serial_connected()
+        self.assertTrue(self.window.uboot_catch.isVisible())
+        self.window.uboot_catch.setChecked(True)
+        self.assertEqual(armed, [b"&"])
+        self.window._serial_uboot(self.window._serial_epoch, True)
+        self.assertFalse(self.window.uboot_catch.isChecked())
+        self.assertIn("已停在 U-Boot", self.window.console.toPlainText())
+        self.window.uboot_catch.setChecked(True)
+        self.window.disconnect_serial()
+        self.assertFalse(self.window.uboot_catch.isChecked())
+
+    def test_follow_checkbox_jumps_to_latest_output(self):
+        self.window._set_console_source("system")
+        for index in range(200):
+            self.window.append_log("INFO", f"line {index}")
+        bar = self.window.console.verticalScrollBar()
+        self.window.follow_log.setChecked(False)
+        bar.setValue(0)
+        self.window.append_log("INFO", "while scrolled up")
+        self.assertEqual(bar.value(), 0)   # follow off: stays where the user scrolled
+        self.window.follow_log.setChecked(True)
+        self.assertEqual(bar.value(), bar.maximum())
+        # Serial view too: the raw terminal jumps back to the live line.
+        self._fake_serial_connected()
+        self.window._serial_output(self.window._serial_epoch, "".join(f"boot {i}\r\n" for i in range(200)))
+        self.window.follow_log.setChecked(False)
+        bar.setValue(0)
+        self.window._serial_output(self.window._serial_epoch, "more\r\n")
+        self.assertEqual(bar.value(), 0)
+        self.window.follow_log.setChecked(True)
+        self.assertEqual(bar.value(), bar.maximum())
 
     def test_serial_connect_shows_shared_progress_bar(self):
         """serial 握手期间显示与 SSH 连接相同的 3px 不定进度条，结束后收回。"""
@@ -1106,6 +1202,128 @@ class TopImportUiTests(UiTests):
             fresh.close()
             self.settle(lambda: not fresh._busy and not fresh.isVisible())
 
+
+    def _bit_tree(self):
+        root = Path(self.temp.name) / "proj"
+        newest = root / "proj.runs" / "impl_1" / "top.bit"
+        older = root / "out" / "old.bit"
+        for index, path in enumerate((older, newest)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"\x00" * (32 + index))
+            os.utime(path, (1_700_000_000 + index * 100, 1_700_000_000 + index * 100))
+        hidden = root / ".Xil" / "ignored.bit"
+        hidden.parent.mkdir(parents=True)
+        hidden.write_bytes(b"x")
+        return root, newest, older
+
+    def test_bit_upload_folder_scan_lists_choices_newest_first(self):
+        from devmem_studio.dialogs import FileChoiceDialog
+        root, newest, older = self._bit_tree()
+        self.window.open_bit_upload()
+        dialog = self.window.bit_dialog
+        shown = []
+
+        def choose(chooser):
+            shown.append([chooser.table.item(row, 0).text() for row in range(chooser.table.rowCount())])
+            chooser.table.selectRow(1)
+            return QDialog.Accepted
+
+        with patch.object(FileChoiceDialog, "exec", choose):
+            dialog.scan_folder(str(root))
+            self.settle(lambda: dialog._local_path is not None)
+        self.assertEqual(shown, [[str(Path("proj.runs/impl_1/top.bit")), str(Path("out/old.bit"))]])
+        self.assertEqual(Path(dialog._local_path), older)
+        self.assertEqual(self.window.cfg["bit_local_dir"], str(older.parent))
+        # A folder holding exactly one bit selects it without asking.
+        dialog._reset_state()
+        with patch.object(FileChoiceDialog, "exec") as chooser:
+            dialog.scan_folder(str(newest.parent))
+            self.settle(lambda: dialog._local_path is not None)
+        chooser.assert_not_called()
+        self.assertEqual(Path(dialog._local_path), newest)
+
+    def test_bit_upload_remote_dir_is_selectable_and_remembered(self):
+        usb = self.window.session.remote_root / "run" / "media" / "usb1"
+        usb.mkdir(parents=True)
+        bit = Path(self.temp.name) / "fw.bit"
+        bit.write_bytes(b"\x01" * 64)
+        self.window.open_bit_upload()
+        dialog = self.window.bit_dialog
+        combo = dialog.remote_dir
+        self.assertEqual(combo.path_text(), "/run/media/sda")
+        self.settle(lambda: combo.findText("/run/media/usb1") >= 0)   # board mounts are discovered
+        dialog.set_path(str(bit))
+        combo.setEditText("relative/dir")
+        with patch("devmem_studio.window.QMessageBox.warning") as warning:
+            dialog.start_upload()
+        self.assertEqual(warning.call_args.args[1], "板端目录无效")
+        combo.setEditText("/run/media/usb1/")
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes) as question:
+            dialog.start_upload()
+            self.settle(lambda: not self.window._busy)
+        self.assertIn("/run/media/usb1/sunny_fpga.bit", question.call_args.args[2])
+        self.assertTrue((usb / "sunny_fpga.bit").is_file())
+        self.assertEqual(self.window.cfg["bit_remote_dir"], "/run/media/usb1")
+        self.assertEqual(self.window.cfg["bit_remote_dirs"][0], "/run/media/usb1")
+        # The rollback dialog opens on the remembered directory and lists it.
+        self.window.open_bit_rollback()
+        rollback = self.window.bit_rollback_dialog
+        self.settle(lambda: not self.window._busy and rollback.listed_dir() == "/run/media/usb1")
+        self.assertEqual(rollback.remote_dir.path_text(), "/run/media/usb1")
+        self.assertIn("sunny_fpga.bit", rollback.list.item(0).text())
+        # Picking another directory there re-lists and becomes the remembered one.
+        rollback.remote_dir.setCurrentIndex(rollback.remote_dir.findText("/run/media/sda"))
+        rollback.remote_dir.activated.emit(rollback.remote_dir.currentIndex())
+        self.settle(lambda: not self.window._busy and rollback.listed_dir() == "/run/media/sda")
+        self.assertEqual(self.window.cfg["bit_remote_dir"], "/run/media/sda")
+        self.assertEqual(dialog.remote_dir.path_text(), "/run/media/sda")
+
+    def test_import_top_from_folder_lists_candidates(self):
+        from devmem_studio.dialogs import FileChoiceDialog
+        self.window.disconnect()
+        self.settle(lambda: not self.window._busy)
+        folder = Path(self.temp.name) / "rtl"
+        (folder / "sub").mkdir(parents=True)
+        (folder / "plain.v").write_text("module plain; endmodule\n", encoding="utf-8")
+        first = folder / "mix_top_a.sv"
+        second = folder / "sub" / "mix_top_b.sv"
+        first.write_text(IMPORT_TOP_FIXTURE, encoding="utf-8")
+        second.write_text(IMPORT_TOP_FIXTURE.split("// --- flow_comp_2")[0], encoding="utf-8")
+        rows = []
+
+        def choose(chooser):
+            rows.extend(chooser.table.item(row, 1).text() for row in range(chooser.table.rowCount()))
+            return QDialog.Accepted
+
+        with patch.object(FileChoiceDialog, "exec", choose), \
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
+            self.window.import_top_folder(str(folder))
+            self.settle(lambda: self.window.top_info["path"] == str(first))
+        self.assertEqual(rows, ["2 个控件", "1 个控件"])   # most controls first; plain.v is not a top
+        # A folder with a single top goes straight to the confirmation.
+        with patch.object(FileChoiceDialog, "exec") as chooser, \
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
+            self.window.import_top_folder(str(folder / "sub"))
+            self.settle(lambda: self.window.top_info["path"] == str(second))
+        chooser.assert_not_called()
+        empty = Path(self.temp.name) / "empty"
+        empty.mkdir()
+        with patch("devmem_studio.window.QMessageBox.warning") as warning:
+            self.window.import_top_folder(str(empty))
+            self.settle(lambda: warning.called)
+        self.assertEqual(warning.call_args.args[1], "未找到 top")
+
+    def test_import_top_button_offers_file_or_folder(self):
+        self.window.disconnect()
+        self.settle(lambda: not self.window._busy)
+        menu = self.window._import_top_menu()
+        self.assertEqual([action.text() for action in menu.actions()], ["选择 top 文件…", "选择文件夹，自动查找 top…"])
+        with patch.object(self.window, "import_top_folder") as folder:
+            menu.actions()[1].trigger()
+        folder.assert_called_once_with()
+        with patch.object(self.window, "_import_top_menu") as build:
+            self.window.import_button.click()
+        build.return_value.exec.assert_called_once()
 
     def test_bit_upload_paste_file_path(self):
         # Paste a raw .bit path (text clipboard) → picked.

@@ -1,42 +1,72 @@
 # -*- coding: utf-8 -*-
-"""Serial console shell transport; a parallel connection alongside SSH."""
+"""Serial console transport: a raw byte stream beside SSH, pumped on its own thread."""
 from __future__ import annotations
 
+import codecs
+import queue
 import re
 import threading
 import time
-import uuid
 
 import serial
 
-from .core import CommandError, strip_ansi, _strip_shell_prompt
+from .core import CommandError, strip_ansi
 
-# Same marker protocol as SshSession.run: shell echoes ``__DM_<hex>_<exit>__``.
-# A console prompt may carry a host prefix ("board login: "), so match anywhere.
-_LOGIN_RE = re.compile(r"[Ll]ogin:")
-_PASSWORD_RE = re.compile(r"[Pp]assword:")
+# A console prompt may carry a host prefix ("board login: ").
+_LOGIN_PROMPT = re.compile(r"[Ll]ogin:\s*$")
+_PASSWORD_PROMPT = re.compile(r"(?:^|\n)\s*[Pp]assword:\s*$")
+_LOGIN_FAILED = re.compile(r"[Ll]ogin incorrect")
+_SHELL_PROMPT = re.compile(r"[#$>]\s*$")
+_IDLE = 0.01           # pump wait between polls; a queued keystroke wakes it at once
+_PROMPT_SETTLE = 0.3   # a login prompt must sit quiet this long before it is answered
+_LOGIN_ATTEMPTS = 2
+_AUTOBOOT = re.compile(r"autoboot|any key", re.I)
+_UBOOT_PROMPT = re.compile(r"(?:^|\n)[\w-]*(?:=>|>) ?$")
+_KERNEL_STARTED = re.compile(r"Starting kernel|\[\s*\d+\.\d+\]")
+_UBOOT_REPEAT = 0.04   # like a held key: one byte every 40 ms
+_UBOOT_HOLD = 6.0      # give up holding once the countdown has surely run out
 
-# Short per-read timeout so polling loops stay snappy regardless of the
-# handshake timeout; command-level timeouts are managed by deadline loops.
-_READ_TIMEOUT = 0.4
+
+def _open_error(port, exc):
+    text = str(exc)
+    if "PermissionError" in text or "拒绝访问" in text or "Access is denied" in text:
+        return f"串口 {port} 被占用：请先关闭占用它的串口工具（如 MobaXterm / SecureCRT）后重试。"
+    if "FileNotFoundError" in text or "找不到" in text or "cannot find" in text:
+        return f"找不到串口 {port}：请检查 USB 串口线是否插好。"
+    return f"打开串口 {port} 失败：{text}"
 
 
 class SerialSession:
-    """Interactive console shell over a physical or emulated serial port.
+    """Interactive serial console.
 
-    Carries the same devmem marker protocol as SSH so a command line works on
-    either transport, but intentionally has no file-transfer or log-stream
-    capability: bit upload/rollback and sunny.log stay on SSH."""
-    def __init__(self, log=lambda level, text: None):
+    Everything the board prints reaches ``on_data`` as text the moment it
+    arrives; keystrokes go out through send(). A dead port (USB unplugged)
+    is reported once through ``on_lost``. There is deliberately no command
+    protocol and no file transfer: bit upload/rollback and sunny.log stay on SSH."""
+
+    def __init__(self, log=lambda level, text: None, on_data=None, on_lost=None, on_uboot=None):
         self.log = log
+        self.on_data = on_data or (lambda text: None)
+        self.on_lost = on_lost or (lambda message: None)
+        self.on_uboot = on_uboot or (lambda caught: None)
+        self._uboot = None
         self.ser = None
-        self.last_exit = None
-        self._lock = threading.Lock()
-        self._closed = False
+        self.port = ""
+        self._closed = True
+        self._generation = 0
         self._cancel = threading.Event()
+        self._outbox = queue.Queue()
+        self._username = ""
+        self._password = ""
+        self._auto_login = False
+        self._login_stage = None
+        self._login_attempts = 0
+        self._tail = ""
+        self._tail_at = 0.0
+        self._tail_dirty = False
 
     def cancel_connect(self):
-        """Abort an in-flight connect(): the handshake loops raise immediately."""
+        """Abort an in-flight connect()."""
         self._cancel.set()
 
     @property
@@ -47,200 +77,167 @@ class SerialSession:
             return False
 
     def connect(self, port, baud=115200, username="", password="", timeout=8):
+        """Open the port and start streaming. Nothing is sent: a keystroke now
+        could stop a U-Boot countdown the user did not mean to interrupt."""
         self.close()
         # _cancel is not re-armed here: a cancel issued before the worker reaches
         # connect() must still win. The window uses a fresh session per attempt.
-        ser =serial.serial_for_url(port, baudrate=baud, timeout=_READ_TIMEOUT, write_timeout=_READ_TIMEOUT)
+        if self._cancel.is_set():
+            raise CommandError("连接已取消。")
+        try:
+            ser = serial.serial_for_url(port, baudrate=baud, timeout=0, write_timeout=2)
+        except (serial.SerialException, OSError, ValueError) as exc:
+            raise CommandError(_open_error(port, exc)) from None
+        if self._cancel.is_set():
+            ser.close()
+            raise CommandError("连接已取消。")
+        self._generation += 1
         self.ser = ser
+        self.port = port
         self._closed = False
-        self.last_exit = None
-        try:
-            self.log("SYSTEM", f"串口已打开：{port} @ {baud} bps。")
-            # A console may sit at login:/Password: or already be a root shell.
-            self._auto_login(username, password, timeout)
-            self._send(b"stty -echo\n")
-            self._drain(0.15)
-            self.log("SYSTEM", "串口控制台已就绪。")
-        except Exception:
-            self.close()
-            raise
+        self._outbox = queue.Queue()
+        self._username, self._password = username, password
+        self._auto_login = bool(username)
+        self._login_stage = None
+        self._login_attempts = 0
+        self._tail, self._tail_dirty = "", False
+        threading.Thread(target=self._pump, args=(ser, self._generation, self._outbox),
+                         name=f"serial-{port}", daemon=True).start()
+        self.log("SYSTEM", f"串口已打开：{port} @ {baud} bps。")
 
-    def _send(self, data: bytes):
-        ser = self.ser   # close() from the GUI thread may null it mid-command
-        try:
-            if ser is None:
-                raise serial.SerialException("port closed")
-            ser.write(data)
-            ser.flush()
-        except (serial.SerialException, OSError, AttributeError):
-            self._closed = True
-            raise CommandError("串口连接已断开，请重新连接。") from None
+    def send(self, data):
+        """Queue raw bytes (keystrokes, pasted text) for the board."""
+        if not self.alive:
+            raise CommandError("串口未连接，请先连接串口。")
+        if data:
+            self._outbox.put(bytes(data))
 
-    def _read_raw(self) -> bytes:
-        """Read whatever is buffered; raises CommandError on a dead port.
+    def arm_uboot_stop(self, key=b"&", timeout=300.0):
+        """Catch the next autoboot countdown by holding `key` until the U-Boot prompt shows.
 
-        Idle UARTs return immediately instead of blocking on ``read(1)`` (which
-        would stall every quiet poll for the full serial read timeout). Callers
-        loop until their own deadline, so a short sleep between passes is all
-        the idle cost."""
-        ser = self.ser
-        try:
-            if ser is None:
-                raise serial.SerialException("port closed")
-            waiting = ser.in_waiting
-            return ser.read(waiting) if waiting else b""
-        except (serial.SerialException, OSError, AttributeError):
-            self._closed = True
-            raise CommandError("串口连接已断开，请重新连接。") from None
+        Some boards ignore a single key press there and need it held down."""
+        self._uboot = {"key": bytes(key), "until": time.monotonic() + timeout, "tail": "",
+                       "since": None, "next": 0.0}
 
-    def _recv_text(self, seconds: float, settled=True) -> str:
-        """Collect input for up to `seconds`.
+    def disarm_uboot_stop(self):
+        self._uboot = None
 
-        With ``settled=True`` a quiet line (0.15s with data already buffered)
-        ends the read early; ``settled=False`` always waits the full window,
-        which the login handshake needs because prompts arrive in discrete
-        chunks with gaps between them."""
-        data = bytearray()
-        deadline = time.monotonic() + seconds
-        idle_since = time.monotonic()
-        while time.monotonic() < deadline:
-            if self._cancel.is_set():
-                raise CommandError("连接已取消。")
-            try:
-                chunk = self._read_raw()
-            except CommandError:
-                raise
-            if chunk:
-                data += chunk
-                idle_since = time.monotonic()
-            elif settled and data and time.monotonic() - idle_since >= 0.15:
-                break
-            time.sleep(0.01)
-        return strip_ansi(data.decode("utf-8", "replace"))
-
-    def _drain(self, seconds: float):
-        self._recv_text(seconds)
-
-    def _auto_login(self, username, password, timeout):
-        """Handle login/password prompts before declaring the console ready.
-
-        Quiet consoles are still treated as an already-logged-in shell, but a
-        detected credential prompt must complete the handshake or fail.
-        """
-        text = self._recv_text(min(timeout, 0.5))
-        if not text.strip():
-            # getty may wait for Enter before emitting its login prompt.
-            self._send(b"\n")
-            text = self._recv_text(min(timeout, 0.5))
-        if not text.strip():
-            # Inspect this late response *before* choosing the login state.
-            text = self._recv_text(min(timeout, 0.2), settled=False)
-        deadline = time.monotonic() + timeout
-        if _PASSWORD_RE.search(text):
-            # The username may have been entered before this session opened.
-            self._send((password + "\n").encode())
-            self._await_shell(deadline)
-            return
-        if not _LOGIN_RE.search(text):
-            return
-        if not username:
-            raise CommandError("串口控制台停在 login: 提示，请填写串口用户名/密码后重新连接。")
-        self._send((username + "\n").encode())
-        buffer = bytearray()
-        while time.monotonic() < deadline:
-            if self._cancel.is_set():
-                raise CommandError("连接已取消。")
-            decoded = strip_ansi(buffer.decode("utf-8", "replace"))
-            if re.search(r"[Ll]ogin incorrect|[Ll]ogin:\s*$", decoded):
-                raise CommandError("串口登录失败：用户名或密码错误。")
-            if _PASSWORD_RE.search(decoded):
-                self._send((password + "\n").encode())
-                self._await_shell(deadline)
-                return
-            if re.search(r"[#$>]\s*$", decoded) and "\n" in decoded:
-                return  # login completed without asking for a password
-            # A dead port is a connection failure, never a successful login.
-            chunk = self._read_raw()
-            if chunk:
-                buffer += chunk
-            time.sleep(0.01)
-        raise CommandError(f"串口登录超时（{timeout:g} 秒未完成握手），请检查控制台状态。")
-
-    def _await_shell(self, deadline):
-        """After the password: wait for a shell prompt; login rejects slowly (~3s)."""
-        text = ""
-        while time.monotonic() < deadline:
-            text += self._recv_text(0.2)
-            if re.search(r"[Ll]ogin incorrect|[Ll]ogin:\s*$", text):
-                raise CommandError("串口登录失败：用户名或密码错误。")
-            if re.search(r"[#$>]\s*$", text):
-                return
-        raise CommandError("串口登录超时：已发送密码但未等到 shell 提示符。")
-
-    def run(self, command: str, timeout=8, quiet=False):
-        if not command.strip() or "\x00" in command:
-            raise ValueError("命令不能为空或包含空字符。")
-        with self._lock:
-            if not self.alive:
-                raise CommandError("串口未连接，请先连接串口。")
-            try:
-                drain_until = time.monotonic() + 0.2   # bounded: a chatty console never goes quiet
-                while self._read_raw() and time.monotonic() < drain_until:  # drop stale printk/echoes
-                    pass
-            except CommandError:
-                self.close()
-                raise
-            if not quiet:
-                self.log("CMD", command)
-            marker = "__DM_" + uuid.uuid4().hex[:16] + "_"
-            end_re = re.compile(r"(?:^|\n)" + re.escape(marker) + r"(\d+)__\s*(?:\n|$)")
-            full = command.rstrip() + "\nprintf '\\n" + marker + "%s__\\n' \"$?\"\n"
-            self._send(full.encode("utf-8"))
-            output = bytearray()
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                try:
-                    chunk = self._read_raw()
-                except CommandError:
-                    self.close()
-                    raise
-                if chunk:
-                    output.extend(chunk)
-                    if len(output) > 4 * 1024 * 1024:
-                        self.close()
-                        raise CommandError("命令输出超过 4 MB，已断开连接。")
-                    decoded = strip_ansi(output.decode("utf-8", "replace"))
-                    match = end_re.search(decoded)
-                    if match:
-                        self.last_exit = int(match.group(1))
-                        lines = []
-                        for line in decoded[:match.start()].splitlines():
-                            line = _strip_shell_prompt(line)
-                            if (not line.strip() or marker in line or line.strip() == command.strip()
-                                    or re.fullmatch(r"[^\n]*[#$>]\s*", line)):
-                                continue
-                            lines.append(line)
-                        result = "\n".join(lines).strip()
-                        if result and not quiet:
-                            self.log("INFO" if self.last_exit == 0 else "ERROR", result)
-                        if self.last_exit:
-                            raise CommandError(f"命令退出码 {self.last_exit}：{result or command}")
-                        return result
-                time.sleep(0.01)
-            # A console without its terminator is not safe to reuse.
-            self.close()
-            tail = strip_ansi(output.decode("utf-8", "replace")).strip()[-120:]
-            hint = f"最后收到：{tail!r}" if tail else "期间未收到任何数据"
-            raise TimeoutError(f"命令超过 {timeout:g} 秒未完成（{hint}），连接已关闭，请重新连接。")
+    @property
+    def uboot_armed(self):
+        return self._uboot is not None
 
     def close(self):
         self._closed = True
+        self._generation += 1
         ser, self.ser = self.ser, None
         if ser:
             try:
                 ser.close()
             except Exception:
                 pass
+
+    # -- pump thread ---------------------------------------------------------
+    def _pump(self, ser, generation, outbox):
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        try:
+            while generation == self._generation:
+                while True:
+                    try:
+                        ser.write(outbox.get_nowait())
+                    except queue.Empty:
+                        break
+                waiting = ser.in_waiting   # raises once the USB device is gone
+                if waiting:
+                    text = decoder.decode(ser.read(waiting))
+                    if text and generation == self._generation:
+                        self.on_data(text)
+                        self._watch_login(text)
+                        self._watch_uboot(text, ser)
+                elif self._tail_dirty:
+                    self._answer_login(ser)
+                if self._uboot is not None:
+                    self._hold_uboot_key(ser)
+                try:
+                    data = outbox.get(timeout=_IDLE)
+                except queue.Empty:
+                    continue
+                ser.write(data)
+        except Exception as exc:
+            if generation != self._generation:
+                return   # closed on purpose
+            self._closed = True
+            self._generation += 1
+            self.ser = None
+            try:
+                ser.close()
+            except Exception:
+                pass
+            self.on_lost(f"串口 {self.port} 已断开（USB 串口线可能已拔出）：{exc}")
+
+    def _watch_login(self, text):
+        if self._auto_login:
+            self._tail = (self._tail + strip_ansi(text))[-256:]
+            self._tail_at = time.monotonic()
+            self._tail_dirty = True
+
+    def _answer_login(self, ser):
+        """Answer a getty prompt with the saved credentials once it has gone quiet."""
+        if time.monotonic() - self._tail_at < _PROMPT_SETTLE:
+            return
+        self._tail_dirty = False
+        tail = self._tail
+        if self._login_stage and _LOGIN_FAILED.search(tail):
+            self._stop_auto_login("串口自动登录失败：用户名或密码错误，请在终端手动登录。")
+        elif self._login_stage == "user" and _PASSWORD_PROMPT.search(tail):
+            # Only right after our username: never feed su/passwd prompts.
+            self._login_stage, self._tail = "password", ""
+            ser.write((self._password + "\r").encode("utf-8"))
+        elif _LOGIN_PROMPT.search(tail):
+            if self._login_attempts >= _LOGIN_ATTEMPTS:
+                self._stop_auto_login("串口自动登录未成功，请在终端手动登录。")
+                return
+            self._login_attempts += 1
+            self._login_stage, self._tail = "user", ""
+            ser.write((self._username + "\r").encode("utf-8"))
+        elif self._login_stage and _SHELL_PROMPT.search(tail):
+            self._login_stage, self._login_attempts = None, 0
+            self.log("SYSTEM", "串口已自动登录。")
+
+    def _watch_uboot(self, text, ser):
+        state = self._uboot
+        if state is None:
+            return
+        state["tail"] = (state["tail"] + strip_ansi(text))[-200:]
+        if state["since"] is None:
+            if _AUTOBOOT.search(state["tail"]):
+                state["since"] = time.monotonic()
+        elif _UBOOT_PROMPT.search(state["tail"]):
+            self._uboot = None
+            ser.write(b"\x03")   # drop the held keys echoed onto the U-Boot command line
+            self.on_uboot(True)
+        elif _KERNEL_STARTED.search(state["tail"]):
+            self._uboot = None   # too late: stop typing into the booting kernel
+            self.on_uboot(False)
+
+    def _hold_uboot_key(self, ser):
+        state = self._uboot
+        now = time.monotonic()
+        if state["since"] is None:
+            if now > state["until"]:
+                self._uboot = None
+                self.on_uboot(False)
+            return
+        if now - state["since"] > _UBOOT_HOLD:
+            self._uboot = None
+            self.on_uboot(False)
+        elif now >= state["next"]:
+            state["next"] = now + _UBOOT_REPEAT
+            ser.write(state["key"])
+
+    def _stop_auto_login(self, message):
+        self._auto_login = False
+        self._login_stage = None
+        self.log("ERROR", message)
 
 
 def list_serial_ports():

@@ -2,14 +2,15 @@
 import re
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, Signal, QTimer, QUrl
+from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QThreadPool
 from PySide6.QtGui import QFont, QKeySequence, QShortcut, QGuiApplication
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
                                QHeaderView, QAbstractItemView, QDialogButtonBox, QPlainTextEdit,
                                QFileDialog, QMessageBox, QTextBrowser, QLineEdit, QCheckBox, QSpinBox,
-                               QPushButton, QProgressBar, QListWidget, QListWidgetItem)
-from .core import write_command
-from .widgets import label, button, row
+                               QPushButton, QProgressBar, QListWidget, QListWidgetItem, QComboBox, QSizePolicy)
+from . import file_scan
+from .core import write_command, DEFAULT_BIT_DIR
+from .widgets import label, button, row, ComboBox, Worker
 from .theme import icon
 from .log_view import LogView, LogSearchEdit
 
@@ -279,33 +280,138 @@ class HostKeyDialog(QDialog):
         self.cancel_button.setFocus()
 
 
-class BitUploadDialog(QDialog):
-    """Pick or drop a .bit file and send it to the board as sunny_fpga.bit."""
-    upload_requested = Signal(str, str)  # local path, remote dir
+class RemoteDirCombo(ComboBox):
+    """Editable board-directory picker: remembered directories, the default and
+    mounts found on the board; `committed` fires when a choice is settled."""
+    committed = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, directories=(), current=DEFAULT_BIT_DIR, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.setObjectName("mono")
+        self.setAccessibleName("板端目录")
+        self.setMinimumContentsLength(18)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.lineEdit().setPlaceholderText(DEFAULT_BIT_DIR)
+        self.set_directories(directories, current)
+        self.activated.connect(lambda _index: self.committed.emit(self.path_text()))
+        self.lineEdit().editingFinished.connect(lambda: self.committed.emit(self.path_text()))
+
+    def path_text(self):
+        return self.currentText().strip() or DEFAULT_BIT_DIR
+
+    def set_directories(self, directories, current=None):
+        current = current or self.path_text()
+        self.blockSignals(True)
+        self.clear()
+        for directory in dict.fromkeys([*directories, DEFAULT_BIT_DIR]):
+            self.addItem(directory)
+        index = self.findText(current)
+        if index >= 0:
+            self.setCurrentIndex(index)
+        else:
+            self.setEditText(current)
+        self.blockSignals(False)
+        self.setToolTip(f"板端目录：{current}（可下拉选择或直接输入，自动记住上次使用的目录）")
+
+    def merge_directories(self, found):
+        """Add directories discovered on the board without touching the current choice."""
+        known = [self.itemText(index) for index in range(self.count())]
+        extra = [directory for directory in found if directory not in known]
+        if extra:
+            self.set_directories(known + extra, self.path_text())
+
+
+class FileChoiceDialog(QDialog):
+    """Pick one of several files found under a folder; the first row is preselected."""
+
+    def __init__(self, title, hint, root, rows, headers, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(860, 420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(label(title, "title"))
+        note = label(hint, "muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.table = QTableWidget(len(rows), 1 + len(headers))
+        self.table.setTextElideMode(Qt.ElideMiddle)   # keep the file name visible on deep paths
+        self.table.setHorizontalHeaderLabels(["文件", *headers])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for column in range(1, 1 + len(headers)):
+            self.table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        for index, (path, cells) in enumerate(rows):
+            try:
+                shown = str(Path(path).relative_to(root))
+            except ValueError:
+                shown = str(path)
+            item = QTableWidgetItem(shown)
+            item.setData(Qt.UserRole, str(path))
+            item.setToolTip(str(path))
+            self.table.setItem(index, 0, item)
+            for column, text in enumerate(cells, 1):
+                self.table.setItem(index, column, QTableWidgetItem(text))
+        if rows:
+            self.table.selectRow(0)
+        self.table.doubleClicked.connect(lambda _index: self.accept())
+        layout.addWidget(self.table, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("选择")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_path(self):
+        rows = self.table.selectionModel().selectedRows()
+        return self.table.item(rows[0].row(), 0).data(Qt.UserRole) if rows else None
+
+
+def file_time(mtime):
+    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+
+class BitUploadDialog(QDialog):
+    """Pick (file or folder scan), drop or paste a .bit file and send it to the board as sunny_fpga.bit."""
+    upload_requested = Signal(str, str)  # local path, remote dir
+    remote_dir_changed = Signal(str)
+    local_dir_changed = Signal(str)
+
+    def __init__(self, parent=None, remote_dirs=(), remote_dir=DEFAULT_BIT_DIR, local_dir=""):
         super().__init__(parent)
         self.setWindowTitle("上传bit file")
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.setWindowModality(Qt.NonModal)
-        self.setMinimumSize(540, 240)
+        self.setMinimumSize(600, 260)
         self.setAcceptDrops(True)
         self._local_path = None
+        self._local_dir = local_dir
+        self._scan_worker = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
         layout.addWidget(label("选择、拖入或粘贴 .bit 文件", "title"))
-        hint = label("新文件先完整上传到 /run/media/sda，再把原 sunny_fpga.bit 重命名为 sunny_fpga.bit_时间戳 备份并换入；传输失败时原文件不受影响。", "muted")
+        hint = label("可直接选文件，或选文件夹自动查找其下（含子目录）的 .bit，多个时列表选择。新文件先完整上传到所选板端目录，"
+                     "再把原 sunny_fpga.bit 重命名为 sunny_fpga.bit_时间戳 备份并换入；传输失败时原文件不受影响。", "muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.path_label = label("未选择文件", "mono")
         self.path_label.setWordWrap(True)
         layout.addWidget(self.path_label)
-        choose = button("选择文件…", self.choose_file, "flat", "export")
+        self.choose_button = button("选择文件…", self.choose_file, "flat", "export")
+        self.folder_button = button("选择文件夹…", self.choose_folder, "flat", "folder")
         paste = button("粘贴", self.paste_file, "flat", "export")
-        self.remote_dir = QLineEdit("/run/media/sda")
-        self.remote_dir.setObjectName("mono")
-        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, 1, choose, paste, spacing=8))
+        layout.addLayout(row(self.choose_button, self.folder_button, paste, 1, spacing=8))
+        self.remote_dir = RemoteDirCombo(remote_dirs, remote_dir)
+        self.remote_dir.committed.connect(self.remote_dir_changed)
+        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, spacing=8))
         self.progress = QProgressBar()
         self.progress.setObjectName("bitProgress")
         self.progress.setTextVisible(False)
@@ -329,9 +435,52 @@ class BitUploadDialog(QDialog):
         QShortcut(QKeySequence.Paste, self, self.paste_file)
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择 .bit 文件", "", "bit file (*.bit);;所有文件 (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择 .bit 文件", self._local_dir, "bit file (*.bit);;所有文件 (*)")
         if path:
             self.set_path(path)
+
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择包含 .bit 的文件夹", self._local_dir)
+        if folder:
+            self.scan_folder(folder)
+
+    def scan_folder(self, folder):
+        """Find .bit files under `folder` off the GUI thread; several → let the user pick."""
+        if self._scan_worker is not None:
+            return
+        self.status.setText("正在查找文件夹及子目录中的 .bit 文件…")
+        self.choose_button.setEnabled(False)
+        self.folder_button.setEnabled(False)
+        worker = Worker(lambda progress: file_scan.find_files(folder, (".bit",)))
+        self._scan_worker = worker
+        worker.signals.result.connect(lambda result: self._scan_done(folder, *result))
+        worker.signals.failed.connect(lambda message: self.status.setText("查找 .bit 失败：" + message))
+        worker.signals.finished.connect(self._scan_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    def _scan_finished(self):
+        self._scan_worker = None
+        self.choose_button.setEnabled(True)
+        self.folder_button.setEnabled(True)
+
+    def _scan_done(self, folder, entries, complete):
+        self._local_dir = str(folder)
+        self.local_dir_changed.emit(self._local_dir)
+        partial = "" if complete else "（目录过深或文件过多，仅列出部分结果）"
+        if not entries:
+            self.status.setText(f"文件夹内未找到 .bit 文件{partial}：{folder}")
+            return
+        if len(entries) == 1:
+            self.set_path(str(entries[0][0]))
+            return
+        rows = [(path, [file_time(mtime), f"{size:,} 字节"]) for path, mtime, size in entries]
+        chooser = FileChoiceDialog("选择要上传的 bit", f"在 {folder} 下找到 {len(entries)} 个 .bit 文件{partial}，"
+                                   "按修改时间从新到旧排列，双击或点「选择」确定。", folder, rows,
+                                   ["修改时间", "大小"], self)
+        if chooser.exec() == QDialog.Accepted and chooser.selected_path():
+            self.set_path(chooser.selected_path())
+        else:
+            self.status.setText(f"找到 {len(entries)} 个 .bit 文件，未选择。")
 
     def set_percent(self, percent):
         """Slide the line smoothly to the target percentage."""
@@ -367,6 +516,9 @@ class BitUploadDialog(QDialog):
         self.path_label.setToolTip(path)
         self.set_reset()
         self.status.setText(f"本地文件：{local.name}（{size:,} 字节）")
+        if str(local.parent) != self._local_dir:
+            self._local_dir = str(local.parent)
+            self.local_dir_changed.emit(self._local_dir)
 
     def paste_file(self):
         """Accept a .bit file pasted from the clipboard (Ctrl+V)."""
@@ -412,15 +564,23 @@ class BitUploadDialog(QDialog):
         self.set_reset()
         self.status.clear()
 
+    @staticmethod
+    def _droppable(url):
+        local = url.toLocalFile()
+        return bool(local) and (local.lower().endswith(".bit") or Path(local).is_dir())
+
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".bit") for u in event.mimeData().urls()):
+        if event.mimeData().hasUrls() and any(self._droppable(u) for u in event.mimeData().urls()):
             event.acceptProposedAction()
 
     def dropEvent(self, event):
         for url in event.mimeData().urls():
-            local = url.toLocalFile()
-            if local.lower().endswith(".bit"):
-                self.set_path(local)
+            if self._droppable(url):
+                local = url.toLocalFile()
+                if Path(local).is_dir():
+                    self.scan_folder(local)
+                else:
+                    self.set_path(local)
                 break
 
     def start_upload(self):
@@ -429,7 +589,7 @@ class BitUploadDialog(QDialog):
         if not str(self._local_path).lower().endswith(".bit"):
             QMessageBox.warning(self, "文件类型错误", "选中文件不是bit文件，请选择 .bit 文件。")
             return
-        self.upload_requested.emit(self._local_path, self.remote_dir.text().strip() or "/run/media/sda")
+        self.upload_requested.emit(self._local_path, self.remote_dir.path_text())
 
 
 class BitRollbackDialog(QDialog):
@@ -438,8 +598,9 @@ class BitRollbackDialog(QDialog):
     The window lists board-side backups, then runs the rollback rename on a worker
     thread; this dialog stays a stateless view (mirroring BitUploadDialog)."""
     rollback_requested = Signal(str)  # backup file name
+    remote_dir_changed = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, remote_dirs=(), remote_dir=DEFAULT_BIT_DIR):
         super().__init__(parent)
         self.setWindowTitle("回退bit")
         self.setWindowFlags(self.windowFlags() | Qt.Window)
@@ -450,10 +611,14 @@ class BitRollbackDialog(QDialog):
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
         layout.addWidget(label("选择要回退的 bit 版本", "title"))
-        hint = label("仅列出板端 /run/media/sda 下的 sunny_fpga.bit* 备份。回退时当前 "
+        hint = label("列出所选板端目录下的 sunny_fpga.bit* 备份。回退时当前 "
                      "sunny_fpga.bit 会先备份为 sunny_fpga.bit_时间戳，再把所选版本恢复为 sunny_fpga.bit。", "muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        self.remote_dir = RemoteDirCombo(remote_dirs, remote_dir)
+        self.remote_dir.committed.connect(self._directory_committed)
+        layout.addLayout(row(label("板端目录", "muted"), self.remote_dir, spacing=8))
+        self._listed_dir = None
         self.list = QListWidget()
         self.list.setObjectName("rollbackList")
         self.list.setAlternatingRowColors(True)
@@ -478,9 +643,20 @@ class BitRollbackDialog(QDialog):
         self.list.currentRowChanged.connect(
             lambda _row: self.rollback_button.setEnabled(not self._busy and self.list.currentItem() is not None))
 
+    def _directory_committed(self, directory):
+        if directory != self._listed_dir and not self._busy:
+            self.remote_dir_changed.emit(directory)
+
+    def set_listed_dir(self, directory):
+        self._listed_dir = directory
+
+    def listed_dir(self):
+        return self._listed_dir
+
     def set_busy(self, busy):
         self._busy = busy
         self.list.setEnabled(not busy)
+        self.remote_dir.setEnabled(not busy)
         self.rollback_button.setEnabled(not busy and self.list.currentItem() is not None)
 
     def populate(self, entries, status=""):
@@ -553,11 +729,11 @@ def show_help(parent):
       code { font-family:'Microsoft YaHei UI'; color:#C4622D; font-size:12px; }
       kbd { font-family:Consolas; color:#344B60; background:#EDF1F5; border:1px solid #D4DCE5; border-bottom-width:2px; padding:0 5px; border-radius:3px; font-size:11px; }
     </style>
-    <h3>1. 连接设备</h3><p>填写主板地址、端口、用户名和密码，点 <code>SSH连接</code>；连接中按钮变红为 <code>取消连接</code>，可随时中止。下方 serial 区选本机端口与波特率后点 <code>serial连接</code> 进入串口控制台（遇 login 提示自动登录）。SSH 与 serial 相互独立、可同时在线；右上角徽章分别显示两者状态，寄存器读写始终走 SSH。</p>
-    <h3>2. 导入 top 并选择组件</h3><p>连接前先点 <code>导入 top</code> 选择 emcc mix 顶层文件；组件按类型分组列出，点击组件即加载其精确寄存器表并自动读取。基地址自动取自 <code>components_param.vh</code> 。</p>
+    <h3>1. 连接设备</h3><p>左栏「设备连接」卡片：SSH 行填写主板地址、端口、用户名和密码后点 <code>连接</code>；连接中按钮变红为 <code>取消</code>，可随时中止。serial 行选本机端口与波特率后点 <code>连接</code>，终端自动切到 <code>serial</code> 实时显示板卡输出。SSH 与 serial 相互独立、可同时在线，状态见各行圆点；寄存器读写始终走 SSH。串口线拔出会立即断开并提示。</p>
+    <h3>2. 导入 top 并选择组件</h3><p>连接前先点 <code>导入 top</code>：可直接选 emcc mix 顶层文件，或选文件夹自动查找其下（含子目录）包含 ec_ 控件的 top，找到多个时列表选择。组件按类型分组列出，点击组件即加载其精确寄存器表并自动读取。基地址自动取自 <code>components_param.vh</code> 。</p>
     <h3>3. 切换视图读写</h3><p>用 <code>基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部</code> 页签切换视图。选中行后右侧显示位状态与字段解析；双击待写入值或选预设，点 <code>写入并回读</code> 。<code>批量写入</code> 先预览再执行；<code>自动读取</code> 按所选间隔轮询。</p>
-    <h3>4. 打包 / 上传 / 回退 bit、日志与重启</h3><p><code>打包bit</code> 打开内置 Bit_pack 本地打包窗口，无需连接设备；选择或拖入 .bit、填写项目号与输出目录后生成 <code>项目号_bit_时间戳.zip</code>，ZIP 内为 <code>sunny_fpga.bit</code>，源文件保留。弹窗与工作台风格一致，重复点击复用窗口；取消或关闭窗口时先安全取消并清理任务，再关闭。<code>上传bit</code> 选择或拖入 .bit，完整传完后才备份板端旧文件并换入为 <code>sunny_fpga.bit</code>（传输失败原文件不变）；<code>回退bit</code> 列出板端时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 发送 reboot 并断开。</p>
-    <h3>5. 会话终端</h3><p>终端本身即 shell：来源选 <code>ssh</code> 或 <code>serial</code> 时直接在底部 <code>❯</code> 提示行输入命令，回车执行，<kbd>↑</kbd><kbd>↓</kbd> 翻历史；<code>tail log</code> 与 <code>system</code> 视图只读。SSH 连上后自动后台打印板端 <code>sunny.log</code>，切到 <code>tail log</code> 查看；连接生命周期等软件消息在 <code>system</code> 。<code>查找日志</code> 随输随查并显示 当前/总数 计数，选中终端文字后按 <kbd>Ctrl+F</kbd> 自动填充；<code>换行</code> / <code>跟随</code> 控制显示；<code>导出</code> 保存当前终端内容，<code>清空</code> 清除当前终端。</p>
+    <h3>4. 打包 / 上传 / 回退 bit、日志与重启</h3><p><code>打包bit</code> 打开内置 Bit_pack 本地打包窗口，无需连接设备；选择或拖入 .bit、填写项目号与输出目录后生成 <code>项目号_bit_时间戳.zip</code>，ZIP 内为 <code>sunny_fpga.bit</code>，源文件保留。弹窗与工作台风格一致，重复点击复用窗口；取消或关闭窗口时先安全取消并清理任务，再关闭。<code>上传bit</code> 选择文件、选择文件夹（自动查找其下 .bit，多个时列表选择）或拖入 .bit，上传到下拉选择的板端目录（默认 <code>/run/media/sda</code>，自动列出板端 /run/media 下的挂载目录，记住上次使用的目录），完整传完后才备份板端旧文件并换入为 <code>sunny_fpga.bit</code>（传输失败原文件不变）；<code>回退bit</code> 列出所选板端目录下的时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 发送 reboot 并断开。</p>
+    <h3>5. 会话终端</h3><p>来源选 <code>ssh</code> 时在底部 <code>❯</code> 提示行输入命令，回车执行，<kbd>↑</kbd><kbd>↓</kbd> 翻历史。来源选 <code>serial</code> 时终端就是串口控制台：板卡自发的打印（启动日志、内核消息）实时显示，按键逐个直发板卡（Tab 补全、<kbd>↑</kbd><kbd>↓</kbd> 历史由板端 shell 处理）；进 U-Boot：板卡启动倒计时时点一下终端并按住 <kbd>Shift</kbd>+<kbd>7</kbd>，或先勾选工具栏 <code>拦截U-Boot</code> 再重启/上电，软件会在倒计时出现时自动按住 &amp; 直到停在 U-Boot 提示符。无选中文字时 <kbd>Ctrl+C</kbd> 发送中断，有选中时复制；<kbd>Ctrl+V</kbd> 粘贴发送。<code>tail log</code> 与 <code>system</code> 视图只读。SSH 连上后自动后台打印板端 <code>sunny.log</code>，切到 <code>tail log</code> 查看；连接生命周期等软件消息在 <code>system</code> 。<code>查找日志</code> 随输随查并显示 当前/总数 计数，选中终端文字后按 <kbd>Ctrl+F</kbd> 自动填充；<code>换行</code> / <code>跟随</code> 控制显示；<code>导出</code> 保存当前终端内容，<code>清空</code> 清除当前终端。</p>
     <h3>6. 组件定义更新</h3><p>RTL 组件内部修改后，点 <code>导入组件</code> 选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义，立即生效并保存到本机。</p>
     <h3>7. 快捷键</h3><p><kbd>F5</kbd> 读取全部 · <kbd>Ctrl+F</kbd> 查找日志 · <kbd>Ctrl+L</kbd> 终端聚焦 · <kbd>Ctrl+Shift+S</kbd> 导出快照 · <kbd>Esc</kbd> 停止后续操作。</p>
     <h3>8. 开发者</h3><p>szzhang / cgliu / bxli</p>

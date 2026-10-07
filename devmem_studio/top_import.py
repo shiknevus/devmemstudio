@@ -93,6 +93,31 @@ VIEW_SETS = {
 }
 
 
+def find_top_files(root: Path, limit_bytes: int = 32 * 1024 * 1024) -> tuple[list[dict], bool]:
+    """Mix-top candidates under a folder: .sv/.v files that carry ec_ controls.
+
+    [{path, mtime, components}] ordered by control count, then newest; the
+    second value is False when the folder walk hit a depth/size limit."""
+    from .file_scan import find_files
+    entries, complete = find_files(root, (".sv", ".v"), limit=20000)
+    candidates = []
+    for path, mtime, size in entries:
+        if size > limit_bytes:
+            continue
+        try:
+            text = read_text_resilient(path)
+            if "ec_" not in text:
+                continue
+            components = parse_top(text)["components"]
+        except Exception:
+            continue   # unreadable or not Verilog: simply not a candidate
+        active = sum(1 for component in components if not component["disabled"])
+        if active:
+            candidates.append({"path": path, "mtime": mtime, "components": active})
+    candidates.sort(key=lambda item: (-item["components"], -item["mtime"]))
+    return candidates, complete
+
+
 def read_text_resilient(path: Path) -> str:
     data = Path(path).read_bytes()
     try:

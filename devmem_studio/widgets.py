@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from PySide6.QtCore import QEvent, Qt, QRectF, Signal, QObject, QRunnable
-from PySide6.QtGui import QColor, QFont, QIntValidator, QPainter, QPen, QTextCursor
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIntValidator, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
                                QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy, QStyle,
                                QStyleOptionComboBox, QStylePainter)
@@ -378,6 +378,31 @@ class DecodedFieldsView(QFrame):
                 cell.setVisible(False)
 
 
+# Raw (serial) terminal: keys as a vt102 keyboard sends them; Backspace is ^? like the board's tty.
+RAW_KEYS = {Qt.Key_Return: b"\r", Qt.Key_Enter: b"\r", Qt.Key_Backspace: b"\x7f", Qt.Key_Tab: b"\t",
+            Qt.Key_Backtab: b"\x1b[Z", Qt.Key_Up: b"\x1b[A", Qt.Key_Down: b"\x1b[B", Qt.Key_Right: b"\x1b[C",
+            Qt.Key_Left: b"\x1b[D", Qt.Key_Home: b"\x1b[H", Qt.Key_End: b"\x1b[F", Qt.Key_Delete: b"\x1b[3~",
+            Qt.Key_Insert: b"\x1b[2~", Qt.Key_Escape: b"\x1b"}
+RAW_CTRL_SYMBOLS = {Qt.Key_BracketLeft: b"\x1b", Qt.Key_Backslash: b"\x1c", Qt.Key_BracketRight: b"\x1d",
+                    Qt.Key_At: b"\x00", Qt.Key_Space: b"\x00"}
+
+
+def raw_key_bytes(key, modifiers, text):
+    """Bytes a serial terminal sends for one key press, or None for local keys."""
+    ctrl = bool(modifiers & Qt.ControlModifier)
+    alt = bool(modifiers & Qt.AltModifier)
+    if ctrl and not alt:
+        if Qt.Key_A <= key <= Qt.Key_Z:
+            return bytes([key - Qt.Key_A + 1])
+        return RAW_CTRL_SYMBOLS.get(key)
+    if key in RAW_KEYS:
+        return RAW_KEYS[key]
+    if text and all(char.isprintable() for char in text):
+        data = text.encode("utf-8")
+        return b"\x1b" + data if alt else data
+    return None
+
+
 class TerminalView(QPlainTextEdit):
     """Log view whose trailing line is an editable shell prompt.
 
@@ -385,7 +410,8 @@ class TerminalView(QPlainTextEdit):
     typed key is redirected into the prompt line. Enter submits the line to the
     `execute` callback; Up/Down walk the command history; Tab asks the
     `complete(line, reply)` callback for candidates. Non-session views
-    (tail log / system) stay plain read-only via set_interactive(False)."""
+    (tail log / system) stay plain read-only via set_interactive(False).
+    set_raw(sender) turns it into a character-mode serial terminal instead."""
     PROMPT = "❯ "
 
     def __init__(self, execute, complete=None, parent=None):
@@ -394,12 +420,14 @@ class TerminalView(QPlainTextEdit):
         self._complete = complete
         self._completion_token = 0
         self._interactive = False
+        self._raw = None
         self._history = []
         self._history_index = 0
         self.setReadOnly(True)   # read-only until a session view turns it interactive
 
     # -- state ---------------------------------------------------------------
     def set_interactive(self, on):
+        self._raw = None
         self._interactive = on
         self.setReadOnly(not on)
         if on:
@@ -407,6 +435,84 @@ class TerminalView(QPlainTextEdit):
 
     def is_interactive(self):
         return self._interactive
+
+    # -- raw (serial) mode -----------------------------------------------------
+    def set_raw(self, sender):
+        """Character mode: every key goes to `sender(bytes)` and the board echoes it."""
+        self._interactive = False
+        self._raw = sender
+        self.setReadOnly(True)
+        # Keyboard-selectable keeps the caret visible on the board's cursor.
+        self.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+
+    def is_raw(self):
+        return self._raw is not None
+
+    def raw_reset(self, text, column, follow=True):
+        self.setPlainText(text)
+        self._place_raw_cursor(column, follow)
+
+    def raw_update(self, committed, current, column, follow=True):
+        """Replace the live (last) line with newly committed lines plus the new live line."""
+        bar = self.verticalScrollBar()
+        held = None if follow else (bar.value(), self.horizontalScrollBar().value())
+        cursor = QTextCursor(self.document().lastBlock())
+        cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        cursor.insertText("\n".join([*committed, current]))
+        self._place_raw_cursor(column, follow, held)
+
+    def _place_raw_cursor(self, column, follow, held=None):
+        bar = self.verticalScrollBar()
+        if held is None and not follow:
+            held = (bar.value(), self.horizontalScrollBar().value())
+        cursor = self.textCursor()
+        if not cursor.hasSelection():   # never steal a selection the user is copying
+            block = self.document().lastBlock()
+            cursor.setPosition(block.position() + min(column, block.length() - 1))
+            self.setTextCursor(cursor)
+        if follow:
+            bar.setValue(bar.maximum())
+        elif held is not None:
+            bar.setValue(held[0])
+            self.horizontalScrollBar().setValue(held[1])
+
+    def _raw_send(self, data):
+        if data:
+            self._raw(data)
+
+    def _raw_paste(self):
+        text = QGuiApplication.clipboard().text()
+        if text:
+            self._raw_send(text.replace("\r\n", "\r").replace("\n", "\r").encode("utf-8"))
+
+    def _raw_key(self, event):
+        key, modifiers = event.key(), event.modifiers()
+        ctrl = bool(modifiers & Qt.ControlModifier)
+        shift = bool(modifiers & Qt.ShiftModifier)
+        if key in (Qt.Key_PageUp, Qt.Key_PageDown) and not ctrl:
+            bar = self.verticalScrollBar()   # scroll history locally
+            bar.setValue(bar.value() + (bar.pageStep() if key == Qt.Key_PageDown else -bar.pageStep()))
+            return
+        if ctrl and key == Qt.Key_C and (shift or self.textCursor().hasSelection()):
+            self.copy()   # Ctrl+C copies a selection, otherwise it is ^C for the board
+            return
+        if (ctrl and key == Qt.Key_V) or (shift and key == Qt.Key_Insert):
+            self._raw_paste()
+            return
+        data = raw_key_bytes(key, modifiers, event.text())
+        if data is None:
+            super().keyPressEvent(event)
+            return
+        cursor = self.textCursor()
+        cursor.clearSelection()
+        self.setTextCursor(cursor)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
+        self._raw_send(data)
+
+    def focusNextPrevChild(self, next):
+        if self._raw is not None:
+            return False   # Tab belongs to the board's shell
+        return super().focusNextPrevChild(next)
 
     def ensure_prompt(self):
         if not self._prompt_present():
@@ -520,6 +626,9 @@ class TerminalView(QPlainTextEdit):
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
 
     def keyPressEvent(self, event):
+        if self._raw is not None:
+            self._raw_key(event)
+            return
         if not self._interactive:
             super().keyPressEvent(event)
             return
@@ -569,6 +678,10 @@ class TerminalView(QPlainTextEdit):
 
     def insertFromMimeData(self, source):
         """Paste lands in the prompt as a single line (history stays intact)."""
+        if self._raw is not None:
+            text = source.text().replace("\r\n", "\r").replace("\n", "\r")
+            self._raw_send(text.encode("utf-8"))
+            return
         if not self._interactive:
             return
         text = source.text().replace(" ", " ").replace("\r", " ").replace("\n", " ")
@@ -642,3 +755,6 @@ class LogBridge(QObject):
     stream_ready = Signal(int, bool)
     stream_failed = Signal(int, str)
     stream_worker_finished = Signal(int)
+    serial_data = Signal(int, str)
+    serial_lost = Signal(int, str)
+    serial_uboot = Signal(int, bool)
