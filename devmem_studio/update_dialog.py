@@ -24,6 +24,7 @@ class UpdateDialog(QDialog):
         self.setWindowTitle("DevmemStudio 更新")
         if parent is not None:
             self.setWindowIcon(parent.windowIcon())
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         self.resize(640, 560)
         self.setMinimumSize(520, 460)
         self.busy = False
@@ -179,7 +180,14 @@ class UpdateDialog(QDialog):
         self._set_status(f"发现新版本 {release.version}，可下载后重启升级。", "ok")
         self.notes.setMarkdown(release.notes)
         if self._automatic:
-            self.show()
+            self.present(activate=False)
+
+    def present(self, activate=True):
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)   # show() alone keeps a minimized window hidden
+        self.show()
+        if activate:
+            self.raise_()
+            self.activateWindow()
 
     def take_action(self):
         if self.busy:

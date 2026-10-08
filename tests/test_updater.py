@@ -354,6 +354,18 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertTrue(dialog.action_button.isEnabled())
         dialog.close()
 
+    def test_window_can_minimize_and_reopens_restored(self):
+        from PySide6.QtCore import Qt
+        from devmem_studio.update_dialog import UpdateDialog
+        dialog = UpdateDialog()
+        self.assertTrue(dialog.windowFlags() & Qt.WindowMinimizeButtonHint)
+        dialog.show()
+        dialog.setWindowState(Qt.WindowMinimized)
+        dialog.present()
+        self.assertFalse(dialog.windowState() & Qt.WindowMinimized)
+        self.assertTrue(dialog.isVisible())
+        dialog.close()
+
     def drain(self, seconds=0.3):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:

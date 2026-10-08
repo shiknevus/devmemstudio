@@ -289,9 +289,7 @@ class MainWindow(QMainWindow):
 
     def show_update_dialog(self):
         dialog = self._update_dialog()
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        dialog.present()
         if not dialog.busy and dialog.release is None:
             dialog.check()
 
