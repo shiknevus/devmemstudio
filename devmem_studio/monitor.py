@@ -582,6 +582,7 @@ class MonitorDialog(QDialog):
         self._session_provider = session_provider
         self.settings = normalize_monitor_settings(settings)
         self._selection_key = None
+        self._selection_kind = None
         self._epoch = 0
         self._stop = threading.Event()
         self._workers = set()
@@ -741,15 +742,22 @@ class MonitorDialog(QDialog):
                 side.setMaximumWidth(max(side.minimumWidth(), self.width() // 2))
 
     # -- register list -------------------------------------------------------------------
-    def set_registers(self, title, registers, preselect=(), key=None):
-        """List a component's registers; ignored while a run is active (its list stays)."""
+    def set_registers(self, title, registers, preselect=(), key=None, kind=None):
+        """List a component's registers; ignored while a run is active (its list stays).
+
+        Checks come from this instance's last pick, else the last pick on any component of the
+        same module type (matched by offset), else ``preselect``."""
         if self.state != "idle":
             return False
         key = title if key is None else key
         addresses = {reg["_address"] for reg in registers}
         saved = self.settings["selections"].get(key)
+        offsets = self.settings["types"].get(kind) if kind is not None else None
+        if saved is None and offsets is not None:
+            saved = [reg["_address"] for reg in registers if parse_addr(reg["offset"]) in offsets]
         chosen = (set(saved) if saved is not None else set(preselect)) & addresses
         self._selection_key = key
+        self._selection_kind = kind
         self.component_label.setText(title)
         self.list.blockSignals(True)
         self.list.clear()
@@ -771,8 +779,7 @@ class MonitorDialog(QDialog):
         self.list.blockSignals(False)
         self._trim_checks()
         self._filter_list()
-        self._update_count()
-        self._remember_selection()
+        self._update_count()   # only user edits are remembered, so untouched instances keep following the type
         return True
 
     def _items(self):
@@ -803,6 +810,10 @@ class MonitorDialog(QDialog):
     def _remember_selection(self):
         if self._selection_key is not None:
             self.settings["selections"][self._selection_key] = self.checked_addresses()
+            if self._selection_kind is not None:
+                self.settings["types"][self._selection_kind] = [
+                    item.data(Qt.UserRole + 2) for item in self._items()
+                    if item.checkState() == Qt.Checked and item.flags() & Qt.ItemIsUserCheckable]
             self.settings_changed.emit(copy.deepcopy(self.settings))
 
     def eventFilter(self, watched, event):
