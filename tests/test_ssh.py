@@ -3,6 +3,7 @@ import hashlib
 import io
 from contextlib import contextmanager
 import re
+import shutil
 import socket
 import tempfile
 import threading
@@ -236,7 +237,7 @@ class BitUploadUnitTests(unittest.TestCase):
         from devmem_studio.core import SshSession
         import paramiko
 
-        local = Path(tempfile.gettempdir()) / "test_design.bit"
+        local = Path(tempfile.mkdtemp(prefix="test-ssh-")) / "test_design.bit"
         local.write_bytes(b"\x00\x01\x02\x03" * 100)
         try:
             events = {"renames": [], "puts": [], "makedirs": []}
@@ -300,12 +301,12 @@ class BitUploadUnitTests(unittest.TestCase):
                                                     "/run/media/sda/sunny_fpga.bit"))
             self.assertEqual(len(events["makedirs"]), 0)  # /run/media/sda exists
         finally:
-            local.unlink(missing_ok=True)
+            shutil.rmtree(local.parent, ignore_errors=True)
 
     def _upload_with(self, fake_sftp):
         from devmem_studio.core import SshSession
         import paramiko
-        local = Path(tempfile.gettempdir()) / "test_design_fail.bit"
+        local = Path(tempfile.mkdtemp(prefix="test-ssh-")) / "test_design_fail.bit"
         local.write_bytes(b"\x00" * 64)
         session = SshSession()
         session.client = type("C", (), {"get_transport": lambda self: object()})()
@@ -319,7 +320,7 @@ class BitUploadUnitTests(unittest.TestCase):
         finally:
             paramiko.SFTPClient.from_transport = original
             type(session).alive = original_alive
-            local.unlink(missing_ok=True)
+            shutil.rmtree(local.parent, ignore_errors=True)
 
     def test_failed_upload_leaves_live_bit_untouched(self):
         events = {"renames": [], "removes": []}
@@ -378,7 +379,7 @@ class BitUploadUnitTests(unittest.TestCase):
         from devmem_studio.core import SshSession
         import paramiko
 
-        local = Path(tempfile.gettempdir()) / "test_sunny_download.log"
+        local = Path(tempfile.mkdtemp(prefix="test-ssh-")) / "test_sunny_download.log"
         try:
             class FakeSFTP:
                 def stat(self, path):
@@ -421,7 +422,7 @@ class BitUploadUnitTests(unittest.TestCase):
             self.assertEqual(local.stat().st_size, 2048)
             self.assertTrue(received and received[-1] == (2048, 2048))
         finally:
-            local.unlink(missing_ok=True)
+            shutil.rmtree(local.parent, ignore_errors=True)
 
     def test_list_bit_backups_orders_current_first_then_newest(self):
         from devmem_studio.core import SshSession

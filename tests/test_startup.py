@@ -25,6 +25,8 @@ class StartupImportTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "[]")
 
+    @unittest.skipUnless(os.environ.get("DEVMEMSTUDIO_FULL_TESTS"),
+                         "reruns test_ssh in a child (~15 s); set DEVMEMSTUDIO_FULL_TESTS=1 or use run_tests.py --full")
     def test_ssh_stack_works_without_invoke_and_openssl_hashlib(self):
         # Mirrors the release bundle, which excludes invoke, _hashlib and libcrypto-3.dll:
         # the real loopback SSH suite must still pass on built-in digests.

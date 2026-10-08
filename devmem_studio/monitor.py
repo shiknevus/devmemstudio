@@ -138,6 +138,7 @@ class MonitorPlot(QWidget):
     """One lane per register on a shared time axis; step traces, per-pixel min/max envelope."""
     zoom_changed = Signal(float)
     markers_changed = Signal(object)
+    lane_clicked = Signal(int)
     LABEL_WIDTH = 220
     AXIS_HEIGHT = 26
     MIN_ZOOM = 0.25
@@ -152,6 +153,7 @@ class MonitorPlot(QWidget):
         self.zoom_factor = 1.0
         self._view_range = None
         self.signed = False
+        self.highlight = None   # lane of the register picked in the list
         self._hover = None
         self.markers = [None, None]
         self._next_marker = 0
@@ -162,11 +164,13 @@ class MonitorPlot(QWidget):
         self.setMinimumSize(420, 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setToolTip("单击图线依次放置 A/B 标记，拖动标记调整位置，右键清除标记。\n"
+                        "单击左侧寄存器名称高亮该曲线，并在列表中定位。\n"
                         "按住 Ctrl 并滚动鼠标滚轮，以鼠标位置为中心缩放时间轴；点击 Zoom 查看全局图表。")
 
     def set_series(self, buffer, names, offsets=()):
         self.clear_markers()
         self.buffer, self.names = buffer, list(names)
+        self.highlight = None
         self._view_range = None
         self.offsets = list(offsets) if offsets else [None] * len(self.names)
         self.setMinimumHeight(max(220, len(self.names) * 52 + max(0, len(self.names) - 1) * 8
@@ -279,8 +283,19 @@ class MonitorPlot(QWidget):
             self.markers_changed.emit(tuple(self.markers))
             self.update()
 
+    def set_highlight(self, column):
+        if column != self.highlight:
+            self.highlight = column
+            self.update()
+
     def _in_plot(self, position):
         return bool(self.names) and any(lane.contains(position) for lane in self.lanes())
+
+    def _gutter_lane_at(self, position):
+        if not self.names or not 0 <= position.x() < self.LABEL_WIDTH:
+            return None
+        return next((i for i, lane in enumerate(self.lanes()[:len(self.names)])
+                     if lane.top() <= position.y() <= lane.bottom()), None)
 
     def _sample_time_at(self, position):
         if not self._in_plot(position) or self.buffer is None or not len(self.buffer):
@@ -303,6 +318,11 @@ class MonitorPlot(QWidget):
             event.accept()
             return
         if event.button() == Qt.LeftButton:
+            lane = self._gutter_lane_at(position)
+            if lane is not None:
+                self.lane_clicked.emit(lane)
+                event.accept()
+                return
             stamp = self._sample_time_at(position)
             if stamp is not None:
                 lane = self.lanes()[0]
@@ -333,6 +353,10 @@ class MonitorPlot(QWidget):
 
     def mouseMoveEvent(self, event):
         self._hover = event.position().x()
+        if self._gutter_lane_at(event.position()) is None:
+            self.unsetCursor()
+        else:
+            self.setCursor(Qt.PointingHandCursor)
         if self._drag_marker is not None and event.buttons() & Qt.LeftButton:
             stamp = self._sample_time_at(event.position())
             if stamp is not None:
@@ -373,8 +397,18 @@ class MonitorPlot(QWidget):
                 hover = bisect_right(times, at) - 1
         for column, (lane, name) in enumerate(zip(lanes, self.names)):
             color = QColor(SERIES_COLORS[column % len(SERIES_COLORS)])
-            painter.setPen(QPen(QColor("#DEE5EC"), 1))
-            painter.setBrush(QColor("#FAFCFE"))
+            selected = column == self.highlight
+            if selected:
+                tint = QColor(color)
+                tint.setAlpha(18)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(tint)
+                painter.drawRoundedRect(QRectF(2, lane.top(), self.LABEL_WIDTH - 8, lane.height()), 4, 4)
+                tint.setAlpha(8)
+                painter.setBrush(tint)
+            else:
+                painter.setPen(QPen(QColor("#DEE5EC"), 1))
+                painter.setBrush(QColor("#FAFCFE"))
             painter.drawRect(lane)
             painter.setPen(QPen(QColor("#EEF2F6"), 1))
             for tick in ticks:
@@ -500,7 +534,23 @@ class _MonitorBridge(QObject):
 
 
 class _MonitorRegisterDelegate(QStyledItemDelegate):
-    """Toggle checks across the whole row, using one release for each click."""
+    """Toggle checks across the whole row, using one release for each click; mark the focused row."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.focus = None   # register address
+
+    def paint(self, painter, option, index):
+        if self.focus is not None and index.data(Qt.UserRole) == self.focus:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#E3EDFF"))
+            painter.drawRoundedRect(QRectF(option.rect).adjusted(0.5, 0.5, -0.5, -0.5), 3, 3)
+            painter.setBrush(QColor("#2463DC"))
+            painter.drawRoundedRect(QRectF(option.rect.left(), option.rect.top() + 3, 3, option.rect.height() - 6), 1.5, 1.5)
+            painter.restore()
+        super().paint(painter, option, index)
 
     def editorEvent(self, event, model, option, index):
         if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease, QEvent.MouseButtonDblClick):
@@ -594,9 +644,12 @@ class MonitorDialog(QDialog):
         self.list = QListWidget()
         self.list.setObjectName("monitorList")
         self.list.setItemDelegate(_MonitorRegisterDelegate(self.list))
+        self.list.setSelectionMode(QListWidget.NoSelection)   # the delegate marks the focused row
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.setTextElideMode(Qt.ElideRight)
         self.list.itemChanged.connect(self._item_changed)
+        self.list.currentItemChanged.connect(lambda item, _: item is not None and self.focus_register(item.data(Qt.UserRole)))
+        self.list.viewport().installEventFilter(self)   # rows are disabled while running but still pick the lane
         self.count_label = label("", "muted")
         self.clear_selection_button = button("取消选择", self.clear_selection, "flat")
         self.clear_selection_button.setToolTip("取消所有寄存器的勾选，包括搜索隐藏的条目")
@@ -641,6 +694,7 @@ class MonitorDialog(QDialog):
             control.setProperty("outlined", True)
         self.clear_markers_button.setEnabled(False)
         self.plot.markers_changed.connect(self._markers_changed)
+        self.plot.lane_clicked.connect(self._lane_clicked)
         # Toolbar: view options on the left, data actions on the right; markers sit under the chart.
         main.addLayout(row(self.zoom_button, self.zoom_label, self.signed_check, 1,
                            self.clear_button, self.export_button, spacing=8))
@@ -751,6 +805,34 @@ class MonitorDialog(QDialog):
             self.settings["selections"][self._selection_key] = self.checked_addresses()
             self.settings_changed.emit(copy.deepcopy(self.settings))
 
+    def eventFilter(self, watched, event):
+        if (watched is self.list.viewport() and event.type() == QEvent.MouseButtonPress
+                and event.button() == Qt.LeftButton):
+            item = self.list.itemAt(event.position().toPoint())
+            if item is not None:
+                self.focus_register(item.data(Qt.UserRole))
+        return super().eventFilter(watched, event)
+
+    def focus_register(self, address):
+        """Mark one register in the list and highlight its lane when it is plotted."""
+        self.list.itemDelegate().focus = address
+        self.list.viewport().update()
+        self._sync_highlight()
+
+    def _sync_highlight(self):
+        address = self.list.itemDelegate().focus
+        addresses = [monitored for _, monitored in self.monitored]
+        self.plot.set_highlight(addresses.index(address) if address in addresses else None)
+
+    def _lane_clicked(self, column):
+        if column >= len(self.monitored):
+            return
+        address = self.monitored[column][1]
+        item = next((item for item in self._items() if item.data(Qt.UserRole) == address), None)
+        if item is not None and not item.isHidden():
+            self.list.scrollToItem(item)
+        self.focus_register(address)
+
     def _filter_list(self, *_):
         needle = self.search.text().strip().lower()
         for item in self._items():
@@ -803,6 +885,7 @@ class MonitorDialog(QDialog):
         self.interval_ms = interval
         self.buffer = MonitorBuffer(len(chosen))
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
+        self._sync_highlight()
         addresses = [address for _, address in chosen]
         bridge = self.bridge
         worker = Worker(lambda progress: session.start_monitor(
@@ -831,6 +914,7 @@ class MonitorDialog(QDialog):
         if self.monitored:
             self.buffer = MonitorBuffer(len(self.monitored))
             self.plot.set_series(self.buffer, [name for name, _ in self.monitored], self.monitored_offsets)
+            self._sync_highlight()
         self._set_status("已清空。" if self.state == "idle" else self._summary("监视中"))
 
     def _started(self, token, ok):

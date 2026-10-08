@@ -158,25 +158,65 @@ static int write_file(const wchar_t *path, const unsigned char *data, DWORD size
     return CloseHandle(file) && ok;
 }
 
+typedef struct {
+    unsigned char *packed;
+    unsigned char *raw;
+    DWORD packed_size, raw_size;
+    int ok;
+} Block;
+
+static DWORD WINAPI inflate(LPVOID context)
+{
+    Block *block = context;
+    DECOMPRESSOR_HANDLE decompressor = NULL;
+    SIZE_T size = 0;
+    block->ok = CreateDecompressor(COMPRESS_ALGORITHM_LZMS, NULL, &decompressor)
+             && Decompress(decompressor, block->packed, block->packed_size, block->raw, block->raw_size, &size)
+             && size == block->raw_size;
+    if (decompressor)
+        CloseDecompressor(decompressor);
+    return 0;
+}
+
 static int extract(HINSTANCE instance, const wchar_t *staging)
 {
     HRSRC resource = FindResourceW(instance, MAKEINTRESOURCEW(RES_PAYLOAD), RT_RCDATA);
     HGLOBAL loaded = resource ? LoadResource(instance, resource) : NULL;
-    void *packed = loaded ? LockResource(loaded) : NULL;
+    unsigned char *packed = loaded ? LockResource(loaded) : NULL;
     DWORD packed_size = resource ? SizeofResource(instance, resource) : 0;
     if (!packed || !packed_size || !CreateDirectoryW(staging, NULL))
         return 0;
     unsigned char *raw = VirtualAlloc(NULL, RUNTIME_RAW_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!raw)
         return 0;
-    DECOMPRESSOR_HANDLE decompressor = NULL;
-    SIZE_T size = 0;
+    Block blocks[RUNTIME_BLOCK_COUNT];
+    HANDLE threads[RUNTIME_BLOCK_COUNT] = {0};
+    size_t packed_at = 0, raw_at = 0;
+    for (size_t i = 0; i < RUNTIME_BLOCK_COUNT; ++i) {
+        blocks[i] = (Block){packed + packed_at, raw + raw_at, runtime_blocks[i].packed, runtime_blocks[i].raw, 0};
+        packed_at += runtime_blocks[i].packed;
+        raw_at += runtime_blocks[i].raw;
+    }
+    int ok = packed_at == packed_size && raw_at == RUNTIME_RAW_SIZE;
+    for (size_t i = 1; ok && i < RUNTIME_BLOCK_COUNT; ++i)
+        threads[i] = CreateThread(NULL, 0, inflate, &blocks[i], 0, NULL);   /* NULL: inflated below instead */
+    for (size_t i = 0; ok && i < RUNTIME_BLOCK_COUNT; ++i) {
+        if (threads[i]) {
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
+            threads[i] = NULL;
+        } else {
+            inflate(&blocks[i]);
+        }
+        ok = blocks[i].ok;
+    }
+    for (size_t i = 0; i < RUNTIME_BLOCK_COUNT; ++i)   /* after a failure, never free memory a thread still writes */
+        if (threads[i]) {
+            WaitForSingleObject(threads[i], INFINITE);
+            CloseHandle(threads[i]);
+        }
     unsigned char digest[32];
-    int ok = CreateDecompressor(COMPRESS_ALGORITHM_LZMS, NULL, &decompressor)
-          && Decompress(decompressor, packed, packed_size, raw, RUNTIME_RAW_SIZE, &size)
-          && size == RUNTIME_RAW_SIZE && sha256(raw, size, digest) && !memcmp(digest, runtime_sha256, 32);
-    if (decompressor)
-        CloseDecompressor(decompressor);
+    ok = ok && sha256(raw, RUNTIME_RAW_SIZE, digest) && !memcmp(digest, runtime_sha256, 32);
     size_t offset = 0;
     for (size_t i = 0; ok && i < RUNTIME_FILE_COUNT; ++i) {
         wchar_t *path = join(staging, runtime_files[i].path);

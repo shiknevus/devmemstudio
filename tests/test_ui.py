@@ -50,7 +50,9 @@ ec_1do_2
 """
 
 
-class UiTests(unittest.TestCase):
+class UiTestBase(unittest.TestCase):
+    """Window fixture only; tests live in subclasses so none runs twice."""
+
     @classmethod
     def setUpClass(cls):
         os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"   # isolate from real machine imports
@@ -82,6 +84,7 @@ class UiTests(unittest.TestCase):
         self.window = MainWindow(ConfigStore(Path(self.temp.name) / "settings.json"), persist=False)
         self.window.show()
         self.window.session = DemoSession(self.window._log_emit("ssh"))
+        self.window.session.read_delay = 0
         self.window.session.connect()
         self.window._set_connection(True)
         self.window.load_top(self.write_fixture_top())
@@ -104,6 +107,8 @@ class UiTests(unittest.TestCase):
         self.app.processEvents()
         self.temp.cleanup()
 
+
+class UiTests(UiTestBase):
     def test_compact_layout_relaxes_fixed_widths_and_restores(self):
         self.window.resize(1280, 800)
         self.settle()
@@ -254,6 +259,9 @@ class UiTests(unittest.TestCase):
         with patch("devmem_studio.window.SerialSession", Connected):
             self.window.serial_port.addItem(f"USB Serial Port ({device})", device)
             self.window.serial_port.setCurrentIndex(self.window.serial_port.findData(device))
+            # as if a port scan had found it, whatever COM ports this machine really has
+            self.window._serial_devices = [self.window.serial_port.itemData(i)
+                                           for i in range(self.window.serial_port.count())]
             self.window._toggle_serial()
             self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
         return armed
@@ -348,7 +356,9 @@ class UiTests(unittest.TestCase):
             self.assertIn("连接中", self.window.serial_section.dot.toolTip())
             self.assertEqual(self.window.serial_section.dot.property("state"), "connecting")
             release.set()
-            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
+            # result marks the connection ready before finished hides the shared bar.
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy
+                        and self.window._serial_worker is None and not self.window._busy)
         self.assertTrue(self.window.progress.isHidden())
         self.assertIn("已连接", self.window.serial_section.dot.toolTip())
         self.assertEqual(self.window.serial_section.dot.property("state"), "connected")
@@ -783,7 +793,7 @@ class StaleDeletedButton:
         raise RuntimeError("Internal C++ object (PySide6.QtWidgets.QPushButton) already deleted.")
 
 
-class TopImportUiTests(UiTests):
+class TopImportUiTests(UiTestBase):
     def test_import_populates_tree_and_selects_exact_registers(self):
         self.window.load_top(self.write_fixture_top())
         self.assertEqual(self.window.component_tree.topLevelItemCount(), 3)
