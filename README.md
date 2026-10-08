@@ -1,4 +1,4 @@
-# 寄存器调试工作台 5.2.1
+# 寄存器调试工作台 5.2.2
 
 作者：szzhang / cgliu / bxli
 
@@ -6,7 +6,7 @@
 
 ![工作台界面（离线演示数据）](docs/workbench.png)
 
-当前发布包：**`DevmemStudio-5.2.1-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.2.1**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.2.1 验收记录](docs/VALIDATION_5.2.1.md)。
+当前发布包：**`DevmemStudio-5.2.2-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.2.2**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.2.2 验收记录](docs/VALIDATION_5.2.2.md)。
 
 | 需要做什么 | 阅读位置 |
 | --- | --- |
@@ -16,6 +16,10 @@
 | 找配置、缓存或日志 | [配置与日志](#配置与日志) |
 | 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
 | 排查启动、监视或构建问题 | [常见问题](#常见问题) |
+
+## 5.2.2 发布（2026-10-08）
+
+功能与 5.2.1 相同，用于验证从 5.2.1 在线升级的完整流程。
 
 ## 5.2.1 发布（2026-10-08）
 
@@ -496,11 +500,11 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 直接运行 EXE
 
-解压 **`DevmemStudio-5.2.1-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
+解压 **`DevmemStudio-5.2.2-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
 
 可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
 
-从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.0 可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.2.1**。之后可通过底部“检查更新”在线升级。
+从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.2.2**。之后可通过底部“检查更新”在线升级。
 
 本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
@@ -591,7 +595,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 - 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
 - EXE 构建及隔离验收：PyInstaller 生成 `build/dist/_runtime/`，封装为候选 `build/DevmemStudio.exe`，再单独复制候选 EXE 到隔离目录，验证首次解压、损坏缓存修复和旧缓存清理。
 
-三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.2.1-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
+三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.2.2-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
 
 | 阶段 | 日志 |
 | --- | --- |
