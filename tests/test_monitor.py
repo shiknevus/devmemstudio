@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 from PySide6.QtTest import QTest, QSignalSpy
 
 from devmem_studio.core import (ConfigStore, MonitorParser, monitor_command, monitor_script, resource_path,
-                                MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, REGMON_RESOURCE)
+                                MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, REGMON_RESOURCE, normalize_monitor_settings)
 from devmem_studio.monitor import MonitorBuffer, MonitorDialog, MonitorPlot, nice_step, to_signed
 
 
@@ -576,7 +576,7 @@ class DialogTests(unittest.TestCase):
                 view.setCurrentRow(0)
                 QTest.keyClick(view, Qt.Key_Space)
                 self.assertEqual(self.dialog.checked_addresses(), [0x1000])
-                self.assertEqual(self.dialog.settings["selections"]["A"], [0x1000])
+                self.assertNotIn("A", self.dialog.settings["selections"])   # viewing alone saves nothing
                 self.assertEqual(self.dialog.count_label.text(), "已选 1 / 8")
                 self.assertEqual(changes.count(), 0)
         self.dialog.stop()
@@ -722,6 +722,32 @@ class DialogTests(unittest.TestCase):
             finally:
                 restored.shutdown()
                 restored.close()
+
+    def test_new_instance_reuses_last_pick_of_same_module_type(self):
+        moved = [dict(reg, _address=reg["_address"] + 0x200) for reg in self.registers]
+        self.dialog.set_registers("Axis 0", self.registers, [0x1000], key="top:axis@0", kind="axis")
+        self.dialog.list.item(2).setCheckState(Qt.Checked)                  # pick R0 + R2 on axis 0
+        self.dialog.set_registers("Axis 1", moved, [0x1204], key="top:axis@1", kind="axis")
+        self.assertEqual(self.dialog.checked_addresses(), [0x1200, 0x1208])  # same offsets, new base
+        self.assertNotIn("top:axis@1", self.dialog.settings["selections"])  # merely viewing saves nothing
+        self.dialog.set_registers("IO", self.registers, [0x1004], key="top:io@0", kind="io")
+        self.assertEqual(self.dialog.checked_addresses(), [0x1004])          # other type: preselect
+        self.dialog.set_registers("Axis 0", self.registers, [], key="top:axis@0", kind="axis")
+        self.dialog.list.item(1).setCheckState(Qt.Checked)                  # latest axis pick wins
+        self.dialog.set_registers("Axis 1", moved, [], key="top:axis@1", kind="axis")
+        self.assertEqual(self.dialog.checked_addresses(), [0x1200, 0x1204, 0x1208])
+        self.dialog.list.item(0).setCheckState(Qt.Unchecked)                # own pick overrides the type
+        self.dialog.set_registers("Axis 0", self.registers, [], key="top:axis@0", kind="axis")
+        self.dialog.set_registers("Axis 1", moved, [], key="top:axis@1", kind="axis")
+        self.assertEqual(self.dialog.checked_addresses(), [0x1204, 0x1208])
+        restored = MonitorDialog(lambda: None, settings=normalize_monitor_settings(self.dialog.settings))
+        try:
+            restored.set_registers("Axis 2", [dict(reg, _address=reg["_address"] + 0x400) for reg in self.registers],
+                                   [], key="top:axis@2", kind="axis")
+            self.assertEqual(restored.checked_addresses(), [0x1404, 0x1408])
+        finally:
+            restored.shutdown()
+            restored.close()
 
     def test_stop_then_clear_ignores_queued_samples_and_errors(self):
         self.dialog.monitored = [("R0", 0x1000)]

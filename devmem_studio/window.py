@@ -2386,7 +2386,8 @@ class MainWindow(QMainWindow):
         chosen = [self.selected["_address"]] if preselect and self.selected else []
         self.monitor_dialog.set_registers(
             f"{self._component_display_name(self.active_component)} · {self.active_component['module_type']}",
-            registers, chosen, key=f"{Path(self.top_info['path']).resolve()}|{self.cache_key}|0x{self._module_start:08X}")
+            registers, chosen, key=f"{Path(self.top_info['path']).resolve()}|{self.cache_key}|0x{self._module_start:08X}",
+            kind=self.active_component["module_type"])
 
     def _remember_monitor_settings(self, settings):
         self.cfg["monitor_settings"] = settings

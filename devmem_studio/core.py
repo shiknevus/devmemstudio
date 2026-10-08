@@ -294,13 +294,17 @@ class MonitorParser:
 
 def normalize_monitor_settings(value):
     value = value if isinstance(value, dict) else {}
-    selections = {}
-    saved = value.get("selections")
-    for key, addresses in (saved.items() if isinstance(saved, dict) else ()):
-        if isinstance(key, str) and isinstance(addresses, list):
-            selections[key] = list(dict.fromkeys(address for address in addresses
-                                                if type(address) is int and 0 <= address <= 0xFFFFFFFF))[:MONITOR_MAX_REGISTERS]
-    return {"signed": value.get("signed") is True, "selections": selections}
+
+    def lists(saved):
+        result = {}
+        for key, addresses in (saved.items() if isinstance(saved, dict) else ()):
+            if isinstance(key, str) and isinstance(addresses, list):
+                result[key] = list(dict.fromkeys(address for address in addresses
+                                                 if type(address) is int and 0 <= address <= 0xFFFFFFFF))[:MONITOR_MAX_REGISTERS]
+        return result
+    # selections: component instance -> addresses; types: module type -> offsets of the latest pick
+    return {"signed": value.get("signed") is True, "selections": lists(value.get("selections")),
+            "types": lists(value.get("types"))}
 
 
 def default_config() -> dict:
