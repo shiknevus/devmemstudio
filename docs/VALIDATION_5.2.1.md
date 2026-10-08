@@ -27,3 +27,9 @@
 | `dist/DevmemStudio-5.2.1-win64.zip` | 21,004,367 字节 | `efee247a822dc97171004dde2e79b39a2ea7f3b12f74e7a5354e1a8955938771` |
 
 GitHub Release `v5.2.1` 上传 ZIP 与 `DevmemStudio-5.2.1-win64.zip.sha256`。EXE 隔离报告见 `artifacts/exe-isolated/acceptance-1/report.json` 与 `acceptance-2/report.json`，构建日志见 `build/logs/`。
+
+## 线上发布验证
+
+- Release：https://github.com/shiknevus/devmemstudio/releases/tag/v5.2.1 ，指向提交 `098e4c8`；资产 ZIP 与 `.sha256` 均为 uploaded，GitHub 返回的 ZIP digest 与上表一致。
+- 验证时本机出口 IP 的匿名 API 额度为 0/60（返回 403）。新版回退路径通过 `releases/latest` 跳转解析到 5.2.1，下载 ZIP（约 70 秒）并用 `.sha256` 校验，解出的 EXE SHA-256 与 `dist/DevmemStudio.exe` 一致。
+- 5.2.0 本地构建只走 API，没有回退路径；额度耗尽时 5.2.0 检查更新会提示访问限额，额度恢复后才能看到 5.2.1。
