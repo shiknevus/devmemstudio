@@ -205,8 +205,18 @@ class UpdateTransportTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"old")
             self.assertEqual(config.read_bytes(), b"settings")
             self.assertTrue((work / "apply_update.ps1").exists())
+            self.assertEqual(Path(job["backup"]), base / f"RenamedApp-{updater.__version__}-backup.exe")
             updater.discard_install(job_path)
             self.assertFalse(Path(job["staged"]).exists())
+
+    def test_backup_keeps_exe_extension_and_never_overwrites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "DevmemStudio.exe"
+            first = updater.backup_path(target, "abcdef0123456789")
+            self.assertEqual(first.name, f"DevmemStudio-{updater.__version__}-backup.exe")
+            first.write_bytes(b"older backup")
+            second = updater.backup_path(target, "abcdef0123456789")
+            self.assertEqual(second.name, f"DevmemStudio-{updater.__version__}-backup-abcdef01.exe")
 
     def test_prepare_digest_failure_leaves_original_untouched(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -241,7 +251,7 @@ class WindowsReplacementTests(unittest.TestCase):
 
     def apply(self, directory, new="ok", digest=None, pids=None):
         base = Path(directory)
-        target, staged, backup = (base / name for name in ("app.exe", "staged.exe", "old.bak"))
+        target, staged, backup = (base / name for name in ("app.exe", "staged.exe", "app-1.0.0-backup.exe"))
         shutil.copyfile(self.base / "ok.exe", target)
         shutil.copyfile(self.base / f"{new}.exe", staged)
         (base / "registers.json").write_bytes(b"keep-settings")
@@ -344,24 +354,65 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertTrue(dialog.action_button.isEnabled())
         dialog.close()
 
-    def test_escape_cancels_and_waits_for_worker_before_closing(self):
+    def drain(self, seconds=0.3):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+
+    def test_escape_closes_at_once_while_request_is_blocked(self):
         from devmem_studio.update_dialog import UpdateDialog
         dialog = UpdateDialog()
         dialog.show()
-        entered = threading.Event()
+        entered, release = threading.Event(), threading.Event()
 
         def check(cancel):
             entered.set()
-            cancel.wait(3)
-            raise updater.UpdateCancelled()
+            release.wait(5)   # blocked socket: does not look at the cancel flag
+            raise RuntimeError("late failure")
 
         with patch.object(updater, "check_release", side_effect=check):
             dialog.check()
             self.assertTrue(entered.wait(2))
             dialog.reject()
             self.assertTrue(dialog._cancel.is_set())
+            self.assertFalse(dialog.busy)
+            self.assertFalse(dialog.isVisible())
+            release.set()
+            self.drain()
+        self.assertEqual(dialog.status.text(), "已取消检查。")   # the late failure is ignored
+
+    def test_cancelled_download_is_discarded_and_new_check_starts_immediately(self):
+        from devmem_studio.update_dialog import UpdateDialog
+        dialog = UpdateDialog()
+        dialog.release = updater.parse_release(release_payload())
+        entered, release = threading.Event(), threading.Event()
+        work = Path(tempfile.mkdtemp(prefix="devmem-update-late-"))
+        (work / "DevmemStudio.exe").write_bytes(b"MZ")
+
+        def download(item, cancel, progress):
+            entered.set()
+            release.wait(5)
+            return updater.Download("99.0.0", work / "DevmemStudio.exe", "0" * 64)
+
+        with patch.object(updater, "download_release", side_effect=download):
+            dialog.take_action()
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(dialog.action_button.text(), "正在下载…")
+            dialog.cancel()
+            self.assertFalse(dialog.busy)
+            self.assertTrue(dialog.progress_panel.isHidden())
+            self.assertEqual(dialog.action_button.text(), "下载更新")
+        with patch.object(updater, "check_release", return_value=None):
+            dialog.release = None
+            dialog.check()   # not queued behind the abandoned download
             self.settle(dialog)
-        self.assertFalse(dialog.isVisible())
+        self.assertEqual(dialog.action_button.text(), "重新检查")
+        release.set()
+        self.drain()
+        self.assertIsNone(dialog.download)
+        self.assertFalse(work.exists())
+        dialog.close()
 
 
 class UpdateWindowTests(unittest.TestCase):
@@ -411,26 +462,27 @@ class UpdateWindowTests(unittest.TestCase):
         self.assertFalse(self.window._closing)
         self.assertTrue(self.window.isVisible())
 
-    def test_main_window_waits_for_update_worker_when_closing(self):
+    def test_main_window_closes_without_waiting_for_blocked_update_request(self):
         dialog = self.window._update_dialog()
         self.window.show()
-        entered = threading.Event()
+        entered, release = threading.Event(), threading.Event()
 
         def check(cancel):
             entered.set()
-            cancel.wait(3)
-            raise updater.UpdateCancelled()
+            release.wait(5)   # a socket stuck until its timeout ignores the cancel flag
+            raise RuntimeError("timed out")
 
-        with patch.object(updater, "check_release", side_effect=check):
-            dialog.check()
-            self.assertTrue(entered.wait(2))
-            self.assertFalse(self.window.close())
-            deadline = time.monotonic() + 5
-            while self.window.isVisible() and time.monotonic() < deadline:
-                self.app.processEvents()
-                time.sleep(0.005)
-        self.assertFalse(dialog.busy)
-        self.assertFalse(self.window.isVisible())
+        try:
+            with patch.object(updater, "check_release", side_effect=check):
+                dialog.check()
+                self.assertTrue(entered.wait(2))
+                started = time.monotonic()
+                self.assertTrue(self.window.close())
+                self.assertLess(time.monotonic() - started, 1)
+            self.assertFalse(dialog.busy)
+            self.assertTrue(dialog._cancel.is_set())
+        finally:
+            release.set()
 
 
 if __name__ == "__main__":

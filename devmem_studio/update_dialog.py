@@ -1,7 +1,8 @@
 """GitHub update UI, with network work outside the board task pool."""
+import shutil
 import threading
 
-from PySide6.QtCore import Qt, QThreadPool, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QTextBrowser,
                                QProgressBar, QMessageBox, QWidget)
@@ -15,7 +16,6 @@ def _megabytes(value):
 
 
 class UpdateDialog(QDialog):
-    job_finished = Signal()
     install_requested = Signal(object)
     preferences_changed = Signal(bool)
 
@@ -31,11 +31,10 @@ class UpdateDialog(QDialog):
         self.download = None
         self._checked_once = False
         self._worker = None
+        self._workers = set()
+        self._callback = None
         self._cancel = threading.Event()
-        self._close_pending = False
         self._automatic = False
-        self.pool = QThreadPool(self)
-        self.pool.setMaxThreadCount(1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
@@ -132,31 +131,42 @@ class UpdateDialog(QDialog):
         self.cancel_button.setEnabled(self.busy and not self._cancel.is_set())
 
     def _start(self, function, callback, downloading=False):
+        """Run function(cancel, progress) on a daemon thread; cancel() abandons it at once."""
         self.busy = True
-        self._cancel.clear()
+        cancel = self._cancel = threading.Event()
         self.progress.setRange(0, 0)
         self.progress_text.setText("正在连接 GitHub…")
         self.progress_percent.clear()
         self.progress_panel.setVisible(downloading)
         self._refresh()
-        worker = Worker(function)
+        worker = Worker(lambda progress: function(cancel, progress))
         self._worker = worker
-        worker.signals.result.connect(callback)
+        self._callback = callback
+        self._workers.add(worker)   # abandoned workers stay referenced until their queued signals drain
+        worker.signals.result.connect(self._result)
         worker.signals.failed.connect(self._failed)
         worker.signals.progress.connect(self._progress)
         worker.signals.finished.connect(self._finished)
-        self.pool.start(worker)
+        # A blocked socket only returns at its timeout; a daemon thread never holds up exit.
+        threading.Thread(target=worker.run, name="update-worker", daemon=True).start()
+
+    def _stale(self):
+        return self._worker is None or self.sender() is not self._worker.signals
+
+    def _result(self, value):
+        if not self._stale():
+            self._callback(value)
+        elif isinstance(value, updater.Download):
+            shutil.rmtree(value.executable.parent, ignore_errors=True)   # finished after the user cancelled
 
     def check(self, automatic=False):
         if self.busy:
             return
         self._automatic = automatic
         self._set_status("正在检查 GitHub 正式发布版本…")
-        self._start(lambda progress: updater.check_release(self._cancel), self._checked)
+        self._start(lambda cancel, progress: updater.check_release(cancel), self._checked)
 
     def _checked(self, release):
-        if self._close_pending:
-            return
         self._checked_once = True
         self.release = release
         if release is None:
@@ -189,7 +199,8 @@ class UpdateDialog(QDialog):
             return
         self._automatic = False
         self._set_status(f"正在下载 {self.release.version}…")
-        self._start(lambda progress: updater.download_release(self.release, self._cancel, progress),
+        release = self.release
+        self._start(lambda cancel, progress: updater.download_release(release, cancel, progress),
                     self._downloaded, downloading=True)
 
     def _downloaded(self, download):
@@ -197,6 +208,8 @@ class UpdateDialog(QDialog):
         self._set_status(f"{download.version} 已下载并通过 SHA-256 校验，点击“重启并升级”安装。", "ok")
 
     def _progress(self, value):
+        if self._stale():
+            return
         received, total = value
         if total:
             self.progress.setRange(0, 100)
@@ -207,11 +220,18 @@ class UpdateDialog(QDialog):
             self.progress_text.setText(f"已下载 {_megabytes(received)}")
 
     def _failed(self, message):
+        if self._stale():
+            return
         self._set_status(message, "error")
         if self._automatic and self.parent() is not None:
             self.parent().append_log("SYSTEM", f"检查更新：{message}")
 
     def _finished(self):
+        self._workers = {worker for worker in self._workers if worker.signals is not self.sender()}
+        if not self._stale():
+            self._idle()
+
+    def _idle(self):
         self.busy = False
         self._worker = None
         self.progress.setRange(0, 100)
@@ -222,9 +242,6 @@ class UpdateDialog(QDialog):
         else:
             self.progress_panel.hide()
         self._refresh()
-        self.job_finished.emit()
-        if self._close_pending:
-            self.close()
 
     def open_release_page(self):
         url = updater.RELEASES_URL
@@ -233,17 +250,16 @@ class UpdateDialog(QDialog):
         QDesktopServices.openUrl(QUrl(url))
 
     def cancel(self):
+        if not self.busy:
+            return
+        # Don't wait out a blocked request: the worker sees the flag, cleans up and its signals are ignored.
         self._cancel.set()
-        self.cancel_button.setEnabled(False)
-        self._set_status("正在取消，请等待当前网络请求结束…")
+        downloading = self.progress_panel.isVisibleTo(self)
+        self._idle()
+        self._set_status("已取消下载。" if downloading else "已取消检查。")
 
     def closeEvent(self, event):
-        if self.busy:
-            self._close_pending = True
-            self.cancel()
-            event.ignore()
-            return
-        self._close_pending = False
+        self.cancel()
         event.accept()
 
     def reject(self):
