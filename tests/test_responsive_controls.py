@@ -160,20 +160,18 @@ class ResponsiveControlsTests(unittest.TestCase):
             for left, right in zip(row, row[1:]):
                 self.assertLess(left.geometry().right(), right.geometry().left(), size)
 
-    def test_log_selectors_restore_width_and_keep_selection_and_source(self):
+    def test_log_source_selector_restores_width_and_keeps_source(self):
+        self.assertFalse(hasattr(self.window, "log_filter"))   # level filter removed
         self.resize(1540, 960)
-        self.window.log_filter.setCurrentIndex(1)
         self.window.console_source_combo.setCurrentIndex(self.window.console_source_combo.findData("com"))
+        self.assertEqual(self.window.uboot_catch.text(), "U-Boot")
         self.resize(1280, 800)
-        self.assertEqual(self.window.log_filter.currentText(), "错误")
-        self.assertEqual(self.window.log_filter.toolTip(), "仅错误")
         self.assertEqual(self.window.console_source_combo.currentData(), "com")
         self.assertEqual(self.window.console_source, "com")
         self.assertIn("串口终端", self.window.console_source_combo.toolTip())
-        self.assertEqual(self.window.log_filter.width(), 88)
+        self.assertEqual(self.window.console_source_combo.width(), 88)
+        self.assertEqual(self.window.uboot_catch.text(), "U-Boot")
         self.resize(1540, 960)
-        self.assertEqual(self.window.log_filter.currentText(), "仅错误")
-        self.assertEqual(self.window.log_filter.width(), 118)
         self.assertEqual(self.window.console_source_combo.width(), 118)
         self.assertEqual(self.window.console_source, "com")
 

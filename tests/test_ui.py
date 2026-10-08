@@ -17,7 +17,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 from devmem_studio import top_import
-from devmem_studio.core import ConfigStore, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH
+from devmem_studio.core import ConfigStore, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH, parse_addr
 from devmem_studio.theme import STYLE
 from devmem_studio.window import MainWindow
 
@@ -1071,17 +1071,21 @@ class TopImportUiTests(UiTests):
         self.window.disconnect()
         self.settle(lambda: not self.window._busy)
         self.assertTrue(self.window.import_button.isEnabled())
-        fresh = self.write_fixture_top("confirm-top.sv")
-        with patch("devmem_studio.window.QFileDialog.getOpenFileName", return_value=(str(fresh), "")), \
+        folder = Path(self.temp.name) / "confirm"
+        folder.mkdir()
+        fresh = self.write_fixture_top("confirm/confirm-top.sv")
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)) as pick, \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No) as question:
-            self.window.import_top()
+            self.window.import_button.click()                               # straight to the folder picker
+            self.settle(lambda: question.called)
+            pick.assert_called_once()
             question.assert_called_once()
             self.assertIn("主板卡死", question.call_args[0][2])          # explicit danger warning
             self.assertNotEqual(self.window.top_info["path"], str(fresh))
-        with patch("devmem_studio.window.QFileDialog.getOpenFileName", return_value=(str(fresh), "")), \
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
-            self.window.import_top()
-            self.assertEqual(self.window.top_info["path"], str(fresh))
+            self.window.import_button.click()
+            self.settle(lambda: self.window.top_info["path"] == str(fresh))
             self.assertIn(str(fresh), self.window.top_summary.text())     # path shown for confirmation
 
     def test_toolbar_stable_during_task_and_cancel_still_works(self):
@@ -1313,17 +1317,71 @@ class TopImportUiTests(UiTests):
             self.settle(lambda: warning.called)
         self.assertEqual(warning.call_args.args[1], "未找到 top")
 
-    def test_import_top_button_offers_file_or_folder(self):
+    def test_monitor_button_plots_chosen_registers_and_exports_csv(self):
+        layout = self.window.register_filters_layout
+        self.assertEqual(layout.indexOf(self.window.access_filter), layout.indexOf(self.window.monitor_button) + 1)
+        self.assertTrue(self.window.monitor_button.isEnabled())
+        self.window.table.selectRow(0)
+        self.settle(lambda: self.window.selected is self.window.regs[0])
+        self.window.monitor_button.click()
+        dialog = self.window.monitor_dialog
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.list.count(), len(self.window.regs))
+        self.assertEqual(dialog.checked_addresses(), [self.window.regs[0]["_address"]])   # selected row preselected
+        for index in range(dialog.list.count()):
+            dialog.list.item(index).setCheckState(Qt.Checked)
+        self.assertEqual(len(dialog.checked_addresses()), 8)                               # capped
+        for index in range(2, dialog.list.count()):
+            dialog.list.item(index).setCheckState(Qt.Unchecked)
+        dialog.interval_spin.setValue(1)
+        self.assertEqual(dialog.interval_spin.value(), 5)                                  # minimum
+        self.assertEqual(self.window.cfg["monitor_interval_ms"], 5)
+        dialog.signed_check.setChecked(True)
+        self.assertNotIn("window_s", self.window.cfg["monitor_settings"])
+        self.assertTrue(self.window.cfg["monitor_settings"]["signed"])
+        selection_key = dialog._selection_key
+        self.assertEqual(self.window.cfg["monitor_settings"]["selections"][selection_key], dialog.checked_addresses())
+        dialog.start_button.click()
+        self.settle(lambda: dialog.state == "running" and len(dialog.buffer) >= 10)
+        self.assertEqual(dialog.plot.names, [self.window._display_name(reg) for reg in self.window.regs[:2]])
+        expected_offsets = [parse_addr(reg["offset"]) for reg in self.window.regs[:2]]
+        self.assertEqual(dialog.plot.offsets, expected_offsets)
+        self.assertEqual(dialog.plot.header_texts(0)[1], f"+0x{expected_offsets[0]:03X}")
+        self.assertTrue(dialog.list.isEnabled())
+        self.assertFalse(dialog.list.item(0).flags() & Qt.ItemIsEnabled)
+        self.assertIn("监视中", dialog.status.text())
+        self.assertFalse(dialog.grab().isNull())
+        dialog.start_button.click()
+        self.assertEqual(dialog.state, "idle")
+        target = Path(self.temp.name) / "monitor.csv"
+        with patch("devmem_studio.monitor.QFileDialog.getSaveFileName", return_value=(str(target), "")):
+            self.assertEqual(dialog.export_csv(), str(target))
+        with open(target, encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle))
+        self.assertEqual(rows[0][0], "time_s")
+        self.assertIn(f'0x{self.window.regs[1]["_address"]:08X}', rows[0][2])
+        self.assertEqual(len(rows) - 1, len(dialog.buffer))
+        dialog.clear_button.click()
+        self.assertEqual(dialog.plot.offsets, expected_offsets)
+        self.assertEqual(dialog.plot.header_texts(0)[1:], (f"+0x{expected_offsets[0]:03X}", "—"))
+        # A dropped SSH session ends the run with a visible reason.
+        dialog.start_button.click()
+        self.settle(lambda: dialog.state == "running")
         self.window.disconnect()
+        self.settle(lambda: dialog.state == "idle")
+        self.settle(lambda: "演示会话已关闭" in dialog.status.text())
+        dialog.start_button.click()
+        self.assertIn("请先连接 SSH", dialog.status.text())
+        # Switching components while idle offers the new component's registers.
+        self.window.select_component(self.window.top_info["components"][1])
         self.settle(lambda: not self.window._busy)
-        menu = self.window._import_top_menu()
-        self.assertEqual([action.text() for action in menu.actions()], ["选择 top 文件…", "选择文件夹，自动查找 top…"])
-        with patch.object(self.window, "import_top_folder") as folder:
-            menu.actions()[1].trigger()
-        folder.assert_called_once_with()
-        with patch.object(self.window, "_import_top_menu") as build:
-            self.window.import_button.click()
-        build.return_value.exec.assert_called_once()
+        self.assertIn("ec_1do", dialog.component_label.text())
+        self.assertEqual(dialog.list.count(), len(self.window.regs))
+        self.window.select_component(self.window.top_info["components"][0])
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(dialog._selection_key, selection_key)
+        self.assertEqual(dialog.checked_addresses(), [reg["_address"] for reg in self.window.regs[:2]])
+        dialog.close()
 
     def test_bit_upload_paste_file_path(self):
         # Paste a raw .bit path (text clipboard) → picked.

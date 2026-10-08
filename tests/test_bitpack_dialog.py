@@ -413,15 +413,13 @@ class CompactWindowTests(unittest.TestCase):
         self.window.resize(1280, 800)
         for _ in range(8):
             self.app.processEvents()
-        self.assertEqual(self.window.log_filter.itemText(0), "全部")
-        self.assertEqual(self.window.log_filter.itemData(0, Qt.ToolTipRole), "全部日志")
         self.assertEqual(self.window.console_source_combo.itemText(0), "log")
         self.assertEqual(self.window.console_source_combo.itemData(0), "log")
         self.assertEqual(self.window.console_source_combo.itemData(0, Qt.ToolTipRole), "tail log")
         self.window.resize(1920, 960)
         for _ in range(8):
             self.app.processEvents()
-        self.assertEqual(self.window.log_filter.itemText(0), "全部日志")
+        self.assertEqual(self.window.console_source_combo.itemText(0), "tail log")
         self.assertEqual(self.window.log_download_button.text(), "下载log")
 
     def test_import_upload_download_icons_have_distinct_pixels(self):

@@ -154,6 +154,10 @@ QPushButton#danger:hover { background: #FBE7E7; }
 QPushButton#danger:pressed { background: #F5D8D8; }
 QPushButton#flat { background: transparent; border: 1px solid transparent; color: #657C91; min-height: 30px; padding: 0 8px; }
 QPushButton#flat:hover { background: #E9F0FA; color: #2463DC; }
+QPushButton#flat[outlined="true"] { background: white; border: 1px solid #D5DEE7; }
+QPushButton#flat[outlined="true"]:hover { background: #F1F6FF; border-color: #94B4E9; color: #2463DC; }
+QPushButton#flat[outlined="true"]:pressed { background: #DFEAFE; border-color: #94B4E9; }
+QPushButton#flat[outlined="true"]:disabled { background: #F2F5F8; border-color: #E2E8EF; color: #99A7B6; }
 QPushButton#tab { background: transparent; border: 1px solid transparent; color: #718397; min-height: 28px; padding: 0 11px; }
 QPushButton#tab:checked { background: #E4EDFC; color: #245DC4; border: 1px solid #D2E1FA; }
 QPushButton#tab[density="snug"] { padding: 0 5px; }
@@ -176,6 +180,10 @@ QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QSplitter::handle { background: transparent; }
 QSplitter::handle:hover { background: #CADCF6; border-radius: 3px; }
+QListWidget#monitorList { background: white; border: 1px solid #D5DEE7; border-radius: 5px; outline: none; padding: 3px; }
+QListWidget#monitorList::item { padding: 3px 4px; border-radius: 3px; }
+QListWidget#monitorList::item:hover { background: #F1F6FF; }
+QListWidget#monitorList:disabled { background: #F7F9FC; color: #91A0B0; }
 QPlainTextEdit, QTextBrowser { border: none; background: transparent; }
 QPlainTextEdit#console, QPlainTextEdit#boardConsole { background: #182C3B; color: #C8D7E5; font-family: "Consolas", "Microsoft YaHei UI"; font-size: 12px; border-radius: 5px; padding: 7px; selection-background-color: #365777; }
 QPlainTextEdit#boardConsole { selection-background-color: #F0C478; selection-color: #142635; }

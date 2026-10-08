@@ -12,13 +12,13 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, QPoint, Slot
+from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
 from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
                                QPlainTextEdit, QProgressBar, QMessageBox, QFileDialog, QApplication,
-                               QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem, QMenu)
+                               QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
 
 from . import __version__
 from . import completion, component_parse, top_import
@@ -27,7 +27,8 @@ from .bitpack_dialog import BitPackDialog
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
-                   normalize_remote_dir, remember_dir)
+                   normalize_remote_dir, remember_dir, MONITOR_MIN_INTERVAL_MS)
+from .monitor import MonitorDialog
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
@@ -155,6 +156,7 @@ class MainWindow(QMainWindow):
         self.bit_pack_dialog = None
         self.bit_dialog = None
         self.bit_rollback_dialog = None
+        self.monitor_dialog = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
         self._compact_layout = None
@@ -283,8 +285,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(label("设备连接", "sideCaption"))
         layout.addWidget(self._build_connection_card())
         layout.addSpacing(10)
-        self.import_button = button("导入 top", self.show_import_top_menu, "demo", "import")
-        self.import_button.setToolTip("选择 emcc mix top 文件，或选文件夹自动查找其中的 top（多个时列表选择），"
+        self.import_button = button("导入 top", lambda: self.import_top_folder(), "demo", "import")
+        self.import_button.setToolTip("选择文件夹，自动查找其中（含子目录）的 emcc mix top（多个时列表选择），"
                                       "按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
         self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
         self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹导单个，"
@@ -507,6 +509,11 @@ class MainWindow(QMainWindow):
             filters_layout.addWidget(tab)
         self.view_buttons["basic"].setChecked(True)
         filters_layout.addStretch()
+        self.monitor_button = button("监视", self.open_monitor, "flat", "axis")
+        self.monitor_button.setProperty("outlined", True)
+        self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端按设定间隔（最小 {MONITOR_MIN_INTERVAL_MS} ms）"
+                                       "连续采样，绘制数值随时间变化的曲线。")
+        filters_layout.addWidget(self.monitor_button)
         self.access_filter = ComboBox()
         self.access_filter.setAccessibleName("寄存器权限过滤")
         self.access_filter.addItems(["全部权限", "只读", "可读写"])
@@ -693,16 +700,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(13, 9, 13, 11)
         layout.setSpacing(7)
-        self.log_filter = ComboBox()
-        self.log_filter.setAccessibleName("日志级别筛选")
-        self.log_filter.addItems(["全部日志", "仅错误", "仅命令"])
-        self.log_filter.setFixedWidth(118)
-        self.log_filter.currentIndexChanged.connect(self._render_logs)
-        self.log_filter.currentIndexChanged.connect(lambda _: self._fit_console_toolbar())
         self.follow_log = QCheckBox("跟随")
         self.follow_log.setChecked(True)
         self.follow_log.toggled.connect(self._follow_toggled)
-        self.uboot_catch = QCheckBox("拦截U-Boot")
+        self.uboot_catch = QCheckBox("U-Boot")
         self.uboot_catch.setToolTip("勾选后，板卡下次启动出现 autoboot 倒计时时自动按住 &（Shift+7），直到停在 U-Boot 提示符；"
                                     "可先勾选再点「重启设备」或给板卡上电。也可在终端里直接按住 Shift+7。")
         self.uboot_catch.setVisible(False)   # serial view only
@@ -752,11 +753,15 @@ class MainWindow(QMainWindow):
         self.log_export_button.setToolTip("导出当前终端日志")
         self.log_clear_button = button("清空", self.clear_logs, "flat", "clear")
         self.log_clear_button.setToolTip("清空当前终端日志")
+        for control in (self.log_prev, self.log_next, self.bit_pack_button, self.bit_upload_button,
+                        self.bit_rollback_button, self.log_download_button, self.reboot_button,
+                        self.log_export_button, self.log_clear_button):
+            control.setProperty("outlined", True)
         self.reboot_button.setToolTip("重启设备")
         self.console_title = label("会话终端", "sectionTitle")
         # One row only; the bit actions stay labelled, secondary actions use
         # compact icons/tooltips rather than wrapping below the search field.
-        self.console_toolbar = row(self.console_title, self.log_filter, self.console_source_combo,
+        self.console_toolbar = row(self.console_title, self.console_source_combo,
                                    self.log_search, self.log_match_count, self.log_prev, self.log_next,
                                    self.log_wrap, self.follow_log, self.uboot_catch, 1,
                                    self.bit_pack_button, self.bit_upload_button, self.bit_rollback_button,
@@ -818,26 +823,6 @@ class MainWindow(QMainWindow):
                 self.log_search.setText(text)   # find-as-you-type picks it up
         self.log_search.setFocus()
         self.log_search.selectAll()
-
-    def show_import_top_menu(self):
-        """导入 top: pick the file directly, or a folder to search for top files."""
-        if self._closing or self._busy or self.connected:
-            return
-        self._import_top_menu().exec(self.import_button.mapToGlobal(QPoint(0, self.import_button.height())))
-
-    def _import_top_menu(self):
-        menu = QMenu(self)
-        menu.addAction(icon("import"), "选择 top 文件…", self.import_top)
-        menu.addAction(icon("folder"), "选择文件夹，自动查找 top…", lambda: self.import_top_folder())
-        return menu
-
-    def import_top(self):
-        if self._closing or self._busy or self.connected:
-            return
-        start = self.cfg.get("top_path") or ""
-        path, _ = QFileDialog.getOpenFileName(self, "选择 top 文件", start, "SystemVerilog (*.sv *.v);;所有文件 (*)")
-        if path:
-            self._confirm_import_top(path)
 
     def _confirm_import_top(self, path):
         answer = QMessageBox.question(self, "确认导入 top",
@@ -1284,6 +1269,7 @@ class MainWindow(QMainWindow):
         self.filter_rows()
         self.cfg["base"] = f"0x{base:08x}"
         self._refresh_controls()
+        self._sync_monitor()
         self._schedule_save()
 
     @staticmethod
@@ -1658,7 +1644,6 @@ class MainWindow(QMainWindow):
         wide = available >= 1420
         narrow = available < 1070
         tiny = available < 820
-        self.log_filter.setFixedWidth(70 if tiny else 88 if narrow else 118)
         self.console_source_combo.setFixedWidth(70 if tiny else 88 if narrow else 118)
         compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
         self.log_search.setMinimumWidth(80 if tiny else 100 if compact else 120)
@@ -1678,7 +1663,6 @@ class MainWindow(QMainWindow):
         for control in (self.log_prev, self.log_next):
             control.setIconSize(QSize(14, 14))
             control.setFixedWidth(control.sizeHint().width())
-        self.uboot_catch.setText("U-Boot" if narrow else "拦截U-Boot")
         self.console_title.setVisible(not narrow)
         self.log_match_count.setVisible(not narrow)
         self.log_prev.setVisible(not narrow)
@@ -1694,13 +1678,8 @@ class MainWindow(QMainWindow):
             control.setIconSize(QSize(16, 16))
             control.setFixedWidth(control.sizeHint().width())
             control.setAccessibleName(text)
-        full_filters = ("全部日志", "仅错误", "仅命令")
-        short_filters = ("全部", "错误", "命令")
-        full_sources = ("tail log", "ssh", "serial", "system")
-        short_sources = ("log", "ssh", "serial", "sys")
-        for combo, full, short in ((self.log_filter, full_filters, short_filters),
-                                   (self.console_source_combo, full_sources, short_sources)):
-            self._set_combo_display_labels(combo, full, short, narrow)
+        self._set_combo_display_labels(self.console_source_combo, ("tail log", "ssh", "serial", "system"),
+                                       ("log", "ssh", "serial", "sys"), narrow)
         self._fit_compact_selectors(narrow, tiny)
         self._fit_register_filters()
 
@@ -1742,6 +1721,8 @@ class MainWindow(QMainWindow):
                 restyle(tab)
                 tab.updateGeometry()
         self.register_filters_layout.setSpacing(spacing)
+        self.monitor_button.setText("" if padding else "监视")
+        self.monitor_button.setAccessibleName("监视")
         if self.access_filter.property("compact") != short_access:
             self.access_filter.setProperty("compact", short_access)
             restyle(self.access_filter)
@@ -1768,7 +1749,7 @@ class MainWindow(QMainWindow):
 
     def _fit_compact_selectors(self, compact, tiny):
         for combo in (self.interval, self.width_combo, self.format_combo,
-                      self.preset_combo, self.log_filter, self.console_source_combo):
+                      self.preset_combo, self.console_source_combo):
             if combo.property("compact") != compact:
                 combo.setProperty("compact", compact)
                 restyle(combo)
@@ -1782,7 +1763,7 @@ class MainWindow(QMainWindow):
         self._refresh_selector_tooltips()
 
     def _refresh_selector_tooltips(self, *_):
-        for name in ("access_filter", "format_combo", "preset_combo", "serial_port", "log_filter"):
+        for name in ("access_filter", "format_combo", "preset_combo", "serial_port"):
             combo = getattr(self, name, None)
             if combo is None:
                 continue
@@ -1956,6 +1937,7 @@ class MainWindow(QMainWindow):
         inputs_locked = self._busy and self._task_kind != "read"
         for control in (self.component_search, self.access_filter, self.search):
             control.setEnabled(not inputs_locked and not self._closing)
+        self.monitor_button.setEnabled(bool(self.regs) and getattr(self, "address_valid", False) and not self._closing)
         # A top mismatched with the live device can hang the board; import only while disconnected.
         self.import_button.setEnabled(not self._busy and not self._closing and not self.connected)
         if self.rtl_base is None:
@@ -2238,10 +2220,10 @@ class MainWindow(QMainWindow):
             return
         if not (self.serial_connected and self.serial.alive):
             self._set_uboot_catch(False)
-            self._serial_note("[serial 未连接：请先连接 serial 再勾选拦截U-Boot]")
+            self._serial_note("[serial 未连接：请先连接 serial 再勾选 U-Boot]")
             return
         self.serial.arm_uboot_stop(b"&")
-        self._serial_note("[拦截U-Boot 已开启：板卡启动出现倒计时时自动按住 &，可点「重启设备」或给板卡上电]")
+        self._serial_note("[U-Boot 拦截已开启：板卡启动出现倒计时时自动按住 &，可点「重启设备」或给板卡上电]")
 
     def _set_uboot_catch(self, on):
         self.uboot_catch.blockSignals(True)
@@ -2324,6 +2306,43 @@ class MainWindow(QMainWindow):
             self.bit_pack_dialog.show()
         self.bit_pack_dialog.raise_()
         self.bit_pack_dialog.activateWindow()
+
+    def open_monitor(self):
+        if self._closing or not self.regs or not getattr(self, "address_valid", False):
+            return
+        if self.monitor_dialog is None:
+            self.monitor_dialog = MonitorDialog(lambda: self.session if self.connected else None,
+                                                self.cfg.get("monitor_interval_ms", 10), self,
+                                                settings=self.cfg.get("monitor_settings"))
+            self.monitor_dialog.interval_changed.connect(self._remember_monitor_interval)
+            self.monitor_dialog.settings_changed.connect(self._remember_monitor_settings)
+        self._sync_monitor(preselect=True)
+        if self.monitor_dialog.isMinimized():
+            self.monitor_dialog.showNormal()
+        else:
+            self.monitor_dialog.show()
+        self.monitor_dialog.raise_()
+        self.monitor_dialog.activateWindow()
+
+    def _sync_monitor(self, preselect=False):
+        """Offer the current component's registers; a running monitor keeps its own list."""
+        if self.monitor_dialog is None or not self.active_component:
+            return
+        registers = [dict(name=self._display_name(reg), _address=reg["_address"], offset=reg["offset"],
+                          **{flag: reg.get(flag, False) for flag in
+                             ("write_only", "read_clear", "read_to_clear", "read_side_effect")}) for reg in self.regs]
+        chosen = [self.selected["_address"]] if preselect and self.selected else []
+        self.monitor_dialog.set_registers(
+            f"{self._component_display_name(self.active_component)} · {self.active_component['module_type']}",
+            registers, chosen, key=f"{Path(self.top_info['path']).resolve()}|{self.cache_key}|0x{self._module_start:08X}")
+
+    def _remember_monitor_settings(self, settings):
+        self.cfg["monitor_settings"] = settings
+        self._schedule_save()
+
+    def _remember_monitor_interval(self, value):
+        self.cfg["monitor_interval_ms"] = int(value)
+        self._schedule_save()
 
     def _remember_bitpack_settings(self, settings):
         self.cfg["bitpack_settings"] = dict(settings)
@@ -3117,7 +3136,7 @@ class MainWindow(QMainWindow):
             self._update_counts()
         if self.file_logger:
             self.file_logger.info("[%s] %s", level, text)
-        if source == self.console_source and self._log_visible(level):
+        if source == self.console_source:
             self._append_log_record(record)
 
     def _log_emit(self, source):
@@ -3131,13 +3150,6 @@ class MainWindow(QMainWindow):
     def _records_for(self, source):
         return {"ssh": self.log_records_ssh, "log": self.log_records_log,
                 "system": self.log_records_system}.get(source, self.log_records_ssh)
-
-    def _log_visible(self, level):
-        # Raw streams (sunny.log, serial console) have no levels; the filter applies to records.
-        if self.console_source in ("log", "com"):
-            return True
-        mode = self.log_filter.currentIndex()
-        return mode == 0 or mode == 1 and level == "ERROR" or mode == 2 and level == "CMD"
 
     def _append_log_record(self, record):
         stamp, level, text = record
@@ -3190,8 +3202,7 @@ class MainWindow(QMainWindow):
                     self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
             else:
                 for record in self._records_for(self.console_source):
-                    if self._log_visible(record[1]):
-                        self._append_log_record(record)
+                    self._append_log_record(record)
             # The SSH view is interactive (prompt at the bottom); log/system views are plain.
             self.console.set_interactive(self.console_source == "ssh")
         # The visible content changed: refresh the search match counter.
@@ -3357,6 +3368,8 @@ class MainWindow(QMainWindow):
         self.save_timer.stop()
         self.cancel.set()
         self._stop_stream()
+        if self.monitor_dialog is not None:
+            self.monitor_dialog.shutdown()
         self.session.close()
         self.serial.close()
         if self._task_serial:
