@@ -517,6 +517,32 @@ class DialogTests(unittest.TestCase):
         QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(2)).center())
         self.assertEqual(self.dialog.checked_addresses(), [])
 
+    def test_row_click_highlights_its_lane_and_lane_label_focuses_the_row(self):
+        self.dialog.set_registers("A", self.registers, [0x1000, 0x1008])
+        view = self.show_register_list()
+        self.dialog.monitored = self.dialog.checked_registers()
+        self.dialog.buffer = MonitorBuffer(2)
+        self.dialog.buffer.extend([(i * .01, (i, -i)) for i in range(50)])
+        self.dialog.plot.set_series(self.dialog.buffer, ["R0", "R2"], [0, 8])
+        self.dialog._set_state("running")
+        plot, delegate = self.dialog.plot, view.itemDelegate()
+        self.assertIsNone(plot.highlight)
+        for row, lane in ((2, 1), (1, None), (0, 0)):
+            QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(row)).center())
+            self.assertEqual(delegate.focus, 0x1000 + row * 4)
+            self.assertEqual(plot.highlight, lane)
+            plot.grab()
+        self.assertEqual(self.dialog.checked_addresses(), [0x1000, 0x1008])   # focusing never toggles
+        lane = plot.lanes()[1]
+        QTest.mouseClick(plot, Qt.LeftButton, pos=QPoint(40, int(lane.center().y())))
+        self.assertEqual((delegate.focus, plot.highlight), (0x1008, 1))
+        self.assertEqual(plot.markers, [None, None])
+        self.dialog.clear()
+        self.assertEqual(plot.highlight, 1)
+        self.dialog.stop()
+        view.setCurrentRow(0)
+        self.assertEqual((delegate.focus, plot.highlight), (0x1000, 0))
+
     def test_active_register_list_scrolls_without_changing_checks(self):
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(100)]
         registers[1]["write_only"] = True

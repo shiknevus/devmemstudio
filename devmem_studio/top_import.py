@@ -356,7 +356,17 @@ def find_components_param(top_path: Path) -> Path | None:
         for candidate in (ancestor / "include_files/components_param.vh",):
             if candidate.is_file():
                 return candidate
-        for sibling in ancestor.glob("*/include_files/components_param.vh"):
+        try:   # one stat per child, not a directory listing per child like glob("*/…")
+            children = list(os.scandir(ancestor))
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if not child.is_dir():
+                    continue
+            except OSError:
+                continue
+            sibling = Path(child.path) / "include_files/components_param.vh"
             if sibling.is_file():
                 return sibling
     return None

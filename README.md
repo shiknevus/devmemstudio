@@ -1,10 +1,56 @@
-# 寄存器调试工作台 5.0.0
+# 寄存器调试工作台 5.1.0
 
 作者：szzhang / cgliu / bxli
 
 面向 FPGA / Linux 开发板的 SSH 寄存器调试工作台。以组件为中心：导入 RTL 顶层文件后直接选择组件调试，寄存器表精确到组件类型。
 
 ![工作台界面（离线演示数据）](docs/workbench.png)
+
+当前发布包：**`DevmemStudio-5.1.0-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.1.0**。构建结果、校验值与验证边界见 [5.1.0 验收记录](docs/VALIDATION_5.1.0.md)。
+
+| 需要做什么 | 阅读位置 |
+| --- | --- |
+| 下载后的运行与升级 | [直接运行 EXE](#直接运行-exe) |
+| 连接板卡、导入 top、调试寄存器 | [使用流程](#使用流程) |
+| 查看本次变化与监视联动操作 | [5.1.0 发布](#510-发布2026-10-08) |
+| 找配置、缓存或日志 | [配置与日志](#配置与日志) |
+| 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
+| 排查启动、监视或构建问题 | [常见问题](#常见问题) |
+
+## 5.1.0 发布（2026-10-08）
+
+**监视列表与曲线联动 · 运行库并行压缩与解压 · 构建和测试提速**
+
+### 监视列表与曲线联动
+
+监视窗口现在可以从列表或图表定位同一个寄存器：点击左侧寄存器行，高亮该行和对应曲线区域；点击图表左侧的寄存器名称，反向高亮列表条目，并在条目未被搜索隐藏时滚动定位。
+
+1. 导入 top 并选中组件，点击寄存器区的「监视」。
+2. 在左侧搜索并勾选要观察的寄存器，最多 8 个；设置采样间隔，最小 5 ms，默认 10 ms。
+3. 点击「开始监视」，每个寄存器显示一条曲线，共用时间轴。运行期间可点击列表或图表左侧名称切换高亮，采样勾选保持不变。
+4. 在曲线区域单击依次放置 A/B 标记，拖动调整位置；图表下方显示两个时刻及 Δt。点击左侧名称只切换高亮，不放置标记。
+5. 按 Ctrl + 滚轮以鼠标位置为中心缩放时间轴，范围 25%–6400%；点击 Zoom 恢复全局视图。开启「有符号」后按 32 位补码显示数值。
+6. 点击「清空数据」清除采样点和标记，保留当前高亮；点击「导出 CSV」导出当前保留的数据。停止监视后可继续检查曲线。
+
+未参与采样的寄存器只高亮列表行。搜索隐藏的条目不会因点击曲线名称自动取消搜索。只写、读清零或读取有副作用的寄存器不能加入持续监视。每次运行最多保留 20 万点，超过时丢弃最旧的 1/4 并提示；CSV 只包含保留部分。勾选按 top + 组件记忆，间隔与有符号选项保存在 `registers.json`。
+
+### 单文件运行库与启动
+
+单文件 EXE 继续内嵌 Python、Qt 和 SSH 依赖。运行库改为 **3 个独立的 LZMS 压缩块**：构建时并行压缩，首次启动或缓存需要修复时并行解压，使用 Windows 自带的解压接口。完整运行库仍通过 SHA-256 校验，再写入临时目录并原子发布。
+
+运行库缓存位于 `%LOCALAPPDATA%\DevmemStudio\runtime\<版本-内容哈希>\`；正常后续启动复用缓存，文件缺失或损坏时自动修复，不再使用的旧版本缓存自动清理。程序的连接设置仍在 EXE 旁的 `registers.json`，不可写时回落到用户目录。升级时保留原设置文件即可，发布 ZIP 不包含本机设置、密码或日志。
+
+### 构建、测试与导入优化
+
+- `build_exe.bat` 统一调用 `tools/build.py`。全量测试、源码离线验收、EXE 构建与隔离验收并行执行；这些检查全部通过后才将候选 EXE 发布到 `dist`。
+- 固定依赖版本已一致、图标已是最新时跳过对应生成步骤；运行库内容未变时复用压缩缓存。PyInstaller 阶段固定时间戳与哈希种子，减少无内容变化引起的重复压缩。
+- `tools/run_tests.py` 在独立子进程中并行执行测试，按上次用时分块；界面用例去重、模拟读取取消人为等待，SSH 文件测试使用独立临时目录。正式构建使用 `--full`，包含完整 SSH 依赖裁剪检查。
+- 查找 `components_param.vh` 时减少重复目录遍历，仍按原有顺序查找顶层附近与祖先目录下的参数文件。
+- 演示会话对象回收时自动清理临时模拟板端目录。
+
+本次完整构建约 75 秒：全量回归执行 363 项，360 项通过、3 项依赖 POSIX sh 在 Windows 上跳过；源码离线验收及两轮独立 EXE 验收各 111 项检查通过。具体环境、产物大小与 SHA-256 见 [5.1.0 验收记录](docs/VALIDATION_5.1.0.md)。
+
+构建命令、阶段日志、候选 EXE 验收及常见问题见下文。本次未新增实板验证；常驻采样程序的板端 CPU 占用与实际采样周期仍需在目标设备上测量。
 
 ## 当前流程：选组件 · 切视图
 
@@ -433,9 +479,11 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 直接运行 EXE
 
-解压发布 ZIP，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`（约 75 MB，仅一次），之后直接复用。
+解压 **`DevmemStudio-5.1.0-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`（约 75 MB，仅一次），之后直接复用。
 
 可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
+
+从 5.0.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.1.0**。
 
 本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
@@ -459,7 +507,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 - 待写入默认 HEX。切换 HEX / DEC 只改变解释方式，已填文本保持不变；预设按当前进制填入。访问位宽、写入值范围与地址对齐仍会校验。
 - 32 位状态视图以及 `irq1`、`irq2`、`a/b/c rpt` 的字段名、位区间和指定进制解析。
 - 自动轮询；前一轮完成后再等待指定间隔，不累积后台请求。
-- 寄存器监视：最多 8 个寄存器、最小 5 ms 间隔的板端连续采样曲线，A/B 标记测时差、Ctrl+滚轮缩放、有符号显示、CSV 导出；aarch64 板端用常驻采样程序，CPU 占用低。
+- 寄存器监视：最多 8 个寄存器、最小 5 ms 间隔的板端连续采样曲线，列表与曲线联动高亮、A/B 标记测时差、Ctrl+滚轮缩放、有符号显示、CSV 导出；aarch64 板端使用常驻采样程序，减少重复启动 `devmem` 的开销。
 - 网络操作在工作线程执行；批量操作可停止，遇错立即终止后续项。
 - SSH 命令终端即 shell：会话终端选择 ssh 来源后在提示行输入命令，行内移动光标编辑，Tab 补全命令与板端路径，`↑`/`↓` 浏览历史、回车执行；tail log / system 视图只读。
 - 串口终端：serial 来源是字符模式控制台，板卡输出（启动日志、内核消息、U-Boot）实时显示，按键直发；勾选「U-Boot」自动按住 & 停在 U-Boot 提示符。
@@ -514,22 +562,68 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 重新打包
 
-双击 **`build_exe.bat`**。脚本使用当前 venv 安装固定版本依赖、生成 ICO、执行测试与离线验收，再调用 PyInstaller 生成运行库目录（`build\dist\_runtime`，仅作中间产物），由 `tools\build_singlefile.py` 压缩并封装成单文件，随后隔离验收单文件 EXE 并生成发布 ZIP；任一步失败则停止。输出为 `dist/DevmemStudio.exe` 和发布包 `dist/DevmemStudio-<版本>-win64.zip`（当前 5.0.0）。
+双击 **`build_exe.bat`**，或在项目根目录运行：
+
+```powershell
+.\venv\Scripts\python.exe tools\build.py
+```
+
+构建脚本先核对 `requirements-lock.txt` 的固定依赖版本和图标更新时间，再并行执行三个任务：
+
+- 全量回归：`tools/run_tests.py --full`，包含正式发布所需的慢速检查。
+- 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
+- EXE 构建及隔离验收：PyInstaller 生成 `build/dist/_runtime/`，封装为候选 `build/DevmemStudio.exe`，再单独复制候选 EXE 到隔离目录，验证首次解压、损坏缓存修复和旧缓存清理。
+
+三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.1.0-win64.zip`**。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
+
+| 阶段 | 日志 |
+| --- | --- |
+| 安装固定依赖（需要时） | `build/logs/pip.log` |
+| 生成图标（需要时） | `build/logs/icon.log` |
+| 全量测试 | `build/logs/tests.log` |
+| 源码离线验收 | `build/logs/smoke.log` |
+| PyInstaller 运行库打包 | `build/logs/pyinstaller.log` |
+| 单文件封装与压缩信息 | `build/logs/singlefile.log` |
+| EXE 隔离验收 | `build/logs/verify_exe.log` |
+| 发布包生成 | `build/logs/release.log` |
+
+只构建和验收候选 EXE、暂不更新 `dist`：
+
+```powershell
+.\venv\Scripts\python.exe tools\build.py --no-dist
+```
+
+运行库原始内容未变时，封装工具复用 `build/singlefile-launcher/payload.bin` 和 `payload.json` 中记录的压缩结果。构建报告 `artifacts/singlefile-build.json` 包含版本、缓存标识、文件数量、压缩块数、是否复用压缩结果、EXE 大小及 SHA-256。不同机器和不同测试分块的耗时会有变化，以本次日志为准。
 
 构建单文件启动器需要 MinGW-w64 的 **x86_64** 编译器（`x86_64-w64-mingw32-gcc` / `x86_64-w64-mingw32-windres` 在 PATH 中；本机 `D:\MinGW64\mingw-w64-gcc-14.3-stable-r43\bin` 已具备）。启动器源码在 `tools/runtime_launcher/launcher.c`，只依赖 Windows 自带的 Cabinet（LZMS 解压）、bcrypt（SHA-256）、kernel32 与 user32。
 
-也可手动执行：
+也可手动检查各阶段；正式发布推荐使用上面的完整构建命令，以保证失败时不会继续发布：
 
 ```powershell
 .\venv\Scripts\python.exe -m pip install -r requirements-lock.txt
 .\venv\Scripts\python.exe tools\make_icon.py
-.\venv\Scripts\python.exe -m unittest discover -s tests -v
+.\venv\Scripts\python.exe tools\run_tests.py --full
 .\venv\Scripts\python.exe devmem_debug.py --offscreen --smoke-test artifacts\source-smoke
 .\venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build\dist DevmemStudio.spec
-.\venv\Scripts\python.exe tools\build_singlefile.py
-.\venv\Scripts\python.exe tools\verify_exe.py
+.\venv\Scripts\python.exe tools\build_singlefile.py --output build\DevmemStudio.exe
+.\venv\Scripts\python.exe tools\verify_exe.py --executable build\DevmemStudio.exe
+New-Item -ItemType Directory -Force -Path dist | Out-Null
+Copy-Item -LiteralPath build\DevmemStudio.exe -Destination dist\DevmemStudio.exe
 .\venv\Scripts\python.exe tools\make_release.py
 ```
+
+日常测试可以只跑本次修改涉及的模块，或运行完整的并行回归：
+
+```powershell
+# 日常回归
+.\venv\Scripts\python.exe tools\run_tests.py
+# 指定模块和测试类，使用 4 个并行子进程
+.\venv\Scripts\python.exe tools\run_tests.py test_ui test_monitor.DialogTests -j 4
+# 发布前全量回归
+.\venv\Scripts\python.exe tools\run_tests.py --full
+```
+
+默认跳过会重新执行 SSH 回环套件的依赖裁剪检查；`--full` 或设置 `DEVMEMSTUDIO_FULL_TESTS=1` 时包含该检查，正式构建使用 `--full`。分块依据上次各测试用时（`build/test-times.json`），每个分块在独立子进程内运行。仍可用 `python -m unittest discover -s tests` 串行运行；需要覆盖完整发布范围时先设置 `DEVMEMSTUDIO_FULL_TESTS=1`。
 
 复测启动速度：`.\venv\Scripts\python.exe tools\benchmark_startup.py --exe dist\DevmemStudio.exe --output artifacts\startup-singlefile --runs 5`（独立桌面、隔离的配置与缓存目录，不影响本机设置）。
 
@@ -548,6 +642,8 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 | 单文件运行库缓存（每版本一份，旧版自动清理） | `%LOCALAPPDATA%\DevmemStudio\runtime\<版本-哈希>\` |
 | SSH 已知主机指纹 | `%LOCALAPPDATA%\DevmemStudio\known_hosts` |
 | 主机密钥更新前的备份 | `%LOCALAPPDATA%\DevmemStudio\known_hosts.backup-时间-编号` |
+| 运行时导入的组件覆盖定义 | `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json` |
+| 内置 bit 打包引擎缓存 | `%LOCALAPPDATA%\DevmemStudio\tools\bitpack\<SHA256>\pack_bit.exe` |
 | 会话日志、异常日志 | `%LOCALAPPDATA%\DevmemStudio\logs\` |
 | 原始程序备份 | `backups/devmem_debug_legacy.py` |
 | 寄存器定义及分组 | `devmem_studio/catalog.py` |
@@ -556,16 +652,37 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 验证范围
 
-最终构建及验收证据见 [验收记录](docs/VALIDATION.md)。
+当前 **5.1.0** 构建及验收证据见 [5.1.0 验收记录](docs/VALIDATION_5.1.0.md)。此前的测试与实板验证见 [5.0.0 验收记录](docs/VALIDATION_5.0.0.md)。
 
 - 核心与交互回归：原始寄存器定义逐项比对、字段解析、地址与数值校验、配置恢复、异常操作及关闭行为。
 - 本机真实 SSH 回环测试：Paramiko 加密连接、读写回读、命令失败退出码、超时失效、断线检测、独立日志通道和分片 UTF-8 输出。
 - 主机密钥变化恢复：拒绝未确认的密钥、确认后重连、更新前备份、保留其他主机、默认端口和非默认端口、哈希主机名、记录变动保护及再次变化时重新核对。
 - 日志查找：分片高亮、普通文本与中文/表情定位、大小写、键盘跳转、循环查找、实时增量、旧行淘汰、清空和主窗口并行读写。
-- 寄存器监视：采样脚本与常驻程序交接规则、时间戳与失败点解析、缓冲淘汰、缩放/标记/布局交互；`tools/regmon/emulate_test.py` 用 unicorn 在 PC 上执行真实 aarch64 二进制并模拟系统调用。常驻采样程序尚未在实板上测量 CPU 占用。
-- EXE 离线验收：模块切换、搜索筛选、预设与进制、自动轮询、取消、日志、导出、小窗口、DPI 和退出；单文件首次解压、缓存损坏自愈、旧版本缓存清理与并发首启。
+- 寄存器监视：采样脚本与常驻程序交接规则、时间戳与失败点解析、缓冲淘汰、缩放/标记/布局交互、列表与曲线联动高亮及清空后的高亮保留；`tools/regmon/emulate_test.py` 用 unicorn 在 PC 上执行真实 aarch64 二进制并模拟系统调用。常驻采样程序尚未在实板上测量 CPU 占用。
+- EXE 离线验收：模块切换、搜索筛选、预设与进制、自动轮询、取消、日志、导出、小窗口、DPI 和退出；单文件分块解压、首次启动、缓存损坏自愈与旧版本缓存清理。并发首启等其他启动检查的具体覆盖范围见对应验收记录。
 
 未连接或改写实际开发板。实际硬件上的权限、总线访问行为、寄存器副作用和板端日志路径仍需在现场验证。
+
+## 常见问题
+
+| 现象 | 检查与处理 |
+| --- | --- |
+| 新电脑没有 Python 或 Qt | 直接使用发布包中的 EXE，所需运行库已内嵌；`venv` 仅用于源码开发和构建。 |
+| 升级后想保留设备设置 | 关闭程序，保留原 EXE 旁的 `registers.json`，只替换 EXE；不可写目录的设置在 `%LOCALAPPDATA%\DevmemStudio\registers.json`。 |
+| 首次启动较慢，或更换 EXE 后出现新的缓存目录 | 新版本或不同内容会释放新的运行库；后续启动复用缓存。首次释放文件也可能受本机安全软件扫描影响。 |
+| 缓存文件缺失或损坏 | 重新启动 EXE，启动器会检查并重新释放运行库；无需另行安装 Python。若仍失败，检查用户缓存目录是否可写及磁盘空间。 |
+| 构建提示 `dist/DevmemStudio.exe` 正在使用 | 先关闭正在运行的程序，再重新执行构建；候选 EXE 位于 `build/DevmemStudio.exe`，详细提示见构建输出。 |
+| 不希望试验构建覆盖已有发布文件 | 使用 `tools/build.py --no-dist`，它只构建并验收候选 EXE。 |
+| 构建失败但不清楚阶段 | 查看输出中的阶段名和 `build/logs/<阶段>.log`，测试失败记录在 `tests.log`，EXE 验收失败记录在 `verify_exe.log`。 |
+| 缺少 MinGW-w64 | 将 x86_64 的 gcc 和 windres 加入 PATH；它们用于编译单文件启动器，发布版用户无需安装。 |
+| 切换监视高亮后，列表勾选没有变化 | 监视运行中点击只切换观察对象；先停止监视，再更改采样勾选并重新开始。 |
+| 点击图表名称后列表没有滚动到对应项 | 条目可能被当前搜索隐藏；清空或调整搜索条件，再点击名称定位。 |
+| 寄存器不能勾选监视 | 检查是否只写、读清零或读取有副作用，这些寄存器不能持续采样。 |
+| 状态栏显示使用 `devmem` 循环 | 常驻采样程序可能无法上传或执行，例如 `/tmp` 挂载为 `noexec`；查看状态提示。程序会使用回退方式，实际采样周期以状态栏为准。 |
+| 曲线数据暂停 | 查看 SSH 连接和底部状态。短时网络停顿后可继续接收；寄存器访问故障或 `/dev/mem` 打不开时会停止并提示原因。 |
+| RTL 已修改但寄存器定义仍是旧版 | 使用「导入组件」重新解析组件文件夹；只调整 RTL 定义无需重新构建 EXE。要恢复内置定义，删除对应的组件覆盖 JSON 并重启。 |
+
+监视「导出 CSV」保存采样数据；主工作台的寄存器快照导出保存当前寄存器表，两者用途不同。报告问题时，可提供版本号、操作步骤、相关日志及错误提示；配置文件可能包含已保存的密码，检查后再分享。
 
 ## 代码结构
 
@@ -582,7 +699,7 @@ devmem_studio/
   file_scan.py             文件夹内 .bit / top 文件查找
   completion.py            会话终端 Tab 补全（命令与路径）
   window.py                桌面工作台与异步任务调度
-  monitor.py               寄存器监视窗口：采样缓冲、曲线绘制、标记与 CSV 导出
+  monitor.py               寄存器监视窗口：采样缓冲、曲线绘制、联动高亮、标记与 CSV 导出
   widgets.py / theme.py    控件、矢量图标与统一样式
   dialogs.py               批量预览、日志与使用指南
   log_view.py              日志高亮、匹配统计与查找跳转
@@ -591,6 +708,9 @@ devmem_studio/
 assets/                    图标、Windows 版本资源与板端常驻采样程序（regmon/regmon-aarch64）
 tests/                     核心、RTL、SSH、串口和界面回归
 tools/                     图标生成、组件目录生成、单文件封装、隔离 EXE 验证与启动测速
+  build.py                 并行构建、测试、隔离验收与发布编排
+  run_tests.py             按用时分块的多进程测试入口
+  build_singlefile.py      三块 LZMS 并行压缩、压缩缓存与原生 EXE 封装
   runtime_launcher/        单文件原生启动器（LZMS 解压、缓存校验与清理）
   regmon/                  板端常驻采样程序源码、构建脚本（aarch64-linux-gnu-gcc）与 unicorn 仿真测试
 DevmemStudio.spec           运行库打包配置（单文件由 tools/build_singlefile.py 封装）

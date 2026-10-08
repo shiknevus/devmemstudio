@@ -184,6 +184,7 @@ def run_smoke(app, directory: Path):
             pack_dialog.close()
         window.grab().save(str(directory / "offline.png"))
         window.session = DemoSession(window._log_emit("ssh"))
+        window.session.read_delay = 0   # ~400 simulated reads; latency is not under test
         window.session.connect()
         window._set_connection(True)
         settle()

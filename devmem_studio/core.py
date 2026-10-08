@@ -20,12 +20,14 @@ import posixpath
 import re
 import select
 import shlex
+import shutil
 import socket
 import sys
 import tempfile
 import threading
 import time
 import uuid
+import weakref
 
 from .catalog import DEFAULT_CATEGORIES, DEFAULT_TYPES, NAME_GROUPS, REGISTER_FIELDS
 
@@ -1278,15 +1280,17 @@ class SshSession:
 
 class DemoSession:
     """Explicit offline simulator for inspection and reproducible acceptance tests."""
+    read_delay = 0.008   # simulated devmem round trip
+
     def __init__(self, log=lambda level, text: None):
         self.log = log
         self.alive = False
         self.last_exit = 0
         self.memory = {}
         self._stream_stop = threading.Event()
-        # fake remote filesystem root, seeded with a demo sunny.log
-        import tempfile as _tempfile
-        self.remote_root = Path(_tempfile.mkdtemp(prefix="demo-board-"))
+        # fake remote filesystem root, seeded with a demo sunny.log; removed with the session
+        self.remote_root = Path(tempfile.mkdtemp(prefix="demo-board-"))
+        weakref.finalize(self, shutil.rmtree, str(self.remote_root), True)
         (self.remote_root / "run" / "media" / "sda").mkdir(parents=True, exist_ok=True)
         demo_log = self.remote_root / "run" / "media" / "sda" / "sunny.log"
         if not demo_log.exists():
@@ -1411,7 +1415,7 @@ class DemoSession:
         command = read_command(address)
         if not quiet:
             self.log("CMD", command)
-        time.sleep(0.008)
+        time.sleep(self.read_delay)
         if address not in self.memory:
             offset = address & 0x1FF
             self.memory[address] = {0: 0x00140201, 4: 0x08000000, 8: 1, 0x68: 0x03080100,

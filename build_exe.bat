@@ -6,24 +6,9 @@ if not exist "venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-"venv\Scripts\python.exe" -m pip install -r requirements-lock.txt
+rem Steps, parallelism and logs (build\logs\*.log): see tools\build.py
+"venv\Scripts\python.exe" tools\build.py
 if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" tools\make_icon.py
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" -m unittest discover -s tests -v
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" devmem_debug.py --offscreen --smoke-test artifacts\build-smoke
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --distpath build\dist DevmemStudio.spec
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" tools\build_singlefile.py
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" tools\verify_exe.py
-if errorlevel 1 goto :failed
-"venv\Scripts\python.exe" tools\make_release.py
-if errorlevel 1 goto :failed
-echo.
-echo Build complete: %CD%\dist\DevmemStudio.exe
 exit /b 0
 :failed
 echo.
