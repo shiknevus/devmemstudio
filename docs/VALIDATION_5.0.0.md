@@ -56,3 +56,34 @@
 - 全量回归与源码验收：`artifacts/build-smoke/report.json`。
 - EXE 隔离验收：`artifacts/exe-isolated/acceptance-1/report.json` 与 `acceptance-2/report.json`。
 - 实板脚本与抓包：`artifacts/realboard/`（`serial_live.py`、`uboot_e2e.py`、`uboot_capture.txt`、`bitdir_e2e.py`）。
+
+## 2026-10-08 更新构建（版本号保持 5.0.0）
+
+### 本次变更
+
+- 新增寄存器监视窗口（`monitor.py`）：最多 8 个寄存器、最小 5 ms 间隔的板端连续采样曲线，A/B 标记、Ctrl+滚轮缩放、有符号显示、CSV 导出；勾选结果按 top + 组件记忆。
+- 新增板端常驻采样程序 `regmon`（`tools/regmon/regmon.c` → `assets/regmon/regmon-aarch64`，3,952 字节，静态、无 libc），已加入 spec 的 datas；无法执行时（退出码 126/127）转 `devmem` 循环，寄存器故障与 `/dev/mem` 打不开时停止。
+- 监视窗口布局：采样间隔与开始/停止放在标题行；图表上方为视图选项与数据操作；标记读数在图表下方；底部为带状态圆点的整宽状态栏。
+- 「导入 top」改为直接选择文件夹；会话终端去掉日志级别筛选；「拦截U-Boot」复选框改名为「U-Boot」；次要按钮统一为带边框样式。
+
+### 验证结果
+
+| 验收项 | 结果 |
+| --- | --- |
+| 全量回归（含本机 SSH 回环、串口假口、GUI、监视窗口） | 392 项通过（3 项需 POSIX sh，在 Windows 上跳过），535.1 秒 |
+| 源码离线验收 | 111 项检查通过 |
+| 单 EXE 隔离验收：空缓存首次启动 | 111 项检查通过，14.5 秒 |
+| 单 EXE 隔离验收：损坏缓存与旧缓存清理 | 111 项检查通过，14.5 秒；损坏缓存已修复，旧缓存已清理 |
+| ZIP 完整性与内容 | CRC 通过，仅含 `DevmemStudio/DevmemStudio.exe`；不含本机设置 |
+| 差异检查 | `git diff --check` 通过 |
+
+常驻采样程序的 CPU 占用与周期尚未在实板上测量（板子不可达），仅有 unicorn 仿真测试（`tools/regmon/emulate_test.py`）与回归测试覆盖。
+
+### 发布产物
+
+- 单文件 EXE：`dist/DevmemStudio.exe`，19,681,792 字节。
+- EXE SHA-256：`76cfc7ded774f53adf8a271918a395ff98dc4f1bf596bb31699ff16c1997ccc3`。
+- 发布包：`dist/DevmemStudio-5.0.0-win64.zip`，19,572,489 字节。
+- ZIP SHA-256：`5a696a2b203a416a7a5334876cea6e357fb6e46012a034b8a8a6efe55f0ac1ab`。
+- 内嵌运行库：111 个文件；LZMS 压缩后 19,542,628 字节。
+- 缓存标识：`5.0.0-0125d5b8bdb6`。
