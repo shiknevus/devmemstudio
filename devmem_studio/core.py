@@ -9,9 +9,11 @@ import copy
 import hashlib
 import hmac
 import importlib
+import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
+import math
 import os
 from pathlib import Path
 import posixpath
@@ -67,6 +69,15 @@ def remember_dir(history, directory, limit=BIT_DIR_HISTORY) -> list[str]:
 
 # 寄存器按批读：每批一条 shell 命令一次往返，批大小兼顾 PTY 行缓冲与进度粒度
 BATCH_READ_CHUNK = 32
+# Register monitor: the devmem fallback forks one busybox devmem per register per sample
+# (~1 ms each on the A53), so 5 ms is the shortest interval a few registers can hold there.
+MONITOR_MIN_INTERVAL_MS = 5
+MONITOR_MAX_REGISTERS = 8
+# Resident sampler (tools/regmon): maps the register pages once and loops on board deadlines.
+REGMON_RESOURCE = "assets/regmon/regmon-aarch64"
+MONITOR_START_TIMEOUT_S = 5.0
+MONITOR_STALE_TIMEOUT_S = 2.0   # silence beyond this (and 3 intervals) shows the run as paused
+MONITOR_SETUP_TIMEOUT_S = 8.0
 
 
 def application_dir() -> Path:
@@ -190,6 +201,106 @@ def register_group(register: dict) -> str:
     return NAME_GROUPS.get(register["name"], (98, "其他"))[1]
 
 
+def monitor_script(addresses, interval_ms) -> str:
+    """Board-side sampler: an '@<ns>' stamp line, then one devmem value (or x) per address.
+
+    Sleeps to deadlines on the board clock, so the mean period holds the interval while
+    the reads fit inside it; without `date +%N` it falls back to a fixed sleep."""
+    if not addresses:
+        raise ValueError("请至少选择一个寄存器。")
+    if len(addresses) > MONITOR_MAX_REGISTERS:
+        raise ValueError(f"最多同时监视 {MONITOR_MAX_REGISTERS} 个寄存器。")
+    if not math.isfinite(float(interval_ms)) or not MONITOR_MIN_INTERVAL_MS <= float(interval_ms) <= 60000:
+        raise ValueError(f"采样间隔须为 {MONITOR_MIN_INTERVAL_MS}–60000 ms。")
+    if any(validated_address(hex(address)) % 4 for address in addresses):
+        raise ValueError("监视地址须按 32 位访问要求对齐。")
+    period = max(1, round(float(interval_ms) * 1000))   # µs
+    reads = "; ".join(f"devmem 0x{validated_address(hex(a)):08x} || echo x" for a in addresses)
+    # SSH exec shells do not source the login profile; embedded boards often keep
+    # devmem in /sbin, outside their non-interactive PATH. Preserve custom tools
+    # already on PATH and add the board's standard executable directories.
+    return (f"P={period}; "
+            'PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/run/media/sda/bin"; export PATH; '
+            "command -v devmem >/dev/null 2>&1 || { echo 'devmem: not found' >&2; exit 127; }; "
+            "n=0; c=$(date +%s%N); case $c in ''|*[!0-9]*) c=;; esac; "
+            "if command -v usleep >/dev/null 2>&1; then Z=1; else Z=; fi; "
+            "while :; do "
+            'if [ -n "$c" ]; then t=$(date +%s%N); else t=; fi; echo "@$t" || exit; '
+            f"{reads}; "
+            'if [ -n "$t" ]; then t=$((t / 1000)); n=$((n ? n + P : t + P)); n=$((n < t ? t : n)); d=$((n - t)); else d=$P; fi; '
+            'if [ $d -gt 0 ]; then if [ -n "$Z" ]; then usleep $d; '
+            "else sleep $((d / 1000000)).$(printf %06d $((d % 1000000))); fi; fi; "
+            "done")
+
+
+def monitor_command(addresses, interval_ms, sampler=None) -> str:
+    """A resident sampler the board cannot execute (shell status 126/127, e.g. /tmp mounted
+    noexec) hands over to the devmem loop. Any other failure ends the run, so a faulting
+    address is never retried in devmem."""
+    script = monitor_script(addresses, interval_ms)
+    if not sampler:
+        return "echo '#shell'; " + script
+    period = max(1, round(float(interval_ms) * 1000))
+    return (f"{shlex.quote(sampler)} {period} " + " ".join(f"0x{a:08x}" for a in addresses)
+            + "; s=$?; [ $s -eq 126 ] || [ $s -eq 127 ] || exit $s; echo '#shell'; " + script)
+
+
+class MonitorParser:
+    """Assemble the sampler stream into (seconds, values) samples; None marks a failed read."""
+
+    def __init__(self, count, clock=time.time):
+        self.count = count
+        self.clock = clock
+        self.samples = []
+        self.received = 0
+        self.note = ""      # last stray line, e.g. a devmem or shell error
+        self.sampler = ""   # from the '#regmon' / '#shell' banner
+        self._buffer = b""
+        self._stamp = None
+        self._values = []
+        self._last_stamp = None
+
+    def feed(self, data):
+        *lines, self._buffer = (self._buffer + data).split(b"\n")
+        for raw in lines:
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith("@"):
+                digits = line[1:]
+                self._stamp = int(digits) / 1e9 if digits.isdigit() else self.clock()
+                self._values = []
+            elif line.startswith("#"):
+                kind = (line[1:].split() or [""])[0]
+                if self.sampler and kind != self.sampler:
+                    raise ValueError("采样方式在运行中改变，监视已停止，避免混用时间基准。")
+                self.sampler = kind
+            elif self._stamp is not None and (line == "x" or re.fullmatch(r"0[xX][0-9a-fA-F]+", line)):
+                self._values.append(None if line == "x" else int(line, 16))
+                if len(self._values) == self.count:
+                    if self._last_stamp is not None and self._stamp < self._last_stamp:
+                        raise ValueError("板端时间倒退，监视已停止，避免绘制错误时间轴。")
+                    self._last_stamp = self._stamp
+                    self.samples.append((self._stamp, tuple(self._values)))
+                    self.received += 1
+                    self._stamp = None
+            elif line:
+                self.note = line
+
+    def take(self):
+        samples, self.samples = self.samples, []
+        return samples
+
+
+def normalize_monitor_settings(value):
+    value = value if isinstance(value, dict) else {}
+    selections = {}
+    saved = value.get("selections")
+    for key, addresses in (saved.items() if isinstance(saved, dict) else ()):
+        if isinstance(key, str) and isinstance(addresses, list):
+            selections[key] = list(dict.fromkeys(address for address in addresses
+                                                if type(address) is int and 0 <= address <= 0xFFFFFFFF))[:MONITOR_MAX_REGISTERS]
+    return {"signed": value.get("signed") is True, "selections": selections}
+
+
 def default_config() -> dict:
     return {"host": "", "port": 22, "username": "root", "password": "",
             "base": "0xb0100000", "default_width": 32, "last_category": "axis",
@@ -198,7 +309,7 @@ def default_config() -> dict:
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
             "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits",
             "bitpack_settings": {}, "bit_remote_dir": DEFAULT_BIT_DIR, "bit_remote_dirs": [DEFAULT_BIT_DIR],
-            "bit_local_dir": ""}
+            "bit_local_dir": "", "monitor_interval_ms": 10, "monitor_settings": normalize_monitor_settings(None)}
 
 
 class ConfigStore:
@@ -243,7 +354,8 @@ class ConfigStore:
         if cfg.get("last_category") not in DEFAULT_CATEGORIES:
             cfg["last_category"] = "axis"
         for field, fallback, low, high in (("port", 22, 1, 65535),
-                                            ("poll_interval", 1000, 100, 120000)):
+                                            ("poll_interval", 1000, 100, 120000),
+                                            ("monitor_interval_ms", 10, MONITOR_MIN_INTERVAL_MS, 60000)):
             val = parse_int(cfg.get(field))
             cfg[field] = val if val is not None and low <= val <= high else fallback
         baud = parse_int(cfg.get("serial_baud"))
@@ -282,6 +394,7 @@ class ConfigStore:
                 pass
         cfg["bit_remote_dirs"] = remember_dir(history or [DEFAULT_BIT_DIR], cfg["bit_remote_dir"])
         cfg["bit_local_dir"] = cfg["bit_local_dir"] if isinstance(cfg.get("bit_local_dir"), str) else ""
+        cfg["monitor_settings"] = normalize_monitor_settings(cfg.get("monitor_settings"))
         return cfg
 
     def save(self, cfg: dict):
@@ -423,6 +536,7 @@ class SshSession:
         self._stream_thread = None
         self._generation = 0
         self._connect_sock = None   # live during connect(); close() aborts a handshake in flight
+        self._regmon = (None, None)   # (transport, architecture); placement failures are never cached
 
     @property
     def alive(self):
@@ -936,6 +1050,211 @@ class SshSession:
             self._stream_channel.close()
         self._stream_channel = None
 
+    @contextmanager
+    def _monitor_channel(self, cancel_event=None, timeout=MONITOR_SETUP_TIMEOUT_S, keep_open=False):
+        """Bound channel setup and SFTP handshakes, including calls that ignore settimeout."""
+        stop = cancel_event if cancel_event is not None else threading.Event()
+        if stop.is_set():
+            raise CommandError("监视启动已取消。")
+        deadline = time.monotonic() + timeout
+        channel = self.client.get_transport().open_session(timeout=min(timeout, 2.0))
+        channel.settimeout(timeout)
+        finished, expired = threading.Event(), threading.Event()
+
+        def guard():
+            while not finished.wait(0.05):
+                if stop.is_set() or time.monotonic() >= deadline:
+                    if not stop.is_set():
+                        expired.set()
+                    channel.close()
+                    return
+
+        watcher = threading.Thread(target=guard, daemon=True, name="monitor-setup-guard")
+        watcher.start()
+        completed = False
+        try:
+            yield channel
+            if stop.is_set():
+                raise CommandError("监视启动已取消。")
+            if expired.is_set():
+                raise TimeoutError("板端采样程序准备超时。")
+            completed = True
+        except Exception as exc:
+            if stop.is_set():
+                raise CommandError("监视启动已取消。") from exc
+            if expired.is_set():
+                raise TimeoutError("板端采样程序准备超时。") from exc
+            raise
+        finally:
+            finished.set()
+            if not keep_open or not completed:
+                channel.close()
+            watcher.join(0.1)
+
+    def _exec_output(self, command, timeout=8, cancel_event=None):
+        """Run a short command on its own exec channel; returns (exit status, output)."""
+        with self._monitor_channel(cancel_event, timeout) as channel:
+            channel.set_combine_stderr(True)
+            channel.settimeout(timeout)
+            channel.exec_command(command)
+            chunks = []
+            while chunk := channel.recv(65536):
+                chunks.append(chunk)
+            return channel.recv_exit_status(), b"".join(chunks).decode("utf-8", "replace")
+
+    @contextmanager
+    def _monitor_sftp(self, cancel_event):
+        with self._monitor_channel(cancel_event) as channel:
+            channel.invoke_subsystem("sftp")
+            sftp = paramiko.SFTPClient(channel)
+            try:
+                yield sftp
+            finally:
+                sftp.close()
+
+    def monitor_sampler(self, cancel_event=None):
+        """Verify cached executable contents; retry transient placement failures on next start."""
+        stop = cancel_event if cancel_event is not None else threading.Event()
+        transport = self.client.get_transport()
+        path = None
+        try:
+            if stop.is_set():
+                raise CommandError("监视启动已取消。")
+            data = resource_path(REGMON_RESOURCE).read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            remote = f"/tmp/devmem-studio-regmon-{digest[:12]}"
+            if self._regmon[0] is not transport:
+                _, output = self._exec_output("uname -m", cancel_event=stop)
+                self._regmon = (transport, output.strip())   # cache architecture only
+            arch = self._regmon[1]
+            if arch in ("aarch64", "arm64"):
+                with self._monitor_sftp(stop) as sftp:
+                    staging = None
+
+                    def verified(candidate):
+                        try:
+                            with sftp.open(candidate, "rb") as handle:
+                                content = handle.read(len(data) + 1)
+                            if stop.is_set():
+                                raise CommandError("监视启动已取消。")
+                            return hashlib.sha256(content).hexdigest() == digest
+                        except FileNotFoundError:
+                            return False
+                        except OSError as exc:
+                            if getattr(exc, "errno", None) == 2:
+                                return False
+                            raise
+
+                    try:
+                        if stop.is_set():
+                            raise CommandError("监视启动已取消。")
+                        if verified(remote):
+                            sftp.chmod(remote, 0o755)
+                            return remote
+                        staging = remote + ".part-" + uuid.uuid4().hex
+                        with sftp.open(staging, "wb") as handle:
+                            for offset in range(0, len(data), 16384):
+                                if stop.is_set():
+                                    raise CommandError("监视启动已取消。")
+                                handle.write(data[offset:offset + 16384])
+                        if not verified(staging):
+                            raise CommandError("板端采样程序校验失败。")
+                        sftp.chmod(staging, 0o755)
+                        if stop.is_set():
+                            raise CommandError("监视启动已取消。")
+                        try:
+                            sftp.posix_rename(staging, remote)
+                        except OSError:
+                            _sftp_remove_quietly(sftp, remote)
+                            sftp.rename(staging, remote)
+                        staging = None
+                    finally:
+                        if staging is not None and not stop.is_set():
+                            _sftp_remove_quietly(sftp, staging)
+                path = remote
+            else:
+                self.log("SYSTEM", f"板子架构为 {arch or '未知'}，监视改用 devmem 循环。")
+        except Exception as exc:
+            if stop.is_set():
+                raise CommandError("监视启动已取消。") from exc
+            self.log("SYSTEM", f"无法放置板端常驻采样程序（{exc}），监视改用 devmem 循环。")
+        return path
+
+    def start_monitor(self, addresses, interval_ms, on_samples, stopped, cancel_event, on_sampler=None):
+        """Sample registers on the board on a dedicated exec channel (the shell stays free).
+
+        on_samples(list of (seconds, values)) is called about every 40 ms from a reader
+        thread; stopped(message) fires once at the end ('' when cancelled); on_sampler(kind)
+        reports the board-side sampler ('regmon' or 'shell') once its banner arrives."""
+        stop = cancel_event
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        monitor_script(addresses, interval_ms)   # validate before touching the board
+        try:
+            sampler = self.monitor_sampler(stop)
+        except CommandError:
+            if stop.is_set():
+                return False
+            raise
+        if stop.is_set():
+            return False
+        try:
+            with self._monitor_channel(stop, keep_open=True) as channel:
+                channel.set_combine_stderr(True)
+                channel.exec_command(monitor_command(addresses, interval_ms, sampler))
+        except Exception:
+            if stop.is_set():
+                return False
+            raise
+        self.log("CMD", f"监视 {len(addresses)} 个寄存器，间隔 {interval_ms:g} ms"
+                 f"（{'板端常驻采样' if sampler else 'devmem 循环'}）：" + " ".join(f"0x{a:08x}" for a in addresses))
+        parser = MonitorParser(len(addresses))
+
+        def reader():
+            message = ""
+            reported = ""
+            flushed = started = time.monotonic()
+            channel.settimeout(0.05)
+            try:
+                while not stop.is_set():
+                    try:
+                        data = channel.recv(65536)
+                    except socket.timeout:
+                        data = None
+                    if data == b"":
+                        status = channel.recv_exit_status() if channel.exit_status_ready() else -1
+                        message = ("SSH 已断开，监视停止。" if not self.alive else
+                                   "板端采样进程已退出" + (f"（状态码 {status}）" if status > 0 else "")
+                                   + (f"：{parser.note}" if parser.note else "。"))
+                        break
+                    if data:
+                        parser.feed(data)
+                    # Only the first point has a deadline: a later silence (network stall)
+                    # pauses the run and the dialog shows it; the board side resumes on its own.
+                    if not parser.received and time.monotonic() - started > MONITOR_START_TIMEOUT_S:
+                        message = "板端采样首点超时，监视已停止，请检查寄存器地址和板端状态。"
+                        break
+                    if parser.sampler != reported:
+                        reported = parser.sampler
+                        if sampler and reported == "shell":
+                            self.log("SYSTEM", "板端常驻采样程序无法执行，已改用 devmem 循环"
+                                     + (f"：{parser.note}" if parser.note else "。"))
+                            parser.note = ""
+                        if on_sampler:
+                            on_sampler(reported)
+                    if parser.samples and time.monotonic() - flushed >= 0.04:
+                        on_samples(parser.take())
+                        flushed = time.monotonic()
+                if parser.samples:
+                    on_samples(parser.take())
+            except Exception as exc:
+                message = f"监视连接中断：{exc}"
+            finally:
+                channel.close()
+                stopped("" if stop.is_set() else message)
+        threading.Thread(target=reader, daemon=True, name="register-monitor").start()
+        return True
+
     def close(self):
         self._generation += 1
         self.stop_stream()
@@ -1186,6 +1505,37 @@ class DemoSession:
 
     def stop_stream(self):
         self._stream_stop.set()
+
+    def start_monitor(self, addresses, interval_ms, on_samples, stopped, cancel_event, on_sampler=None):
+        if not self.alive:
+            raise CommandError("演示会话已关闭。")
+        addresses = list(addresses)
+        monitor_script(addresses, interval_ms)   # same validation as the board path
+        stop = cancel_event
+        self.log("CMD", f"监视 {len(addresses)} 个寄存器，间隔 {interval_ms:g} ms（演示）")
+        bases = [self.read(address, quiet=True) for address in addresses]
+
+        def reader():
+            if on_sampler:
+                on_sampler("demo")
+            period = interval_ms / 1000
+            start = stamp = time.time()
+            batch, flushed = [], time.monotonic()
+            while not stop.is_set() and self.alive:
+                phase = stamp - start
+                batch.append((stamp, tuple(
+                    (base + int(800 * (1 + math.sin(2 * math.pi * phase / 2 + index)))) & 0xFFFFFFFF
+                    for index, base in enumerate(bases))))
+                if time.monotonic() - flushed >= 0.04:
+                    on_samples(batch)
+                    batch, flushed = [], time.monotonic()
+                stamp += period
+                stop.wait(max(0.0, stamp - time.time()))
+            if batch:
+                on_samples(batch)
+            stopped("" if stop.is_set() else "演示会话已关闭。")
+        threading.Thread(target=reader, daemon=True, name="demo-monitor").start()
+        return True
 
     def close(self):
         self.stop_stream()

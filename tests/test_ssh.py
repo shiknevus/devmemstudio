@@ -1,4 +1,7 @@
 """Exercise real Paramiko encryption/auth/channels against a local disposable board simulator."""
+import hashlib
+import io
+from contextlib import contextmanager
 import re
 import socket
 import tempfile
@@ -10,7 +13,8 @@ from unittest.mock import patch
 
 import paramiko
 from devmem_studio.catalog import DEFAULT_TYPES
-from devmem_studio.core import SshSession, CommandError, HostKeyChangedError, DEFAULT_LOG_PATH
+from devmem_studio.core import (SshSession, CommandError, HostKeyChangedError, DEFAULT_LOG_PATH, REGMON_RESOURCE,
+                                resource_path)
 
 
 class BoardServer(paramiko.ServerInterface):
@@ -22,6 +26,9 @@ class BoardServer(paramiko.ServerInterface):
         # Interactive shells print PS1 before each line; the real device does this
         # too, so mock responses emulate the prompt prefix on every line.
         self.prompt = prompt
+        self.arch = "armv7l"         # `uname -m`; aarch64 boards get the resident sampler
+        self.files = {}              # board paths and contents written through fake SFTP
+        self.regmon_mode = "runs"    # "fails": exits 1 before its banner; "noexec": status 126
 
     def echo_prompt(self, text):
         return (self.prompt + text) if text else self.prompt
@@ -95,6 +102,30 @@ class BoardServer(paramiko.ServerInterface):
         self.exec_commands.append(command.decode())
         def stream():
             try:
+                time.sleep(0.05)   # a close before the exec request is acknowledged reads as "Channel closed."
+                if command == b"uname -m":
+                    channel.sendall(f"{self.arch}\n".encode())
+                    channel.send_exit_status(0)
+                    channel.close()
+                    return
+                if command.startswith(b"/tmp/devmem-studio-regmon-"):
+                    sampler = command.split(b";")[0].split()
+                    if self.regmon_mode == "fails":
+                        channel.sendall(b"regmon: cannot open /dev/mem (errno 13)\n")
+                        channel.send_exit_status(1)
+                        channel.close()
+                        return
+                    if self.regmon_mode == "noexec":   # status 126: the command's devmem loop takes over
+                        channel.sendall(b"sh: " + sampler[0] + b": Permission denied\n#shell\n")
+                        self.monitor(channel, [int(a, 16) for a in re.findall(rb"devmem (0x[0-9a-f]+)", command)])
+                        return
+                    channel.sendall(b"#regmon 1\n")
+                    self.monitor(channel, [int(a, 16) for a in sampler[2:]])
+                    return
+                if b"while :" in command and b"devmem" in command:
+                    channel.sendall(b"#shell\n")
+                    self.monitor(channel, [int(a, 16) for a in re.findall(rb"devmem (0x[0-9a-f]+)", command)])
+                    return
                 if command == b"tail -f /tmp/missing.log":
                     time.sleep(0.05)
                     channel.send_stderr(b"tail: /tmp/missing.log: No such file or directory\n")
@@ -112,6 +143,27 @@ class BoardServer(paramiko.ServerInterface):
                 pass
         threading.Thread(target=stream, daemon=True).start()
         return True
+
+    def monitor(self, channel, addresses):
+        """Sampler stand-in: 0xB01022FC always fails (x); 0xB0102FF0 makes the board exit;
+        0xB0102FF4 never answers; 0xB0102FF8 goes silent for 0.6 s once (a network stall)."""
+        index = 0
+        while not channel.closed:
+            if 0xB0102FF4 in addresses:
+                time.sleep(0.01)
+                continue
+            if 0xB0102FF8 in addresses and index == 3:
+                time.sleep(0.6)
+            if 0xB0102FF0 in addresses and index == 3:
+                channel.sendall(b"sh: devmem: not found\n")
+                channel.send_exit_status(127)
+                channel.close()
+                return
+            channel.sendall((f"@{time.time_ns()}\n" + "".join(
+                "x\n" if address == 0xB01022FC else f"0x{self.memory.get(address, 0x2A) + index:08X}\n"
+                for address in addresses)).encode())
+            index += 1
+            time.sleep(0.01)
 
 
 class BoardFixture:
@@ -586,6 +638,190 @@ class SshTests(BoardFixture, unittest.TestCase):
         self.assertTrue(self.session.alive)
         self.assertEqual(self.session.read(0xB0102208), 42)
         self.assertEqual(self.session.write(0xB0102208, 32, 123), 123)
+
+    def test_monitor_streams_board_samples_on_its_own_channel(self):
+        batches, messages, done, stop = [], [], threading.Event(), threading.Event()
+        self.server.memory[0xB0102200] = 100
+        self.assertTrue(self.session.start_monitor([0xB0102200, 0xB01022FC], 5, batches.append,
+                                                   lambda message: (messages.append(message), done.set()), stop))
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 5 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        samples = [sample for batch in batches for sample in batch]
+        self.assertGreaterEqual(len(samples), 5)
+        self.assertEqual([values for _, values in samples[:2]], [(100, None), (101, None)])
+        stamps = [stamp for stamp, _ in samples]
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertLess(abs(stamps[0] - time.time()), 5)   # board ns → epoch seconds
+        script = next(command for command in self.server.exec_commands if "while :" in command)
+        self.assertTrue(script.startswith("echo '#shell'; P=5000;"))
+        self.assertIn(("SYSTEM", "板子架构为 armv7l，监视改用 devmem 循环。"), self.logs)
+        self.assertFalse(any("while :" in command for command in self.server.commands))
+        self.assertEqual(self.session.read(0xB0102208), 42)   # the register shell stays free
+        stop.set()
+        self.assertTrue(done.wait(2))
+        self.assertEqual(messages, [""])
+        self.assertTrue(self.session.alive)
+
+    def test_monitor_reports_board_side_exit(self):
+        messages, done = [], threading.Event()
+        self.session.start_monitor([0xB0102FF0], 10, lambda samples: None,
+                                   lambda message: (messages.append(message), done.set()), threading.Event())
+        self.assertTrue(done.wait(3))
+        self.assertIn("devmem: not found", messages[0])
+        self.assertTrue(self.session.alive)
+        self.assertEqual(self.session.read(0xB0102208), 42)
+
+    def run_monitor_briefly(self, addresses):
+        batches, kinds, done, stop = [], [], threading.Event(), threading.Event()
+        self.assertTrue(self.session.start_monitor(addresses, 5, batches.append, lambda message: done.set(), stop,
+                                                   on_sampler=kinds.append))
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        stop.set()
+        self.assertTrue(done.wait(2))
+        self.assertGreaterEqual(sum(map(len, batches)), 3)
+        return kinds
+
+    def fake_board_sftp(self, events):
+        server = self.server
+
+        class FakeSFTP:
+            def open(self, path, mode):
+                if mode == 'rb':
+                    if path not in server.files:
+                        raise FileNotFoundError(path)
+                    return io.BytesIO(server.files[path])
+                class Output(io.BytesIO):
+                    def close(self):
+                        if not self.closed:
+                            content = self.getvalue()
+                            server.files[path] = content
+                            events.append(('put', path, content))
+                        super().close()
+                return Output()
+
+            def chmod(self, path, mode):
+                events.append(("chmod", path, mode))
+
+            def remove(self, path):
+                if path not in server.files:
+                    raise FileNotFoundError(path)
+                del server.files[path]
+
+            def rename(self, source, target):
+                events.append(("rename", source, target))
+                server.files[target] = server.files.pop(source)
+
+            posix_rename = rename
+
+            def close(self):
+                pass
+        @contextmanager
+        def open_sftp(stop):
+            yield FakeSFTP()
+        return patch.object(self.session, '_monitor_sftp', open_sftp)
+
+    def test_monitor_puts_the_resident_sampler_on_aarch64_boards_once(self):
+        binary = resource_path(REGMON_RESOURCE).read_bytes()
+        remote = f"/tmp/devmem-studio-regmon-{hashlib.sha256(binary).hexdigest()[:12]}"
+        self.server.arch = "aarch64"
+        events = []
+        with self.fake_board_sftp(events):
+            self.assertEqual(self.run_monitor_briefly([0xB0102200, 0xB01022FC]), ["regmon"])
+            staging = events[0][1]
+            self.assertTrue(staging.startswith(remote + '.part-'))
+            self.assertEqual(events, [("put", staging, binary), ("chmod", staging, 0o755),
+                                      ("rename", staging, remote)])
+            command = self.server.exec_commands[-1]
+            self.assertTrue(command.startswith(f"{remote} 5000 0xb0102200 0xb01022fc; s=$?; "
+                                               "[ $s -eq 126 ] || [ $s -eq 127 ] || exit $s; echo '#shell'; P=5000;"),
+                            command)
+            self.assertTrue(any(level == "CMD" and "（板端常驻采样）" in text for level, text in self.logs))
+            self.run_monitor_briefly([0xB0102200])   # same connection: no second check or upload
+            self.assertEqual(self.server.exec_commands.count('uname -m'), 1)
+            self.session.connect("127.0.0.1", self.port, "test", "test", timeout=2)
+            self.run_monitor_briefly([0xB0102200])   # new connection: re-checked, already on the board
+            self.assertEqual(self.server.exec_commands.count('uname -m'), 2)
+            self.assertEqual(sum(event[0] == 'put' for event in events), 1)
+        self.assertEqual(self.session.read(0xB0102208), 42)
+
+    def test_native_startup_failure_stops_without_retrying_addresses_in_devmem(self):
+        self.server.arch = "aarch64"
+        self.server.regmon_mode = "fails"
+        done, messages, kinds = threading.Event(), [], []
+        with self.fake_board_sftp([]):
+            self.session.start_monitor([0xB0102200], 5, lambda samples: None,
+                                       lambda message: (messages.append(message), done.set()), threading.Event(),
+                                       on_sampler=kinds.append)
+            self.assertTrue(done.wait(3))
+        self.assertIn('cannot open /dev/mem', messages[0])
+        self.assertIn('状态码 1', messages[0])
+        self.assertEqual(kinds, [])
+        self.assertFalse(any("改用 devmem 循环" in text for _, text in self.logs))
+
+    def test_unexecutable_sampler_hands_over_to_the_devmem_loop(self):
+        self.server.arch = "aarch64"
+        self.server.regmon_mode = "noexec"
+        with self.fake_board_sftp([]):
+            self.assertEqual(self.run_monitor_briefly([0xB0102200]), ["shell"])
+        remote = self.server.exec_commands[-1].split()[0]
+        self.assertIn(("SYSTEM", f"板端常驻采样程序无法执行，已改用 devmem 循环：sh: {remote}: Permission denied"),
+                      self.logs)
+
+    def test_monitor_uses_devmem_loop_when_the_sampler_cannot_be_placed(self):
+        self.server.arch = "aarch64"
+
+        def refuse(stop):
+            raise OSError("Permission denied")
+        with patch.object(self.session, '_monitor_sftp', refuse):
+            self.assertEqual(self.run_monitor_briefly([0xB0102200]), ["shell"])
+        self.assertTrue(self.server.exec_commands[-1].startswith("echo '#shell'; "))
+        self.assertIn(("SYSTEM", "无法放置板端常驻采样程序（Permission denied），监视改用 devmem 循环。"), self.logs)
+
+    def test_transient_upload_failure_is_retried_on_same_connection(self):
+        self.server.arch = 'aarch64'
+        with patch.object(self.session, '_monitor_sftp', side_effect=OSError('temporary failure')):
+            self.assertIsNone(self.session.monitor_sampler())
+        with self.fake_board_sftp([]):
+            self.assertIsNotNone(self.session.monitor_sampler())
+
+    def test_corrupt_cached_binary_is_replaced_after_content_verification(self):
+        self.server.arch = 'aarch64'
+        events = []
+        with self.fake_board_sftp(events):
+            remote = self.session.monitor_sampler()
+            self.server.files[remote] = b'corrupted executable'
+            self.assertEqual(self.session.monitor_sampler(), remote)
+        self.assertEqual(self.server.files[remote], resource_path(REGMON_RESOURCE).read_bytes())
+        self.assertEqual(sum(event[0] == 'put' for event in events), 2)
+        self.assertNotEqual(events[0][1], next(event[1] for event in events[3:] if event[0] == 'put'))
+
+    def test_monitor_first_point_timeout_does_not_close_register_shell(self):
+        messages, done = [], threading.Event()
+        with patch('devmem_studio.core.MONITOR_START_TIMEOUT_S', 0.15):
+            self.session.start_monitor([0xB0102FF4], 5, lambda samples: None,
+                                       lambda message: (messages.append(message), done.set()), threading.Event())
+            self.assertTrue(done.wait(3))
+        self.assertIn('首点超时', messages[0])
+        self.assertEqual(self.session.read(0xB0102208), 42)
+
+    def test_monitor_rides_out_a_silent_stream_and_resumes(self):
+        messages, batches, done, stop = [], [], threading.Event(), threading.Event()
+        self.session.start_monitor([0xB0102FF8], 5, batches.append,
+                                   lambda message: (messages.append(message), done.set()), stop)
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 8 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertFalse(done.is_set())   # the 0.6 s silence did not end the run
+        stamps = [stamp for batch in batches for stamp, _ in batch]
+        self.assertGreaterEqual(len(stamps), 8)
+        self.assertGreater(max(b - a for a, b in zip(stamps, stamps[1:])), 0.5)
+        stop.set()
+        self.assertTrue(done.wait(2))
+        self.assertEqual(messages, [""])
+        self.assertTrue(self.session.alive)
 
     def test_timeout_invalidates_shell_before_next_command(self):
         with self.assertRaises(TimeoutError):

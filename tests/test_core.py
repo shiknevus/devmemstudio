@@ -153,6 +153,16 @@ class RegisterTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_invalid_monitor_preferences_are_sanitized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registers.json"
+            path.write_text(json.dumps({"monitor_settings": {"window_s": -5, "signed": "false",
+                                        "selections": {"A": [4096, 4096, True, "4096", -1, 0x100000000],
+                                                       "B": list(range(12)), "C": "wrong"}}}), encoding="utf-8")
+            cfg = ConfigStore(path).load()
+            self.assertEqual(cfg['monitor_settings'], {'signed': False,
+                                                       'selections': {'A': [4096], 'B': list(range(8))}})
+
     def test_basic_category_selection_and_write_cache_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "registers.json")

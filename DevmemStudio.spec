@@ -45,6 +45,7 @@ a = Analysis(
     datas=[(str(root / 'assets/logo.svg'), 'assets'),
            (str(root / 'assets/bitpack/pack_bit.exe'), 'assets/bitpack'),
            (str(root / 'assets/bitpack/使用说明.txt'), 'assets/bitpack'),
+           (str(root / 'assets/regmon/regmon-aarch64'), 'assets/regmon'),
            (str(root / 'THIRD_PARTY_NOTICES.md'), '.'),
            (str(root / 'devmem_studio/data/component_catalog.json'), 'devmem_studio/data')],
     hiddenimports=['devmem_studio.smoke', 'devmem_studio.taskbar'],
