@@ -281,6 +281,13 @@ def launcher_path():
     return target
 
 
+def backup_path(target, identifier):
+    # Keep ".exe": office DLP encrypts *.bak written by PowerShell, leaving a backup that cannot run.
+    # The old version then also starts with a plain double-click.
+    backup = target.with_name(f"{target.stem}-{__version__}-backup{target.suffix}")
+    return backup if not backup.exists() else target.with_name(f"{target.stem}-{__version__}-backup-{identifier[:8]}{target.suffix}")
+
+
 def prepare_install(download, target=None):
     target = Path(target) if target is not None else launcher_path()
     identifier = uuid.uuid4().hex
@@ -298,7 +305,7 @@ def prepare_install(download, target=None):
         helper = work / "apply_update.ps1"
         shutil.copyfile(resource_path("assets/updater/apply_update.ps1"), helper)
         job = {"target": str(target), "staged": str(staged), "sha256": download.digest,
-               "backup": str(target.with_name(target.name + f".{identifier}.bak")),
+               "backup": str(backup_path(target, identifier)),
                "pids": [os.getpid()], "version": download.version,
                "result": str(work / "result.json")}
         launcher_pid = os.environ.get("DEVMEMSTUDIO_LAUNCHER_PID", "")

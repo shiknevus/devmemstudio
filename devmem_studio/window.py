@@ -281,7 +281,6 @@ class MainWindow(QMainWindow):
             self.update_dialog = UpdateDialog(self, self.cfg.get("check_updates_on_start", True) is True)
             self.update_dialog.install_requested.connect(self._request_update_install)
             self.update_dialog.preferences_changed.connect(self._update_preferences)
-            self.update_dialog.job_finished.connect(self._update_job_finished)
         return self.update_dialog
 
     def _update_preferences(self, enabled):
@@ -299,10 +298,6 @@ class MainWindow(QMainWindow):
     def check_updates_automatically(self):
         if not self._closing and self.persist and self.cfg.get("check_updates_on_start", True) is True:
             self._update_dialog().check(automatic=True)
-
-    def _update_job_finished(self):
-        if self._closing:
-            QTimer.singleShot(0, self.close)
 
     def _request_update_install(self, download):
         if self._closing or self._pending_update:
@@ -3438,10 +3433,9 @@ class MainWindow(QMainWindow):
         packing = self.bit_pack_dialog is not None and self.bit_pack_dialog.busy
         if packing:
             self.bit_pack_dialog.close()
-        updating = self.update_dialog is not None and self.update_dialog.busy
         if self.update_dialog is not None:
-            self.update_dialog.close()
-        if self._busy or self._stream_workers or self._serial_busy or packing or updating:
+            self.update_dialog.close()   # cancels a check/download immediately
+        if self._busy or self._stream_workers or self._serial_busy or packing:
             self.setEnabled(False)
             event.ignore()
             return
