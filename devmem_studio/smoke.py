@@ -79,6 +79,12 @@ def run_smoke(app, directory: Path):
         return next(index for index, reg in enumerate(window.regs) if reg["name"] == name)
 
     try:
+        import ssl
+        check(ssl.create_default_context().check_hostname, "HTTPS certificate verification is available")
+        check((Path(__file__).resolve().parents[1] / "assets/updater/apply_update.ps1").is_file()
+              if not getattr(sys, "frozen", False) else
+              (Path(sys._MEIPASS) / "assets/updater/apply_update.ps1").is_file(),
+              "Windows update helper is bundled")
         window = MainWindow(ConfigStore(directory / "test-config.json"), persist=False)
         window.resize(1540, 960)
         window.show()

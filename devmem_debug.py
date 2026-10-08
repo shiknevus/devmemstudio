@@ -73,6 +73,7 @@ def main():
     from devmem_studio.core import preload_ssh
     # SSH stack warms up once the window is painted; a connect issued earlier just waits on the import.
     QTimer.singleShot(300, lambda: threading.Thread(target=preload_ssh, name='ssh-preload', daemon=True).start())
+    QTimer.singleShot(5000, window.check_updates_automatically)
     return app.exec()
 
 

@@ -15,6 +15,10 @@ if not exe.is_file():
 archive = ROOT / "dist" / f"DevmemStudio-{__version__}-win64.zip"
 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as package:
     package.write(exe, "DevmemStudio/DevmemStudio.exe")
+archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+checksum = archive.with_name(archive.name + ".sha256")
+checksum.write_text(f"{archive_sha256}  {archive.name}\n", encoding="utf-8")
 print(json.dumps({"version": __version__, "executable": str(exe), "bytes": exe.stat().st_size,
                   "sha256": hashlib.sha256(exe.read_bytes()).hexdigest(), "archive": str(archive),
+                  "archive_sha256": archive_sha256, "checksum": str(checksum),
                   "archive_bytes": archive.stat().st_size, "settings_excluded": True}, ensure_ascii=False))

@@ -24,10 +24,8 @@ DROP_BIN_SUBSTR = (
     '/imageformats/qtga.dll',    # 0.04 MB —— 无 TGA 加载
     '/imageformats/qwbmp.dll',   # 0.04 MB —— 无 WBMP 加载
     '/imageformats/qpdf.dll',    # 0.04 MB —— 无 PDF 图像加载
-    'libssl-3.dll',              # 0.79 MB OpenSSL TLS —— SSH 用 cryptography，无需 ssl 模块
-    '_ssl.pyd',                  # 0.18 MB —— 无代码 import ssl（见 excludes 'ssl'）
+    # GitHub updates use urllib + ssl: retain _ssl.pyd and both OpenSSL DLLs.
     'ucrtbase.dll',              # 1.1 MB —— Win10+ 始终使用系统 UCRT，随包副本不会被加载
-    'libcrypto-3.dll',           # 5.2 MB —— 唯一 importer 是 _hashlib；hashlib 回退内置 _sha2/_md5 等，paramiko 走 cryptography
     '_hashlib.pyd',              # 0.07 MB —— 见 excludes '_hashlib'（无 pbkdf2_hmac/scrypt 使用）
     '/qminimal.dll',             # 0.06 MB 平台插件 —— 仅用 qwindows/qoffscreen
 )
@@ -43,6 +41,7 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=[(str(root / 'assets/logo.svg'), 'assets'),
+           (str(root / 'assets/updater/apply_update.ps1'), 'assets/updater'),
            (str(root / 'assets/bitpack/pack_bit.exe'), 'assets/bitpack'),
            (str(root / 'assets/bitpack/使用说明.txt'), 'assets/bitpack'),
            (str(root / 'assets/regmon/regmon-aarch64'), 'assets/regmon'),
@@ -56,7 +55,6 @@ a = Analysis(
               'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.QtMultimedia', 'PySide6.Qt3DCore',
               'PySide6.QtPdf', 'PySide6.QtVirtualKeyboard', 'PySide6.QtNetwork',
               'PySide6.QtOpenGL', 'PySide6.QtWebChannel', 'PySide6.QtWebSockets',
-              'ssl',  # SSH 走 paramiko(用 cryptography)，无 TLS；排除后一并剔除 _ssl.pyd / libssl-3.dll
               'invoke',  # paramiko 仅在 ssh_config "Match exec" 时可选导入；本程序不解析 ssh_config
               '_hashlib',  # OpenSSL 版 hashlib；内置 _sha2/_md5/_sha1/_sha3/_blake2 覆盖全部所用算法
               'PySide6.QtBluetooth', 'PySide6.QtNfc', 'PySide6.QtPositioning',

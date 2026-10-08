@@ -24,6 +24,8 @@ from . import __version__
 from . import completion, component_parse, top_import
 from .catalog import REGISTER_FIELDS
 from .bitpack_dialog import BitPackDialog
+from .update_dialog import UpdateDialog
+from . import updater
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
@@ -34,7 +36,7 @@ from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
-                      IpAddressField, ResizeAwareWidget, TerminalView)
+                      IpAddressField, ResizeAwareWidget, TerminalView, LinkLabel)
 from .dialogs import (BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, FileChoiceDialog,
                       file_time, show_help)
 
@@ -157,6 +159,8 @@ class MainWindow(QMainWindow):
         self.bit_dialog = None
         self.bit_rollback_dialog = None
         self.monitor_dialog = None
+        self.update_dialog = None
+        self._pending_update = None
         self._stream_epoch = 0
         self._stream_finished_epoch = -1
         self._compact_layout = None
@@ -258,8 +262,63 @@ class MainWindow(QMainWindow):
         # No left-corner notice label: former status-bar messages go to the
         # system terminal (see _status); only counters and the version remain.
         self.counter_label = label("读取 0     写入 0     错误 0")
-        self.statusBar().addPermanentWidget(self.counter_label)
-        self.statusBar().addPermanentWidget(label(f"   版本 {__version__}   "))
+        # One row of plain QLabels: shared font and baseline, gaps equal to the counter's own spacing.
+        gap = self.counter_label.fontMetrics().horizontalAdvance("     ")
+        version_row = QWidget()
+        version_layout = QHBoxLayout(version_row)
+        version_layout.setContentsMargins(0, 0, 8, 0)
+        version_layout.setSpacing(gap)
+        self.version_label = label(f"版本 {__version__}")
+        self.update_button = LinkLabel("检查更新", "statusUpdate")
+        self.update_button.setToolTip("从 GitHub 检查新版本")
+        self.update_button.clicked.connect(self.show_update_dialog)
+        for item in (self.counter_label, self.version_label, self.update_button):
+            version_layout.addWidget(item)
+        self.statusBar().addPermanentWidget(version_row)
+
+    def _update_dialog(self):
+        if self.update_dialog is None:
+            self.update_dialog = UpdateDialog(self, self.cfg.get("check_updates_on_start", True) is True)
+            self.update_dialog.install_requested.connect(self._request_update_install)
+            self.update_dialog.preferences_changed.connect(self._update_preferences)
+            self.update_dialog.job_finished.connect(self._update_job_finished)
+        return self.update_dialog
+
+    def _update_preferences(self, enabled):
+        self.cfg["check_updates_on_start"] = enabled
+        self._schedule_save()
+
+    def show_update_dialog(self):
+        dialog = self._update_dialog()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if not dialog.busy and dialog.release is None:
+            dialog.check()
+
+    def check_updates_automatically(self):
+        if not self._closing and self.persist and self.cfg.get("check_updates_on_start", True) is True:
+            self._update_dialog().check(automatic=True)
+
+    def _update_job_finished(self):
+        if self._closing:
+            QTimer.singleShot(0, self.close)
+
+    def _request_update_install(self, download):
+        if self._closing or self._pending_update:
+            return
+        if self._busy or self._serial_busy or (self.bit_pack_dialog is not None and self.bit_pack_dialog.busy):
+            QMessageBox.information(self, "升级", "请先完成或取消当前读写、传输或打包任务，再执行升级。")
+            return
+        if not self.save_settings():
+            QMessageBox.warning(self, "升级", "设置保存失败，请解决保存问题后重试。")
+            return
+        try:
+            self._pending_update = updater.prepare_install(download)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "升级准备失败", f"{exc}\n\n请确认程序目录可写，也可从发布页手动下载升级。")
+            return
+        self.close()
 
     def _build_sidebar(self):
         side = QWidget()
@@ -3347,7 +3406,7 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         if not self.persist:
-            return
+            return True
         self.cfg.update(host=self.host.text().strip(), port=self.port.value(), username=self.user.text().strip(),
                         password=self.password.text(), remember_password=self.remember.isChecked(),
                         poll_interval=self._poll_interval_ms(),
@@ -3360,6 +3419,8 @@ class MainWindow(QMainWindow):
             self.store.save(self.cfg)
         except OSError as exc:
             self.append_log("ERROR", f"设置保存失败：{exc}")
+            return False
+        return True
 
     def closeEvent(self, event):
         self._closing = True
@@ -3377,13 +3438,40 @@ class MainWindow(QMainWindow):
         packing = self.bit_pack_dialog is not None and self.bit_pack_dialog.busy
         if packing:
             self.bit_pack_dialog.close()
-        if self._busy or self._stream_workers or self._serial_busy or packing:
+        updating = self.update_dialog is not None and self.update_dialog.busy
+        if self.update_dialog is not None:
+            self.update_dialog.close()
+        if self._busy or self._stream_workers or self._serial_busy or packing or updating:
             self.setEnabled(False)
             event.ignore()
             return
-        self.save_settings()
+        saved = self.save_settings()
+        if self._pending_update and not saved:
+            self._abort_update_close("设置保存失败，请解决保存问题后重试。")
+            event.ignore()
+            return
+        if self._pending_update:
+            try:
+                updater.start_install(self._pending_update)
+            except OSError as exc:
+                self._abort_update_close(str(exc))
+                event.ignore()
+                return
         if self.file_logger:
             for handler in self.file_logger.handlers[:]:
                 handler.close()
                 self.file_logger.removeHandler(handler)
         event.accept()
+
+    def _abort_update_close(self, message):
+        try:
+            updater.discard_install(self._pending_update)
+        except OSError as exc:
+            self.append_log("ERROR", f"升级临时文件清理失败：{exc}")
+        self._pending_update = None
+        self._closing = False
+        self.setEnabled(True)
+        self._set_connection(False)
+        self.serial_connected = False
+        self.heartbeat.start()
+        QMessageBox.warning(self, "升级未执行", message)

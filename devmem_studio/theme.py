@@ -201,6 +201,10 @@ QCheckBox::indicator:checked:disabled { background: #A7BFEB; border: 1px solid #
 QStatusBar { background: white; color: #738598; border-top: 1px solid #DEE5EC; min-height: 27px; }
 QStatusBar::item { border: none; }
 QStatusBar QLabel { color: #738598; font-size: 11px; }
+QStatusBar QLabel#statusUpdate:hover { color: #2463DC; }
+QLabel#updateStatus { color: #526D83; font-size: 12px; }
+QLabel#updateStatus[state="ok"] { color: #157767; }
+QLabel#updateStatus[state="error"] { color: #B14040; }
 QToolTip { background: #203747; color: white; border: none; padding: 7px; }
 QScrollArea { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }

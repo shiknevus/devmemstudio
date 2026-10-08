@@ -3,6 +3,7 @@
 Devmem Studio uses the following open-source components. Their original copyright notices and licenses apply.
 
 - Python 3.12.2 — Python Software Foundation License: https://docs.python.org/3/license.html
+- OpenSSL 3.0.13 (Python HTTPS runtime) — Apache-2.0: https://github.com/openssl/openssl/blob/openssl-3.0.13/LICENSE.txt
 - Qt / PySide6 6.11.2 and Shiboken6 — LGPLv3 / GPLv3 or commercial licenses: https://doc.qt.io/qtforpython-6/licenses.html
 - Paramiko 4.0.0 — LGPL-2.1: https://github.com/paramiko/paramiko/blob/4.0.0/LICENSE
 - cryptography — Apache-2.0 / BSD-3-Clause: https://github.com/pyca/cryptography
