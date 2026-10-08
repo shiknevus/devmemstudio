@@ -300,6 +300,9 @@ static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_co
     if (!length || length >= PATH_CAP)
         return 0;
     SetEnvironmentVariableW(L"DEVMEMSTUDIO_LAUNCHER", self);
+    wchar_t launcher_pid[32];
+    swprintf(launcher_pid, 32, L"%lu", GetCurrentProcessId());
+    SetEnvironmentVariableW(L"DEVMEMSTUDIO_LAUNCHER_PID", launcher_pid);
     wchar_t *slash = wcsrchr(self, L'\\');
     if (slash)
         *slash = 0;

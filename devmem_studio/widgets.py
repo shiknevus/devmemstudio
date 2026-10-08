@@ -17,6 +17,24 @@ def label(text, name=None):
     return item
 
 
+class LinkLabel(QLabel):
+    """Clickable plain label: same metrics as neighbouring QLabels, unlike a flat QPushButton."""
+    clicked = Signal()
+
+    def __init__(self, text, name=None):
+        super().__init__(text)
+        self.setTextFormat(Qt.PlainText)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover)
+        if name:
+            self.setObjectName(name)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class ElidedLabel(QLabel):
     """Plain-text label that elides visually but retains full text and tooltip."""
     def __init__(self, text="", name=None, parent=None):
