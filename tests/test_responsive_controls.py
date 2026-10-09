@@ -160,6 +160,40 @@ class ResponsiveControlsTests(unittest.TestCase):
             for left, right in zip(row, row[1:]):
                 self.assertLess(left.geometry().right(), right.geometry().left(), size)
 
+    def test_badge_size_hint_stays_stable_when_text_is_elided(self):
+        badge = ElidedLabel("", "badge")
+        self.addCleanup(badge.close)
+        badge.resize(40, 32)
+        badge.show()
+        self.app.processEvents()
+        badge.setText("ec_hex_coordinate")
+        narrow_hint = badge.sizeHint().width()
+        self.assertNotEqual(QLabel.text(badge), badge.text())
+        badge.resize(300, 32)
+        self.app.processEvents()
+        self.assertEqual(QLabel.text(badge), badge.text())
+        self.assertEqual(badge.sizeHint().width(), narrow_hint)
+        badge.resize(narrow_hint, 32)
+        self.app.processEvents()
+        self.assertEqual(QLabel.text(badge), badge.text())
+
+    def test_first_component_selection_shows_type_without_window_resize(self):
+        self.resize(1540, 960)
+        comp = {"module_type": "ec_hex_coordinate", "label": "A0012_海克斯康三坐标2",
+                "instance": "ec_hex_coordinate_12", "bias": 0x6800, "address": "0x6800"}
+        self.window.select_component(comp)
+        for _ in range(8):
+            self.app.processEvents()
+        title, badge = self.window.module_title, self.window.module_badge
+        self.assertEqual(QLabel.text(title), title.text())
+        self.assertEqual(QLabel.text(badge), comp["module_type"])
+        self.assertGreaterEqual(badge.width(), badge.sizeHint().width())
+        first_width = badge.width()
+        self.window.select_component(comp)
+        for _ in range(8):
+            self.app.processEvents()
+        self.assertEqual(badge.width(), first_width)
+
     def test_log_source_selector_restores_width_and_keeps_source(self):
         self.assertFalse(hasattr(self.window, "log_filter"))   # level filter removed
         self.resize(1540, 960)
