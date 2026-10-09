@@ -42,6 +42,9 @@ class ElidedLabel(QLabel):
         self._full_text = ""
         self._extra_tooltip = ""
         self.setTextFormat(Qt.PlainText)
+        # QSS padding gives QLabel a frameWidth and therefore an implicit text
+        # indent. Use the same content area for painting and elision.
+        self.setIndent(0)
         if name:
             self.setObjectName(name)
         if name == "badge":
@@ -77,8 +80,10 @@ class ElidedLabel(QLabel):
     def sizeHint(self):
         hint = super().sizeHint()
         margins = self.contentsMargins()
-        hint.setWidth(max(hint.width(), self.fontMetrics().horizontalAdvance(self._full_text)
-                          + margins.left() + margins.right() + self.margin() * 2))
+        # QLabel's base hint measures the currently rendered (possibly elided)
+        # text. The full-text width must stay independent of the previous layout.
+        hint.setWidth(self.fontMetrics().horizontalAdvance(self._full_text)
+                      + margins.left() + margins.right() + self.margin() * 2)
         return hint
 
     def resizeEvent(self, event):

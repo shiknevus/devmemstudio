@@ -1665,7 +1665,7 @@ class MainWindow(QMainWindow):
             control.setToolTip(text)
 
     def _fit_title_row(self):
-        """Give way in order: type badge (to ~90 px), action button labels, then the component title."""
+        """Keep both names whole if icon buttons fit; then elide the badge before the title."""
         row = self.register_title_row
         available = row.geometry().width()
         if available <= 0:
@@ -1683,7 +1683,7 @@ class MainWindow(QMainWindow):
                       for widget in fixed)   # fixed-width controls report a smaller hint
             free = (available - margins.left() - margins.right() - sum(widths)
                     - row.spacing() * (len(fixed) + badge_shown))
-            if free >= title_full + min(badge_full, 90):
+            if free >= title_full + badge_full:
                 break
         badge = min(badge_full, max(min(badge_full, 90), free - title_full))
         self.module_badge.setMaximumWidth(max(0, badge))
