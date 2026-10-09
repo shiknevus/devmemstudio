@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import Mock, patch
+from zipfile import ZipFile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRectF
@@ -223,6 +224,39 @@ class BufferTests(unittest.TestCase):
 
 
 class DialogTests(unittest.TestCase):
+    def test_zip_matches_csv_for_32_columns_failures_signed_values_and_dropped_samples(self):
+        self.dialog.monitored = [(f'测试R{i}', 0x1000 + 4*i) for i in range(32)]
+        self.dialog.buffer = MonitorBuffer(32, limit=8)
+        self.dialog.buffer.extend([(100.0 + i * 0.01234567,
+                                    tuple(None if i == 7 and column == 31 else
+                                          (0xFFFFFFFF if column % 2 else 0x80000000) for column in range(32)))
+                                   for i in range(9)])
+        with tempfile.TemporaryDirectory() as folder:
+            for signed in (False, True):
+                with self.subTest(signed=signed):
+                    self.dialog.signed_check.setChecked(signed)
+                    plain = Path(folder) / 'monitor.csv'
+                    packed = Path(folder) / 'monitor.zip'
+                    for path in (plain, packed):
+                        with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=(str(path), '')):
+                            self.assertEqual(self.dialog.export_csv(), str(path))
+                    with ZipFile(packed) as archive:
+                        self.assertEqual(archive.read('monitor.csv'), plain.read_bytes())
+                    self.assertIn('已丢弃 3 点', self.dialog.status.text())
+
+    def test_export_cancel_and_write_error_have_no_success_result(self):
+        self.dialog.monitored = [('R0', 0x1000)]
+        self.dialog.buffer = MonitorBuffer(1)
+        self.dialog.buffer.extend([(0.0, (1,))])
+        with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=('', '')):
+            with patch('devmem_studio.monitor.csv_export') as write:
+                self.assertIsNone(self.dialog.export_csv())
+                write.assert_not_called()
+        with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=('monitor.zip', '')):
+            with patch('devmem_studio.monitor.csv_export', side_effect=OSError('disk full')):
+                self.assertIsNone(self.dialog.export_csv())
+                self.assertIn('导出失败', self.dialog.status.text())
+
     def test_unreadable_registers_are_disabled_and_saved_checks_removed(self):
         self.registers[0]['write_only'] = True
         self.registers[1]['read_clear'] = True
