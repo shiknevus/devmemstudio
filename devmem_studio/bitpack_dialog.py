@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFrame, QLineEdit, QCheckBo
 from . import bitpack
 from .core import application_dir
 from .widgets import label, button, row, field, Worker, restyle, ComboBox, ElidedLabel
+from .window_state import ManagedDialog
 
 
-class BitPackDialog(QDialog):
+class BitPackDialog(ManagedDialog):
     job_finished = Signal()
     settings_changed = Signal(object)
 

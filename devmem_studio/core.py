@@ -74,7 +74,7 @@ BATCH_READ_CHUNK = 32
 # Register monitor: the devmem fallback forks one busybox devmem per register per sample
 # (~1 ms each on the A53), so 5 ms is the shortest interval a few registers can hold there.
 MONITOR_MIN_INTERVAL_MS = 5
-MONITOR_MAX_REGISTERS = 8
+MONITOR_MAX_REGISTERS = 32
 # Resident sampler (tools/regmon): maps the register pages once and loops on board deadlines.
 REGMON_RESOURCE = "assets/regmon/regmon-aarch64"
 MONITOR_START_TIMEOUT_S = 5.0
