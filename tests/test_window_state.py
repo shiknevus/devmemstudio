@@ -137,6 +137,18 @@ class WindowStateTests(unittest.TestCase):
         self.assertTrue(child.isMaximized())
         self.assertFalse(child.isMinimized())
 
+    def test_owner_activation_does_not_hide_a_maximized_child(self):
+        child = self.dialog()
+        child.showMaximized()
+        self.settle()
+        QApplication.sendEvent(self.owner, QEvent(QEvent.WindowActivate))
+        self.owner._window_states._reveal_owner()
+        self.settle()
+        self.assertTrue(self.owner.isVisible())
+        self.assertFalse(self.owner.isMinimized())
+        self.assertTrue(child.isVisible())
+        self.assertTrue(child.isMaximized())
+
     def test_restore_does_not_activate_child_before_owner(self):
         observations = []
 

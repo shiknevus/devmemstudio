@@ -186,6 +186,7 @@ class MonitorPlot(QWidget):
         self._data_refresh_requested = False
         self._hold_display = False   # keep the drawn time axis for the click that placed a marker
         self._drag_moved = False
+        self._axis_sync_pending = False
         self.axis_view = None   # pinned footer; when set, the axis is not drawn inside the scrolling chart
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
@@ -815,18 +816,28 @@ class MonitorPlot(QWidget):
 
     def _start_prepare(self, geometry, exposed, ratio):
         if self._prepared_frame is not None:
-            return
+            current = self.buffer.revision if self.buffer is not None else 0
+            if self._prepare_timer.isActive() and self._prepared_frame.get("revision") == current:
+                return
+            self._prepare_timer.stop()
+            self._prepared_frame = None
         self._prepared_frame = {"geometry": geometry, "revision": self.buffer.revision if self.buffer else 0,
                                 "count": len(self.buffer) if self.buffer is not None else 0,
                                 "range": self.time_range(), "ratio": ratio, "paths": {}, "tiles": OrderedDict(),
                                 "rows": self._scene_rows(exposed), "render_ms": 0.}
         self._prepare_timer.start(0)
 
+    def _interaction_frozen(self):
+        return self._scrolling or self._drag_marker is not None or self._hold_display
+
     def _prepare_one_lane(self):
         frame = self._prepared_frame
         if frame is None:
             return
-        if self._scrolling or self._drag_marker is not None or self._hold_display:
+        if self._interaction_frozen():
+            # Leave the frame queued. Dropping the timer here made the next
+            # data refresh a no-op, so a marker click froze the live chart.
+            self._prepare_timer.start(30)
             return
         if not self.isVisible() or frame["geometry"] != self._scene_geometry():
             self._prepared_frame = None
@@ -901,6 +912,8 @@ class MonitorPlot(QWidget):
             self._hold_display = False
         if not freeze:
             self._data_refresh_requested = False
+        if self._prepared_frame is not None and not self._interaction_frozen() and not self._prepare_timer.isActive():
+            self._prepare_timer.start(0)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -924,7 +937,7 @@ class MonitorPlot(QWidget):
         changed = revision != self._scene_revision
         # A scroll or a marker click must keep the frame the pointer was aimed
         # at. Rebuilding here both stalls the wheel and shifts A/B off the cursor.
-        freeze = self._scrolling or self._drag_marker is not None or self._hold_display
+        freeze = self._interaction_frozen()
         structural = self._scene_key is None or geometry != self._scene_key
         update_data = (not freeze and changed and (not self._mouse_repaint or self._data_refresh_requested))
         if not structural and update_data and self._frame_render_ms >= 12 and self.isVisible():
@@ -963,9 +976,17 @@ class MonitorPlot(QWidget):
         self._sync_axis_view()
 
     def _sync_axis_view(self):
-        view = self.axis_view
-        if view is not None:
-            view.repaint()
+        # A synchronous footer repaint from inside paintEvent re-enters the chart
+        # and stalls the click that places a marker.
+        if self.axis_view is None or self._axis_sync_pending:
+            return
+        self._axis_sync_pending = True
+        QTimer.singleShot(0, self._flush_axis_view)
+
+    def _flush_axis_view(self):
+        self._axis_sync_pending = False
+        if self.axis_view is not None:
+            self.axis_view.update()
 
 
 class _MonitorBridge(QObject):

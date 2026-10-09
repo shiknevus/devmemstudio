@@ -29,6 +29,24 @@ def ensure_taskbar_window(hwnd):
     return True
 
 
+def release_window_owner(hwnd):
+    """Drop the Windows owner link created by the Qt parent.
+
+    An owned window always stays above its owner. Once that window is maximized
+    it covers the main window, and activating the main window cannot reveal it.
+    """
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    set_long = user32.SetWindowLongPtrW
+    set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    set_long.restype = ctypes.c_ssize_t
+    set_long(wintypes.HWND(hwnd), -8, 0)   # GWLP_HWNDPARENT
+    user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    # Apply the owner change without moving, sizing, or activating the window.
+    user32.SetWindowPos(wintypes.HWND(hwnd), None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+
+
 class _Guid(ctypes.Structure):
     _fields_ = [("data1", wintypes.DWORD), ("data2", wintypes.WORD), ("data3", wintypes.WORD),
                 ("data4", ctypes.c_ubyte * 8)]
