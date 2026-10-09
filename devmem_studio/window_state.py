@@ -28,15 +28,8 @@ class ManagedDialog(QDialog):
                             | Qt.WindowSystemMenuHint | Qt.WindowCloseButtonHint)
 
     def showEvent(self, event):
-        if sys.platform == "win32" and QApplication.platformName() == "windows":
-            from .taskbar import bind_relaunch, ensure_taskbar_window
-            hwnd = int(self.winId())
-            ensure_taskbar_window(hwnd)
-            launcher = os.environ.get("DEVMEMSTUDIO_LAUNCHER")
-            if launcher and getattr(self, "_taskbar_bound_hwnd", None) != hwnd:
-                bind_relaunch(hwnd, launcher)
-                self._taskbar_bound_hwnd = hwnd
         super().showEvent(event)
+        self._detach_from_owner()
 
     def changeEvent(self, event):
         if event.type() == QEvent.WindowStateChange:
@@ -46,6 +39,21 @@ class ManagedDialog(QDialog):
             elif not event.oldState() & Qt.WindowMinimized:
                 self._restore_state = event.oldState() & ~Qt.WindowActive
         super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            # Maximizing can reapply the owner link after showEvent.
+            QTimer.singleShot(0, self._detach_from_owner)
+
+    def _detach_from_owner(self):
+        if sys.platform != "win32" or QApplication.platformName() != "windows" or not self.windowHandle():
+            return
+        from .taskbar import bind_relaunch, ensure_taskbar_window, release_window_owner
+        hwnd = int(self.winId())
+        ensure_taskbar_window(hwnd)
+        release_window_owner(hwnd)
+        launcher = os.environ.get("DEVMEMSTUDIO_LAUNCHER")
+        if launcher and getattr(self, "_taskbar_bound_hwnd", None) != hwnd:
+            bind_relaunch(hwnd, launcher)
+            self._taskbar_bound_hwnd = hwnd
 
     def present(self, activate=True):
         desired = self._restore_state if self.isMinimized() else _state(self)
@@ -81,6 +89,7 @@ class WindowStateCoordinator(QObject):
         self.dialogs = {}
         self.suspended = False
         self.restoring = False
+        self._revealing = False
         self._restore_targets = []
         QApplication.instance().installEventFilter(self)
 
@@ -158,6 +167,31 @@ class WindowStateCoordinator(QObject):
         widget.hide()
         return True
 
+    def _reveal_owner(self):
+        if (self._revealing or not isValid(self.owner) or self.restoring or self.suspended
+                or self.owner.isMinimized() or not self.owner.isVisible()):
+            return
+        if sys.platform != "win32" or QApplication.platformName() != "windows":
+            return
+        covered = [widget for widget in list(self.dialogs)
+                   if isValid(widget) and widget.isVisible() and widget.isMaximized()]
+        if not covered:
+            return
+        self._revealing = True
+        try:
+            from .taskbar import release_window_owner
+            for widget in covered:
+                detach = getattr(widget, "_detach_from_owner", None)
+                if detach is not None:
+                    detach()
+                elif widget.windowHandle():
+                    release_window_owner(int(widget.winId()))
+            hwnd = int(self.owner.winId())
+            ctypes.windll.user32.SetForegroundWindow(ctypes.c_void_p(hwnd))
+            self.owner.raise_()
+        finally:
+            self._revealing = False
+
     def _resume(self):
         if (not isValid(self.owner) or not self.suspended or self._owner_minimized()
                 or not self.owner.isVisible() or getattr(self.owner, "_closing", False)):
@@ -231,6 +265,11 @@ class WindowStateCoordinator(QObject):
                     self._suspend()
                 elif self.suspended:
                     QTimer.singleShot(0, self._resume)
+            elif kind == QEvent.WindowActivate:
+                # A maximized child used to stay above its owner, so clicking the
+                # main window never brought it forward. Reveal it after Qt applies
+                # the activation.
+                QTimer.singleShot(0, self._reveal_owner)
             elif kind == QEvent.Hide and getattr(self.owner, "_closing", False):
                 self._suspend()
             return False

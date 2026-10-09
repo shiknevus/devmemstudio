@@ -1199,6 +1199,31 @@ class PlotTests(unittest.TestCase):
         finally:
             plot.close()
 
+    def test_marker_click_does_not_stall_a_pending_live_frame(self):
+        plot = self.marker_plot()
+        try:
+            plot.grab()
+            plot._frame_render_ms = 30
+            plot.buffer.extend([(11.0, (1, 2))])
+            plot._start_prepare(plot._scene_geometry(), QRectF(plot.rect()).toAlignedRect(), plot.devicePixelRatioF())
+            self.assertIsNotNone(plot._prepared_frame)
+            plot._hold_display = True
+            plot._drag_marker = 0
+            plot._prepare_one_lane()
+            self.assertTrue(plot._prepare_timer.isActive())
+            plot._hold_display = False
+            plot._drag_marker = None
+            plot.buffer.extend([(12.0, (5, 6))])
+            plot.refresh_data()
+            plot.repaint()
+            QTest.qWait(80)
+            for _ in range(8):
+                self.app.processEvents()
+            self.assertEqual(plot._scene_revision, plot.buffer.revision)
+            self.assertIsNone(plot._prepared_frame)
+        finally:
+            plot.close()
+
     def test_clicks_place_two_sample_markers_and_zoom_preserves_times(self):
         plot = self.marker_plot()
         try:
