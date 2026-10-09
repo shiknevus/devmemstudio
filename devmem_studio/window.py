@@ -31,6 +31,7 @@ from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyC
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
                    normalize_remote_dir, remember_dir, MONITOR_MIN_INTERVAL_MS)
 from .monitor import MonitorDialog
+from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
@@ -3397,11 +3398,13 @@ class MainWindow(QMainWindow):
 
     def export_snapshot(self):
         stem = self.active_component["module_type"] if self.active_component else "registers"
-        path, _ = QFileDialog.getSaveFileName(self, "导出寄存器快照", f"registers-{stem}-{datetime.now():%Y%m%d-%H%M%S}.csv",
-                                             "CSV 快照 (*.csv)")
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出寄存器快照", f"registers-{stem}-{datetime.now():%Y%m%d-%H%M%S}.zip", EXPORT_FILTERS)
         if path:
+            path = export_path(path, selected_filter)
             try:
-                Path(path).write_text(self.snapshot_csv(), encoding="utf-8-sig", newline="")
+                with csv_export(path) as handle:
+                    handle.write(self.snapshot_csv())
                 self.append_log("SUCCESS", "寄存器快照已导出：" + path)
             except OSError as exc:
                 QMessageBox.warning(self, "导出失败", str(exc))

@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from zipfile import ZipFile
 
 import paramiko
 
@@ -109,6 +110,19 @@ class UiTestBase(unittest.TestCase):
 
 
 class UiTests(UiTestBase):
+    def test_snapshot_zip_restores_every_csv_field_and_plain_export_is_still_available(self):
+        expected = self.window.snapshot_csv().encode('utf-8-sig')
+        for suffix in ('csv', 'zip'):
+            with self.subTest(suffix=suffix):
+                target = Path(self.temp.name) / f'寄存器快照.{suffix}'
+                with patch('devmem_studio.window.QFileDialog.getSaveFileName', return_value=(str(target), '')):
+                    self.window.export_snapshot()
+                if suffix == 'zip':
+                    with ZipFile(target) as archive:
+                        self.assertEqual(archive.read('寄存器快照.csv'), expected)
+                else:
+                    self.assertEqual(target.read_bytes(), expected)
+
     def test_serial_only_reboot_sends_command_and_keeps_boot_log_connection(self):
         from unittest.mock import Mock
         window = self.window

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxL
 
 from .core import (MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_STALE_TIMEOUT_S,
                    normalize_monitor_settings, parse_addr)
+from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .theme import icon
 from .widgets import ElidedLabel, label, button, row, restyle, Worker
 from .window_state import ManagedDialog
@@ -1159,7 +1160,8 @@ class MonitorDialog(ManagedDialog):
         self.signed_check.toggled.connect(self._signed_changed)
         self.clear_button = button("清空数据", self.clear, "flat", "clear")
         self.clear_button.setToolTip("清空当前采样数据与标记")
-        self.export_button = button("导出 CSV", self.export_csv, "flat", "export")
+        self.export_button = button("导出数据", self.export_csv, "flat", "export")
+        self.export_button.setToolTip("导出全部保留的采样数据：ZIP 无损压缩（解压后为 CSV）或普通 CSV")
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
@@ -1526,7 +1528,7 @@ class MonitorDialog(ManagedDialog):
         if buffer.failed:
             details.append(f"读取失败 {buffer.failed} 次（红色刻度）")
         if buffer.dropped:
-            details.append(f"保留 {len(buffer):,} 点 · 已丢弃 {buffer.dropped:,} 点旧数据，CSV 仅导出保留部分")
+            details.append(f"保留 {len(buffer):,} 点 · 已丢弃 {buffer.dropped:,} 点旧数据，仅导出保留部分")
         if self.sampler in SAMPLER_LABELS:
             details.append(SAMPLER_LABELS[self.sampler])
         return " · ".join(parts + details)
@@ -1592,15 +1594,16 @@ class MonitorDialog(ManagedDialog):
         if buffer is None or not len(buffer):
             self._set_status("还没有可导出的数据。", "warn")
             return None
-        path, _ = QFileDialog.getSaveFileName(self, "导出监视数据", f"monitor-{datetime.now():%Y%m%d-%H%M%S}.csv",
-                                              "CSV 文件 (*.csv)")
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出监视数据", f"monitor-{datetime.now():%Y%m%d-%H%M%S}.zip", EXPORT_FILTERS)
         if not path:
             return None
+        path = export_path(path, selected_filter)
         signed = self.signed_check.isChecked()
         failures = [set(column) for column in buffer.failures]
         columns = [buffer.column(index, signed) for index in range(len(self.monitored))]
         try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+            with csv_export(path) as handle:
                 writer = csv.writer(handle)
                 writer.writerow(["time_s"] + [f"{name} (0x{address:08X})" for name, address in self.monitored])
                 for index, stamp in enumerate(buffer.times):
