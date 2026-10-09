@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRectF
-from PySide6.QtGui import QMouseEvent, QWheelEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 from PySide6.QtTest import QTest, QSignalSpy
@@ -56,11 +56,20 @@ class SamplerScriptTests(unittest.TestCase):
         self.assertIn("exit 127", script)
         self.assertIn('echo "@$t" || exit;', script)  # channel closure must end the board loop
         self.assertEqual(MONITOR_MIN_INTERVAL_MS, 5)
-        self.assertEqual(MONITOR_MAX_REGISTERS, 8)
+        self.assertEqual(MONITOR_MAX_REGISTERS, 32)
         with self.assertRaises(ValueError):
             monitor_script([], 5)
         with self.assertRaises(ValueError):
             monitor_script([0x1_0000_0000], 5)
+
+    def test_sampler_accepts_32_registers_and_rejects_33(self):
+        addresses = [0xB0100800 + i * 4 for i in range(32)]
+        script = monitor_script(addresses, 5)
+        self.assertEqual(script.count(" || echo x"), 32)
+        command = monitor_command(addresses, 5, "/tmp/regmon")
+        self.assertTrue(command.startswith("/tmp/regmon 5000 " + " ".join(f"0x{a:08x}" for a in addresses)))
+        with self.assertRaisesRegex(ValueError, "最多同时监视 32 个"):
+            monitor_script(addresses + [0xB0100880], 5)
 
     @unittest.skipUnless(shutil.which("sh"), "needs a POSIX sh")
     def test_script_runs_and_holds_the_period_under_posix_sh(self):
@@ -114,6 +123,15 @@ class SamplerScriptTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_32_columns_survive_fragmented_stream_and_failed_reads(self):
+        parser = MonitorParser(32)
+        wire = b"#regmon 1\n@1000000000\n" + b"".join(
+            b"x\n" if i == 17 else f"0x{i:08X}\n".encode() for i in range(32))
+        for offset in range(0, len(wire), 7):
+            parser.feed(wire[offset:offset + 7])
+        expected = tuple(None if i == 17 else i for i in range(32))
+        self.assertEqual(parser.take(), [(1.0, expected)])
+
     def test_backwards_board_clock_stops_instead_of_corrupting_plot_order(self):
         parser = MonitorParser(1)
         with self.assertRaisesRegex(ValueError, '时间倒退'):
@@ -157,7 +175,7 @@ class CommandTests(unittest.TestCase):
 
     def test_monitor_rejects_unaligned_addresses_and_invalid_rates(self):
         for addresses, interval in (([0x1001], 5), ([0x1000], 0), ([0x1000], float('nan')),
-                                    ([0x1000] * 9, 10), ([0x1000], 60001)):
+                                    ([0x1000] * 33, 10), ([0x1000], 60001)):
             with self.subTest(addresses=addresses, interval=interval), self.assertRaises(ValueError):
                 monitor_command(addresses, interval)
 
@@ -335,24 +353,115 @@ class DialogTests(unittest.TestCase):
                 QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
                 self.assertEqual(self.dialog.checked_addresses(), [0x1000])
                 self.assertEqual(self.dialog.settings["selections"]["A"], [0x1000])
-                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 8")
+                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
                 QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
                 self.assertEqual(self.dialog.checked_addresses(), [])
                 self.assertEqual(self.dialog.settings["selections"]["A"], [])
                 self.assertEqual(changes.count(), before + 2)
 
     def test_row_click_preserves_selection_limit(self):
-        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(9)]
-        chosen = [reg["_address"] for reg in registers[:8]]
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(33)]
+        chosen = [reg["_address"] for reg in registers[:32]]
         self.dialog.set_registers("A", registers, chosen)
         view = self.show_register_list()
-        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(8)).center())
+        view.scrollToItem(view.item(32))
+        self.app.processEvents()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(32)).center())
         self.assertEqual(self.dialog.checked_addresses(), chosen)
         self.assertEqual(self.dialog.settings["selections"]["A"], chosen)
-        self.assertIn("最多同时监视 8 个", self.dialog.status.text())
+        self.assertIn("最多同时监视 32 个", self.dialog.status.text())
+        view.scrollToItem(view.item(0))
+        self.app.processEvents()
         QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(0)).center())
-        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(8)).center())
-        self.assertEqual(self.dialog.checked_addresses(), chosen[1:] + [0x1020])
+        view.scrollToItem(view.item(32))
+        self.app.processEvents()
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(32)).center())
+        self.assertEqual(self.dialog.checked_addresses(), chosen[1:] + [0x1080])
+
+    def test_32_register_run_scrolls_focus_and_exports_all_columns(self):
+        import csv
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
+        addresses = [reg["_address"] for reg in registers]
+        session = Mock()
+        samples = [(1 + i * .01, tuple(i + column for column in range(32))) for i in range(10)]
+
+        def start_monitor(chosen, interval, on_samples, stopped, cancel, on_sampler=None):
+            self.assertEqual(chosen, addresses)
+            on_samples(samples)
+            return True
+
+        session.start_monitor.side_effect = start_monitor
+        self.dialog._session_provider = lambda: session
+        self.dialog.set_registers("32 registers", registers, addresses, kind="axis")
+        self.dialog.resize(1120, 680)
+        self.show_register_list()
+        self.assertTrue(self.dialog.start())
+        deadline = time.monotonic() + 3
+        while self.dialog.state == "starting" and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertEqual(self.dialog.state, "running")
+        self.assertEqual(len(self.dialog.buffer), 10)
+        self.assertEqual(self.dialog.count_label.text(), "已选 32 / 32")
+        self.assertEqual(self.dialog.height(), 680)
+        scrollbar = self.dialog.plot_scroll.verticalScrollBar()
+        self.assertGreater(scrollbar.maximum(), 0)
+        self.assertLess(len(self.dialog.plot._trace_cache), 32)
+        send_plot_wheel(self.dialog.plot, -120, Qt.NoModifier,
+                        position=self.dialog.plot.lanes()[0].center())
+        self.assertGreater(scrollbar.value(), 0)
+        self.dialog.focus_register(addresses[-1])
+        self.app.processEvents()
+        self.assertEqual(self.dialog.plot.highlight, 31)
+        self.assertGreater(scrollbar.value(), 0)
+        lane = self.dialog.plot.lanes()[31]
+        visible_top = scrollbar.value()
+        self.assertGreaterEqual(lane.top(), visible_top)
+        self.assertLessEqual(lane.bottom(), visible_top + self.dialog.plot_scroll.viewport().height())
+        self.assertIn(31, self.dialog.plot._trace_cache)
+        self.dialog.stop()
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "monitor32.csv")
+            with patch("devmem_studio.monitor.QFileDialog.getSaveFileName", return_value=(path, "")):
+                self.assertEqual(self.dialog.export_csv(), path)
+            with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.reader(handle))
+            self.assertTrue(all(len(record) == 33 for record in rows))
+            self.assertEqual(len(rows), 11)
+            self.assertEqual(rows[-1][-1], "40")
+
+    def test_mouse_and_marker_values_and_tags_remain_visible_after_scroll(self):
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
+        self.dialog.set_registers("32 registers", registers)
+        self.dialog.monitored = [(reg["name"], reg["_address"]) for reg in registers]
+        buffer = MonitorBuffer(32)
+        buffer.extend([(float(i), tuple(i + column for column in range(32))) for i in range(11)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.set_series(buffer, [reg["name"] for reg in registers])
+        plot._set_marker(0, 2.)
+        plot._set_marker(1, 7.)
+        self.dialog.resize(1120, 680)
+        self.show_register_list()
+        self.dialog.focus_register(registers[-1]["_address"])
+        self.app.processEvents()
+        lane = plot.lanes()[-1]
+        plot.mouseMoveEvent(QMouseEvent(QEvent.MouseMove,
+                                        QPointF(lane.left() + .5 * lane.width(), lane.center().y()),
+                                        QPointF(), Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+        self.app.processEvents()
+        self.assertEqual(plot.header_values(31), ("0x24 · 36", "0x21 · 33", "0x26 · 38"))
+        self.assertEqual(plot.toolTip(), "")
+        scroll = self.dialog.plot_scroll.verticalScrollBar().value()
+        self.assertGreater(scroll, 0)
+        image = self.dialog.plot_scroll.viewport().grab().toImage()
+        for marker, color in enumerate(("#B57518", "#7A4FC4")):
+            rect = plot.marker_tag_rect(marker).translated(0, -scroll).toAlignedRect()
+            self.assertTrue(image.rect().contains(rect))
+            self.assertLessEqual(rect.top(), 3)
+            tag = image.copy(rect)
+            self.assertTrue(any(tag.pixelColor(x, y) == QColor(color)
+                                for x in range(tag.width()) for y in range(tag.height())))
 
     def test_filtered_row_click_and_right_click(self):
         self.dialog.set_registers("A", self.registers)
@@ -375,7 +484,7 @@ class DialogTests(unittest.TestCase):
         self.assertGreater(control.geometry().left(), self.dialog.count_label.geometry().right())
         QTest.mouseClick(control, Qt.LeftButton)
         self.assertTrue(all(view.item(i).checkState() == Qt.Unchecked for i in range(view.count())))
-        self.assertEqual(self.dialog.count_label.text(), "已选 0 / 8")
+        self.assertEqual(self.dialog.count_label.text(), "已选 0 / 32")
         self.assertEqual(self.dialog.settings["selections"]["A"], [])
         self.assertEqual(changes.count(), 1)
         self.assertFalse(control.isEnabled())
@@ -501,7 +610,7 @@ class DialogTests(unittest.TestCase):
             self.dialog.resize(width, 680)
             for _ in range(3):
                 self.app.processEvents()
-            self.assertGreater(rect(self.dialog.footer).top(), rect(self.dialog.plot).bottom())
+            self.assertGreater(rect(self.dialog.footer).top(), rect(self.dialog.plot_scroll).bottom())
             self.assertLess(rect(self.dialog.footer).bottom(), self.dialog.height())
             self.assertTrue(all(lane.height() >= 52 for lane in self.dialog.plot.lanes()))
 
@@ -577,7 +686,7 @@ class DialogTests(unittest.TestCase):
                 QTest.keyClick(view, Qt.Key_Space)
                 self.assertEqual(self.dialog.checked_addresses(), [0x1000])
                 self.assertNotIn("A", self.dialog.settings["selections"])   # viewing alone saves nothing
-                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 8")
+                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
                 self.assertEqual(changes.count(), 0)
         self.dialog.stop()
         self.assertFalse(view.item(1).flags() & Qt.ItemIsEnabled)
@@ -763,8 +872,189 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(len(self.dialog.buffer), 0)
         self.assertEqual(self.dialog.status.text(), status)
 
+    def test_wheel_scroll_keeps_the_drawn_frame_while_samples_are_pending(self):
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
+        self.dialog.set_registers("32 registers", registers, [reg["_address"] for reg in registers])
+        self.dialog.monitored = [(reg["name"], reg["_address"]) for reg in registers]
+        buffer = MonitorBuffer(32)
+        buffer.extend([(float(i), tuple(range(32))) for i in range(11)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.set_series(buffer, [reg["name"] for reg in registers])
+        self.dialog.resize(1120, 680)
+        self.dialog.show()
+        self.app.processEvents()
+        plot.repaint()
+        drawn = plot._display_time_range()
+        revision = plot._scene_revision
+        buffer.extend([(11.0, tuple(range(32)))])
+        scrollbar = self.dialog.plot_scroll.verticalScrollBar()
+        send_plot_wheel(plot, -240, Qt.NoModifier, position=plot.lanes()[0].center())
+        self.app.processEvents()
+        self.assertGreater(scrollbar.value(), 0)
+        self.assertEqual(plot._display_time_range(), drawn)
+        self.assertEqual(plot._scene_revision, revision)
+        self.assertTrue(plot._scrolling)
+        plot._scroll_finished()
+        plot.repaint()
+        self.assertEqual(plot._display_time_range()[1], 11.0)
+        self.assertFalse(plot._scrolling)
+
+    def test_time_axis_stays_under_the_viewport_and_follows_new_samples(self):
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
+        self.dialog.set_registers("32 registers", registers, [reg["_address"] for reg in registers])
+        self.dialog.monitored = [(reg["name"], reg["_address"]) for reg in registers]
+        buffer = MonitorBuffer(32)
+        buffer.extend([(float(i), tuple(range(32))) for i in range(11)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.set_series(buffer, [reg["name"] for reg in registers])
+        self.dialog.resize(1120, 680)
+        self.dialog.show()
+        self.app.processEvents()
+        footer = self.dialog.axis_footer
+        viewport = self.dialog.plot_scroll.viewport()
+        scrollbar = self.dialog.plot_scroll.verticalScrollBar()
+        self.assertGreater(scrollbar.maximum(), 0)
+        self.assertTrue(footer.isVisible())
+        self.assertEqual(footer.geometry().top(), viewport.geometry().bottom() + 1)
+        self.assertEqual(footer.width(), viewport.width())
+        self.assertGreater(plot.lanes()[-1].bottom(), viewport.height())
+
+        def axis_texts():
+            texts = []
+            draw_text = QPainter.drawText
+
+            def text(painter, *args):
+                if isinstance(args[-1], str):
+                    texts.append(args[-1])
+                return draw_text(painter, *args)
+
+            with patch.object(QPainter, "drawText", text):
+                footer.repaint()
+            return [item for item in texts if item.endswith(" s")]
+
+        parked = footer.mapTo(self.dialog, QPoint())
+        early = axis_texts()
+        self.assertTrue(early)
+        scrollbar.setValue(scrollbar.maximum())
+        self.app.processEvents()
+        self.assertEqual(footer.mapTo(self.dialog, QPoint()), parked)
+        self.assertEqual(footer.geometry().top(), self.dialog.plot_scroll.viewport().geometry().bottom() + 1)
+        self.assertTrue(axis_texts())
+        plot._scroll_finished()
+        buffer.extend([(float(i), tuple(range(32))) for i in range(11, 40)])
+        plot.refresh_data()
+        plot.repaint()
+        later = axis_texts()
+        self.assertTrue(any(label.startswith(("20", "30", "40")) for label in later))
+        self.assertNotEqual(later, early)
+        image = self.dialog.plot_scroll.grab().toImage()
+        footer_top = footer.geometry().top()
+        self.assertGreater(image.height(), footer_top + 8)
+        self.assertEqual(image.pixelColor(footer.width() // 2, footer_top + 8), QColor("#FFFFFF"))
+
 
 class PlotTests(unittest.TestCase):
+    def test_live_pointer_uses_pixels_and_readouts_always_show_n_s_a_b(self):
+        plot = MonitorPlot()
+        plot.resize(900, 320)
+        buffer = MonitorBuffer(1)
+        buffer.extend([(0., (5,)), (1., (9,))])
+        plot.set_series(buffer, ["R0"], [8])
+        lane = plot.lanes()[0]
+        x = lane.left() + .345 * lane.width()
+        plot.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(x, lane.center().y()), QPointF(),
+                                        Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+        lines, texts = [], []
+        draw_line, draw_text = QPainter.drawLine, QPainter.drawText
+
+        def line(painter, *args):
+            if painter.pen().color() == QColor("#9CAFBD"):
+                lines.append(args)
+            return draw_line(painter, *args)
+
+        def text(painter, *args):
+            if isinstance(args[-1], str):
+                texts.append(args[-1])
+            return draw_text(painter, *args)
+
+        with patch.object(QPainter, "drawLine", line), patch.object(QPainter, "drawText", text):
+            plot.grab()
+        self.assertTrue(lines)
+        self.assertTrue(all(points[0].x() == x and points[1].x() == x for points in lines))
+        self.assertEqual(plot.readout_values(0), ("0x9 · 9", "0x5 · 5", "—", "—"))
+        self.assertIn("N: 0x9 · 9", texts)
+        self.assertIn("S: 0x5 · 5", texts)
+        self.assertIn("A: —", texts)
+        self.assertIn("B: —", texts)
+        self.assertIn("R0  +0x008", texts)
+
+    def test_pointer_reuses_chart_until_data_refresh_without_starving_updates(self):
+        plot = MonitorPlot()
+        buffer = MonitorBuffer(1)
+        buffer.extend([(float(i), (i,)) for i in range(11)])
+        plot.set_series(buffer, ["R0"])
+        plot.grab()
+        original = plot._scene_cache
+        buffer.extend([(11., (99,))])
+        lane = plot.lanes()[0]
+        event = QMouseEvent(QEvent.MouseMove, QPointF(lane.center()), QPointF(),
+                           Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+        plot.mouseMoveEvent(event)
+        with patch.object(plot, "_paint_chart", side_effect=AssertionError("pointer rebuilt chart")):
+            plot.grab()
+        self.assertIs(plot._scene_cache, original)
+        self.assertEqual(plot.readout_values(0)[0], "0x63 · 99")
+        self.assertEqual(plot._display_time_range(), (0., 10.))
+        plot.refresh_data()
+        plot.mouseMoveEvent(event)
+        plot.grab()
+        self.assertIsNot(plot._scene_cache, original)
+        self.assertEqual(plot._display_time_range(), (0., 11.))
+
+    def test_header_probes_use_mouse_and_ab_steps_in_both_number_formats(self):
+        plot = MonitorPlot()
+        buffer = MonitorBuffer(2)
+        buffer.extend([(float(i), (i, 0xFFFFFFFF - i)) for i in range(11)])
+        plot.set_series(buffer, ["R0", "R1"])
+        self.assertEqual(plot.header_values(0), ("—", "—", "—"))
+        lane = plot.lanes()[0]
+        plot._hover = lane.left() + .27 * lane.width()
+        self.assertEqual(plot.header_values(0), ("0x2 · 2", "—", "—"))
+        plot._set_marker(0, 4.)
+        self.assertEqual(plot.header_values(0), ("0x2 · 2", "0x4 · 4", "—"))
+        plot._set_marker(1, 7.)
+        self.assertEqual(plot.header_values(0), ("0x2 · 2", "0x4 · 4", "0x7 · 7"))
+        plot.signed = True
+        self.assertEqual(plot.header_values(1), ("0xFFFFFFFD · -3", "0xFFFFFFFB · -5", "0xFFFFFFF8 · -8"))
+        self.assertEqual(plot.value_text(0, 0), "0x0 · 0")
+        plot.clear_markers()
+        self.assertEqual(plot.header_values(0), ("0x2 · 2", "—", "—"))
+        plot.leaveEvent(QEvent(QEvent.Leave))
+        self.assertEqual(plot.header_values(0), ("—", "—", "—"))
+
+    def test_probe_for_discarded_marker_does_not_show_an_unrelated_value(self):
+        plot = MonitorPlot()
+        buffer = MonitorBuffer(1, limit=8)
+        buffer.extend([(float(i), (i,)) for i in range(10)])
+        plot.set_series(buffer, ["R0"])
+        plot._set_marker(0, 2.)
+        plot._set_marker(1, 7.)
+        self.assertEqual(plot.header_values(0), ("—", "—", "0x7 · 7"))
+
+    def test_nearby_marker_tags_do_not_cover_each_other(self):
+        plot = MonitorPlot()
+        buffer = MonitorBuffer(1)
+        buffer.extend([(0., (1,)), (1., (2,))])
+        plot.set_series(buffer, ["R0"])
+        for stamp in (0., 1.):
+            plot._set_marker(0, stamp)
+            plot._set_marker(1, stamp)
+            a = plot.marker_tag_rect(0)
+            b = plot.marker_tag_rect(1)
+            self.assertFalse(a.intersects(b))
+
     def test_ctrl_wheel_preserves_time_under_mouse_at_different_positions(self):
         plot = self.marker_plot()
         try:
@@ -847,6 +1137,68 @@ class PlotTests(unittest.TestCase):
         return QPoint(round(rect.left() + (stamp - begin) / (end - begin) * rect.width()),
                       round(rect.center().y()))
 
+    def test_marker_line_matches_the_click_while_new_samples_are_pending(self):
+        plot = self.marker_plot()
+        try:
+            plot.grab()
+            plot.buffer.extend([(11.0, (1, 2)), (12.0, (1, 2))])
+            lane = plot.lanes()[0]
+            begin, end = plot._display_time_range()
+            x = round(lane.left() + 0.37 * lane.width())
+            y = round(lane.center().y())
+            QTest.mouseClick(plot, Qt.LeftButton, pos=QPoint(x, y))
+            self.assertEqual(plot._display_time_range(), (begin, end))
+            drawn = lane.left() + (plot.markers[0] - begin) / (end - begin) * lane.width()
+            self.assertAlmostEqual(drawn, x, delta=1.0)
+            plot._hold_display = True
+            lines = []
+            draw_line = QPainter.drawLine
+
+            def line(painter, *args):
+                if painter.pen().color() == QColor("#B57518"):
+                    lines.append(args)
+                return draw_line(painter, *args)
+
+            with patch.object(QPainter, "drawLine", line):
+                plot.repaint()
+            self.assertEqual(plot._display_time_range(), (begin, end))
+            self.assertTrue(lines)
+            self.assertTrue(all(abs(points[0].x() - x) <= 1 for points in lines))
+        finally:
+            plot.close()
+
+    def test_click_between_samples_keeps_the_marker_on_the_cursor(self):
+        plot = self.marker_plot()
+        try:
+            plot.grab()
+            lane = plot.lanes()[0]
+            begin, end = plot.time_range()
+            stamp = 2.4
+            x = round(lane.left() + (stamp - begin) / (end - begin) * lane.width())
+            QTest.mouseClick(plot, Qt.LeftButton, pos=QPoint(x, round(lane.center().y())))
+            drawn = lane.left() + (plot.markers[0] - begin) / (end - begin) * lane.width()
+            self.assertAlmostEqual(drawn, x, delta=1.0)
+            self.assertGreater(abs(plot.markers[0] - 2.0), 0.2)
+        finally:
+            plot.close()
+
+    def test_pending_samples_do_not_shift_the_marker_under_the_pointer(self):
+        plot = self.marker_plot()
+        try:
+            plot.grab()
+            plot._set_marker(0, 2.0)
+            plot._set_marker(1, 8.0)
+            plot._next_marker = 0
+            plot.buffer.extend([(11.0, (1, 2)), (12.0, (1, 2))])
+            lane = plot.lanes()[0]
+            begin, end = plot._display_time_range()
+            x = round(lane.left() + (8.0 - begin) / (end - begin) * lane.width())
+            QTest.mouseClick(plot, Qt.LeftButton, pos=QPoint(x, round(lane.center().y())))
+            self.assertAlmostEqual(plot.markers[0], 2.0)
+            self.assertAlmostEqual(plot.markers[1], 8.0, delta=0.02)
+        finally:
+            plot.close()
+
     def test_clicks_place_two_sample_markers_and_zoom_preserves_times(self):
         plot = self.marker_plot()
         try:
@@ -899,16 +1251,18 @@ class PlotTests(unittest.TestCase):
         finally:
             plot.close()
 
-    def test_headers_show_name_offset_and_latest_value_for_all_eight_series(self):
+    def test_headers_show_name_offset_and_mouse_value_for_all_32_series(self):
         plot = MonitorPlot()
-        buffer = MonitorBuffer(8)
-        names = [f"R{i}" for i in range(8)]
-        offsets = [0x800 + i * 4 for i in range(8)]
+        buffer = MonitorBuffer(32)
+        names = [f"R{i}" for i in range(32)]
+        offsets = [0x800 + i * 4 for i in range(32)]
         plot.set_series(buffer, names, offsets)
         self.assertEqual(plot.header_texts(0), ("R0", "+0x800", "—"))
-        buffer.extend([(0.0, tuple(range(8))), (0.005, (0xFFFFFFFF,) + tuple(range(1, 8)))])
+        buffer.extend([(0.0, tuple(range(32))), (1.0, (0xFFFFFFFF,) + tuple(range(1, 32)))])
+        plot._hover = plot.lanes()[0].right()
         self.assertEqual(plot.header_texts(0), ("R0", "+0x800", "0xFFFFFFFF · 4294967295"))
-        self.assertEqual(plot.header_texts(7), ("R7", "+0x81C", "0x00000007 · 7"))
+        self.assertEqual(plot.header_texts(7), ("R7", "+0x81C", "0x7 · 7"))
+        self.assertEqual(plot.header_texts(31), ("R31", "+0x87C", "0x1F · 31"))
         plot.signed = True
         self.assertEqual(plot.header_texts(0)[2], "0xFFFFFFFF · -1")
         plot.resize(900, plot.minimumHeight())
@@ -950,7 +1304,7 @@ class PlotTests(unittest.TestCase):
         plot.set_zoom(1.0)
         self.assertEqual(plot.time_range(), (3.0, 8.0))
 
-    def test_fast_envelope_matches_original_and_hover_reuses_geometry(self):
+    def test_fast_envelope_matches_original_and_repaint_reuses_geometry(self):
         buffer = MonitorBuffer(1)
         buffer.extend([(i / 1000, (0xFFFFFFFF if i == 4321 else 5,)) for i in range(10000)])
         rect = QRectF(0, 0, 400, 100)
@@ -962,8 +1316,9 @@ class PlotTests(unittest.TestCase):
         plot.resize(900, 420)
         plot.set_series(buffer, ['R0'])
         plot.grab()
-        with patch.object(buffer, 'extrema', side_effect=AssertionError('hover rebuilt geometry')):
-            plot._hover = 500
+        with patch.object(buffer, 'extrema', side_effect=AssertionError('repaint rebuilt geometry')):
+            plot.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(500, 100), QPointF(),
+                                            Qt.NoButton, Qt.NoButton, Qt.NoModifier))
             self.assertFalse(plot.grab().isNull())
 
 
@@ -983,7 +1338,7 @@ class PlotTests(unittest.TestCase):
         points = MonitorPlot.trace([0.0, 1.0], [0, 10], 0, 0.0, 2.0, QRectF(0, 0, 200, 100), lambda v: -v)
         self.assertEqual(points, [QPointF(0, 0), QPointF(100, 0), QPointF(100, -10)])
 
-    def test_paints_empty_flat_busy_and_hovered_states(self):
+    def test_paints_mouse_line_and_values_without_instruction_tooltip(self):
         plot = MonitorPlot()
         plot.resize(900, 420)
         self.assertFalse(plot.grab().isNull())   # no series yet
@@ -998,10 +1353,12 @@ class PlotTests(unittest.TestCase):
             plot.signed = factor == 1.0
             plot.grab()
         self.assertEqual(plot.time_range(), (0.0, buffer.times[-1]))
+        before = plot.grab().toImage()
         plot.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(500, 100), QPointF(500, 100),
                                         Qt.NoButton, Qt.NoButton, Qt.NoModifier))
-        self.assertFalse(plot.grab().isNull())
-        self.assertEqual(plot.value_text(0, 3), "0x00000003 · 3")
+        self.assertNotEqual(plot.grab().toImage(), before)
+        self.assertEqual(plot.toolTip(), "")
+        self.assertEqual(plot.value_text(0, 3), "0x3 · 3")
 
     def test_nice_steps(self):
         for raw, step in ((0.0007, 0.001), (0.3, 0.5), (1.0, 1), (1.4, 2), (7, 10), (31, 50)):

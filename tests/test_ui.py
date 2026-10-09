@@ -109,6 +109,46 @@ class UiTestBase(unittest.TestCase):
 
 
 class UiTests(UiTestBase):
+    def test_serial_only_reboot_sends_command_and_keeps_boot_log_connection(self):
+        from unittest.mock import Mock
+        window = self.window
+        window._set_connection(False)
+        window.serial = Mock(alive=True, port="COM9")
+        window._serial_device = "COM9"
+        window._reflect_serial(True)
+        self.assertTrue(window.reboot_button.isEnabled())
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes) as question:
+            window.reboot_button.click()
+        window.serial.send.assert_called_once_with(b"reboot\r")
+        window.serial.close.assert_not_called()
+        self.assertTrue(window.serial_connected)
+        self.assertIn("串口 COM9", question.call_args.args[2])
+
+    def test_reboot_uses_serial_console_when_both_links_are_connected(self):
+        from unittest.mock import Mock
+        window = self.window
+        window.serial = Mock(alive=True, port="COM9")
+        window._reflect_serial(True)
+        window._set_console_source("com")
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
+                patch.object(window.session, "run") as ssh:
+            window.reboot()
+        window.serial.send.assert_called_once_with(b"reboot\r")
+        ssh.assert_not_called()
+        self.assertTrue(window.connected)
+
+    def test_cancel_serial_reboot_sends_nothing_and_leaves_polling_enabled(self):
+        from unittest.mock import Mock
+        window = self.window
+        window.serial = Mock(alive=True, port="COM9")
+        window._reflect_serial(True)
+        window._set_console_source("com")
+        window.poll_check.setChecked(True)
+        with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No):
+            window.reboot()
+        window.serial.send.assert_not_called()
+        self.assertTrue(window.poll_check.isChecked())
+
     def test_compact_layout_relaxes_fixed_widths_and_restores(self):
         self.window.resize(1280, 800)
         self.settle()
@@ -1340,7 +1380,7 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(dialog.checked_addresses(), [self.window.regs[0]["_address"]])   # selected row preselected
         for index in range(dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Checked)
-        self.assertEqual(len(dialog.checked_addresses()), 8)                               # capped
+        self.assertEqual(len(dialog.checked_addresses()), 32)                              # capped
         for index in range(2, dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Unchecked)
         dialog.interval_spin.setValue(1)

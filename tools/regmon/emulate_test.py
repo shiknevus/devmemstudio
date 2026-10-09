@@ -244,6 +244,18 @@ class Board:
 
 
 class RegmonEmulation(unittest.TestCase):
+    def test_32_registers_keep_complete_samples_and_deadlines(self):
+        addresses = [0xB0100800 + i * 4 for i in range(32)]
+        board = Board(["5000", *map(hex, addresses)], eof_at=10**12 + 10**9).run()
+        self.assertEqual((board.exit_code, board.stderr), (0, b""))
+        samples = board.samples()
+        self.assertTrue(195 <= len(samples) <= 201, len(samples))
+        self.assertEqual(len(board.maps), 1)
+        for index, (_, values) in enumerate(samples, 1):
+            self.assertEqual(values, [(address & 0xFFFF) << 16 | index for address in addresses])
+        gaps = [b[0] - a[0] for a, b in zip(samples, samples[1:])]
+        self.assertTrue(all(4_990_000 <= gap <= 5_020_000 for gap in gaps))
+
     def test_watchdog_returns_normally_during_healthy_long_interval_sampling(self):
         board = Board(['60000000', '0xB0119E08'], eof_at=10**12 + 10**9).run()
         self.assertEqual(board.exit_code, 0)

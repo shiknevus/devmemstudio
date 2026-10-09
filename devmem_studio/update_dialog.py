@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFrame, QCheck
 
 from . import __version__, updater
 from .widgets import label, button, row, restyle, Worker
+from .window_state import ManagedDialog
 
 
 def _megabytes(value):
     return f"{value / 1024 / 1024:.1f} MB"
 
 
-class UpdateDialog(QDialog):
+class UpdateDialog(ManagedDialog):
     install_requested = Signal(object)
     preferences_changed = Signal(bool)
 
@@ -183,11 +184,7 @@ class UpdateDialog(QDialog):
             self.present(activate=False)
 
     def present(self, activate=True):
-        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)   # show() alone keeps a minimized window hidden
-        self.show()
-        if activate:
-            self.raise_()
-            self.activateWindow()
+        super().present(activate)
 
     def take_action(self):
         if self.busy:

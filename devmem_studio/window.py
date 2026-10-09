@@ -34,6 +34,7 @@ from .monitor import MonitorDialog
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
+from .window_state import WindowStateCoordinator
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
                       IpAddressField, ResizeAwareWidget, TerminalView, LinkLabel)
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         self.connected = False
         self._busy = False
         self._closing = False
+        self._window_states = WindowStateCoordinator(self)
         self._updating = False
         self._active_worker = None
         self._task_callback = None
@@ -1971,9 +1973,10 @@ class MainWindow(QMainWindow):
         # Commands and the independent log stream do not depend on register addresses.
         # Terminal input lives in the console itself; availability follows the source:
         # serial views need the serial link, everything else rides the SSH session.
-        for control in (self.reboot_button, self.bit_upload_button, self.bit_rollback_button,
+        for control in (self.bit_upload_button, self.bit_rollback_button,
                         self.log_download_button):
             control.setEnabled(self.connected and not self._busy and not self._closing)
+        self.reboot_button.setEnabled(self._reboot_channel() is not None)
         for control in (self.host, self.port, self.user, self.password, self.remember):
             control.setEnabled(not self.connected and not self._busy)
         # Serial side is fully independent: its fields follow _serial_busy only,
@@ -2352,12 +2355,7 @@ class MainWindow(QMainWindow):
             self.bit_pack_dialog = BitPackDialog(self, directory, self.cfg.get("bitpack_settings"))
             self.bit_pack_dialog.settings_changed.connect(self._remember_bitpack_settings)
             self.bit_pack_dialog.job_finished.connect(self._bit_pack_job_finished)
-        if self.bit_pack_dialog.isMinimized():
-            self.bit_pack_dialog.showNormal()
-        else:
-            self.bit_pack_dialog.show()
-        self.bit_pack_dialog.raise_()
-        self.bit_pack_dialog.activateWindow()
+        self.bit_pack_dialog.present()
 
     def open_monitor(self):
         if self._closing or not self.regs or not getattr(self, "address_valid", False):
@@ -2369,12 +2367,7 @@ class MainWindow(QMainWindow):
             self.monitor_dialog.interval_changed.connect(self._remember_monitor_interval)
             self.monitor_dialog.settings_changed.connect(self._remember_monitor_settings)
         self._sync_monitor(preselect=True)
-        if self.monitor_dialog.isMinimized():
-            self.monitor_dialog.showNormal()
-        else:
-            self.monitor_dialog.show()
-        self.monitor_dialog.raise_()
-        self.monitor_dialog.activateWindow()
+        self.monitor_dialog.present()
 
     def _sync_monitor(self, preselect=False):
         """Offer the current component's registers; a running monitor keeps its own list."""
@@ -2414,12 +2407,7 @@ class MainWindow(QMainWindow):
             self.bit_dialog.upload_requested.connect(self._start_bit_upload)
             self.bit_dialog.remote_dir_changed.connect(self._select_bit_dir)
             self.bit_dialog.local_dir_changed.connect(self._remember_bit_local_dir)
-        if self.bit_dialog.isMinimized():
-            self.bit_dialog.showNormal()
-        else:
-            self.bit_dialog.show()
-        self.bit_dialog.raise_()
-        self.bit_dialog.activateWindow()
+        self.bit_dialog.present()
         self._discover_bit_dirs()
 
     def _bit_dir_combos(self):
@@ -2556,12 +2544,7 @@ class MainWindow(QMainWindow):
             self.bit_rollback_dialog.rollback_requested.connect(self._start_bit_rollback)
             self.bit_rollback_dialog.remote_dir_changed.connect(self._bit_rollback_dir_changed)
         self.bit_rollback_dialog.set_reset()
-        if self.bit_rollback_dialog.isMinimized():
-            self.bit_rollback_dialog.showNormal()
-        else:
-            self.bit_rollback_dialog.show()
-        self.bit_rollback_dialog.raise_()
-        self.bit_rollback_dialog.activateWindow()
+        self.bit_rollback_dialog.present()
         self._refresh_bit_backups()
         self._discover_bit_dirs()
 
@@ -3070,14 +3053,43 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self._completion_workers.discard(worker))
         self.pool.start(worker)
 
+    def _reboot_channel(self):
+        if self._closing:
+            return None
+        serial_ready = self.serial_connected and self.serial.alive and not self._serial_busy
+        if serial_ready and (self.console_source == "com" or not self.connected):
+            return "serial"
+        if self.connected and not self._busy:
+            return "ssh"
+        return None
+
     def reboot(self):
-        if not self.connected or self._busy:
+        channel = self._reboot_channel()
+        if channel is None:
             return
-        self.poll_check.setChecked(False)
-        answer = QMessageBox.question(self, "重启设备", "确认向当前设备发送 reboot？重启后需要重新连接。",
+        target = (f"串口 {self._serial_device or self.serial.port}" if channel == "serial"
+                  else f"SSH {self.host.text().strip()}")
+        after = "串口将保持连接以接收启动日志。" if channel == "serial" else "重启后需要重新连接 SSH。"
+        answer = QMessageBox.question(self, "重启设备", f"确认通过{target}发送 reboot？{after}",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
+        if channel == "serial":
+            if not (self.serial_connected and self.serial.alive) or self._serial_busy:
+                self._status("串口已断开，reboot 未发送。")
+                return
+            try:
+                self.serial.send(b"reboot\r")
+            except CommandError as exc:
+                self.append_log("ERROR", f"串口 reboot 发送失败：{exc}")
+                return
+            self.poll_check.setChecked(False)
+            self.append_log("SYSTEM", f"reboot 命令已通过{target}发送，串口保持连接以接收启动日志。")
+            return
+        if not self.connected or self._busy:
+            self._status("SSH 当前不可用，reboot 未发送。")
+            return
+        self.poll_check.setChecked(False)
         def task(progress):
             try:
                 self.session.run("reboot", timeout=3)

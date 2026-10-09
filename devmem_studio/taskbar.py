@@ -11,6 +11,24 @@ _IID_PROPERTY_STORE = "{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}"
 _VT_LPWSTR = 31
 
 
+def ensure_taskbar_window(hwnd):
+    """Owned application windows minimize to the taskbar, without an iconic desktop frame."""
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    get_style, set_style = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
+    get_style.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_style.restype = ctypes.c_ssize_t
+    set_style.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+    set_style.restype = ctypes.c_ssize_t
+    current = get_style(wintypes.HWND(hwnd), -20)   # GWL_EXSTYLE
+    desired = (current | 0x00040000) & ~0x00000080   # WS_EX_APPWINDOW, not WS_EX_TOOLWINDOW
+    if desired != current:
+        ctypes.set_last_error(0)
+        previous = set_style(wintypes.HWND(hwnd), -20, desired)
+        if previous == 0 and ctypes.get_last_error():
+            return False
+    return True
+
+
 class _Guid(ctypes.Structure):
     _fields_ = [("data1", wintypes.DWORD), ("data2", wintypes.WORD), ("data3", wintypes.WORD),
                 ("data4", ctypes.c_ubyte * 8)]

@@ -2,6 +2,7 @@
 """Register monitor: a few registers sampled on the board and plotted against time."""
 from array import array
 from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 import copy
 import csv
 from datetime import datetime
@@ -9,17 +10,18 @@ import math
 import threading
 import time
 
-from PySide6.QtCore import Qt, QEvent, QObject, QPointF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxLayout, QVBoxLayout, QSplitter,
                                QListWidget, QListWidgetItem,
                                QLineEdit, QSpinBox, QCheckBox, QFileDialog, QSizePolicy,
-                               QStyledItemDelegate, QStyle)
+                               QScrollArea, QStyledItemDelegate, QStyle)
 
 from .core import (MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_STALE_TIMEOUT_S,
                    normalize_monitor_settings, parse_addr)
 from .theme import icon
 from .widgets import ElidedLabel, label, button, row, restyle, Worker
+from .window_state import ManagedDialog
 
 SERIES_COLORS = ("#2463DC", "#168578", "#B57518", "#C44848", "#7A4FC4", "#1F8FB3", "#6E7F1F", "#C2477F")
 SAMPLE_LIMIT = 200_000   # per run; the oldest quarter is dropped beyond it
@@ -139,7 +141,8 @@ class MonitorPlot(QWidget):
     zoom_changed = Signal(float)
     markers_changed = Signal(object)
     lane_clicked = Signal(int)
-    LABEL_WIDTH = 220
+    LABEL_WIDTH = 260
+    LANE_MIN_HEIGHT = 88
     AXIS_HEIGHT = 26
     MIN_ZOOM = 0.25
     MAX_ZOOM = 64.0
@@ -160,22 +163,57 @@ class MonitorPlot(QWidget):
         self._drag_marker = None
         self._trace_cache = {}
         self._cache_key = None
+        self._scene_cache = None
+        self._scene_key = None
+        self._scene_range = None
+        self._scene_transform = None
+        self._scene_revision = None
+        self._scene_rect = None
+        self._frame_count = 0
+        self._lane_scenes = OrderedDict()
+        self._frame_created = 0.
+        self._frame_render_ms = 0.
+        self._scrolling = False
+        self._scroll_idle = QTimer(self)
+        self._scroll_idle.setSingleShot(True)
+        self._scroll_idle.setInterval(120)
+        self._scroll_idle.timeout.connect(self._scroll_finished)
+        self._prepared_frame = None
+        self._prepare_timer = QTimer(self)
+        self._prepare_timer.setSingleShot(True)
+        self._prepare_timer.timeout.connect(self._prepare_one_lane)
+        self._mouse_repaint = False
+        self._data_refresh_requested = False
+        self._hold_display = False   # keep the drawn time axis for the click that placed a marker
+        self._drag_moved = False
+        self.axis_view = None   # pinned footer; when set, the axis is not drawn inside the scrolling chart
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setMouseTracking(True)
         self.setMinimumSize(420, 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setToolTip("单击图线依次放置 A/B 标记，拖动标记调整位置，右键清除标记。\n"
-                        "单击左侧寄存器名称高亮该曲线，并在列表中定位。\n"
-                        "按住 Ctrl 并滚动鼠标滚轮，以鼠标位置为中心缩放时间轴；点击 Zoom 查看全局图表。")
+        self.setAccessibleDescription("单击图线放置 A/B 标记，拖动标记调整位置，右键清除标记。"
+                                      "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴。")
 
     def set_series(self, buffer, names, offsets=()):
         self.clear_markers()
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
+        self._hover = None
         self._view_range = None
         self.offsets = list(offsets) if offsets else [None] * len(self.names)
-        self.setMinimumHeight(max(220, len(self.names) * 52 + max(0, len(self.names) - 1) * 8
-                                  + self.AXIS_HEIGHT + 6))
-        self.update()
+        self._scene_cache = None
+        self._scene_key = None
+        self._lane_scenes.clear()
+        self._prepare_timer.stop()
+        self._prepared_frame = None
+        self._scroll_idle.stop()
+        self._scrolling = False
+        self._hold_display = False
+        self._drag_moved = False
+        self.setMinimumHeight(max(220, len(self.names) * self.LANE_MIN_HEIGHT + max(0, len(self.names) - 1) * 8
+                                  + self._axis_reserve() + 6))
+        self._request_paint()
 
     def time_range(self):
         if self._view_range is not None:
@@ -204,7 +242,7 @@ class MonitorPlot(QWidget):
         if factor != self.zoom_factor:
             self.zoom_factor = factor
             self.zoom_changed.emit(factor)
-        self.update()
+        self._request_paint()
 
     def zoom(self, steps, anchor_x=None):
         self.set_zoom(self.zoom_factor * self.ZOOM_STEP ** max(-32, min(32, steps)), anchor_x)
@@ -220,12 +258,33 @@ class MonitorPlot(QWidget):
                 return
         super().wheelEvent(event)
 
+    def _axis_reserve(self):
+        return 0 if self.axis_view is not None else self.AXIS_HEIGHT
+
     def lanes(self):
         count = max(1, len(self.names))
-        top, bottom, gap = 6.0, self.height() - self.AXIS_HEIGHT, 8.0
+        top, bottom, gap = 6.0, self.height() - self._axis_reserve(), 8.0
         height = max(8.0, (bottom - top - gap * (count - 1)) / count)
         left, right = float(self.LABEL_WIDTH), self.width() - 12.0
         return [QRectF(left, top + i * (height + gap), max(10.0, right - left), height) for i in range(count)]
+
+    def axis_band(self):
+        """Time axis pinned to the bottom of the visible chart, not the last lane."""
+        visible = self._visible_rect()
+        top = max(visible.top(), visible.bottom() - self.AXIS_HEIGHT)
+        return QRectF(visible.left(), top, visible.width(), max(0.0, visible.bottom() - top))
+
+    def _on_axis(self, position):
+        if self.axis_view is not None:
+            return False
+        band = self.axis_band()
+        return band.top() <= position.y() <= band.bottom() and band.left() <= position.x() <= band.right()
+
+    def _time_ticks(self, start, end):
+        span = max(end - start, 1e-9)
+        step = nice_step(span / max(1.0, self.lanes()[0].width() / 110))
+        ticks = [step * k for k in range(math.ceil(start / step), math.floor(end / step) + 1)]
+        return step, ticks
 
     @staticmethod
     def trace(times, values, first, start, span, rect, y_of, extrema=None, last=None):
@@ -260,56 +319,194 @@ class MonitorPlot(QWidget):
 
     def value_text(self, column, index):
         raw = int(self.buffer.raw[column][index])
-        return f"0x{raw:08X} · {to_signed(raw) if self.signed else raw}"
+        return f"0x{raw:X} · {to_signed(raw) if self.signed else raw}"
+
+    def _index_at(self, stamp, count=None):
+        """Read the held step value; a time outside retained data has no value."""
+        if stamp is None or self.buffer is None or not len(self.buffer):
+            return None
+        times = self.buffer.times
+        count = len(times) if count is None else min(count, len(times))
+        if not count or not times[0] <= stamp <= times[count - 1]:
+            return None
+        return bisect_right(times, stamp, hi=count) - 1
+
+    def _display_sample_count(self):
+        if self._scene_cache is not None and self._scene_transform == self._transform_key():
+            return self._frame_count
+        return len(self.buffer) if self.buffer is not None else 0
+
+    def _hover_index(self):
+        lane = self.lanes()[0]
+        if self._hover is None or not lane.left() <= self._hover <= lane.right():
+            return None
+        start, end = self._display_time_range()
+        return self._index_at(start + (self._hover - lane.left()) / lane.width() * (end - start),
+                              self._display_sample_count())
+
+    def header_values(self, column, indices=None):
+        if indices is None:
+            indices = (self._hover_index(), *(self._index_at(stamp) for stamp in self.markers))
+        return tuple(self.value_text(column, index) if index is not None else "—" for index in indices)
+
+    def readout_values(self, column, indices=None):
+        latest = self.value_text(column, len(self.buffer) - 1) if self.buffer is not None and len(self.buffer) else "—"
+        return (latest, *self.header_values(column, indices))
+
+    def _transform_key(self):
+        first = self.buffer.times[0] if self.buffer is not None and len(self.buffer) else None
+        return (id(self.buffer), self.zoom_factor, self._view_range, self.width(), self.height(), first)
+
+    def _display_time_range(self):
+        if self._scene_cache is not None and self._scene_transform == self._transform_key():
+            return self._scene_range
+        return self.time_range()
+
+    def refresh_data(self):
+        """A data frame takes priority over pointer-only repaint requests."""
+        self._data_refresh_requested = True
+        self._request_paint()
+
+    def _request_paint(self):
+        """Repaint the viewport only. The chart widget is much taller than the screen."""
+        area = self._visible_rect().toAlignedRect()
+        self.update(area if area.isValid() and not area.isEmpty() else self.rect())
+        if self.axis_view is not None:
+            self.axis_view.update()
+
+    def _begin_scroll(self):
+        self._scrolling = True
+        self._scroll_idle.start()
+        self._prepare_timer.stop()
+
+    def scroll_changed(self, _value=None):
+        self._begin_scroll()
+        self._request_paint()
+
+    def _scroll_finished(self):
+        self._scrolling = False
+        self._prepared_frame = None
+        self._prepare_timer.stop()
+        self.refresh_data()
 
     def header_texts(self, column):
         offset = self.offsets[column]
         address = f"+0x{offset:03X}" if offset is not None else "—"
-        value = self.value_text(column, len(self.buffer) - 1) if self.buffer is not None and len(self.buffer) else "—"
+        value = self.header_values(column)[0]
         return self.names[column], address, value
+
+    def _visible_rect(self):
+        viewport = self.parentWidget()
+        area = viewport.parentWidget() if viewport is not None else None
+        if isinstance(area, QScrollArea) and area.widget() is self:
+            origin = self.mapFrom(viewport, QPoint())
+            return QRectF(origin.x(), origin.y(), viewport.width(), viewport.height()).intersected(QRectF(self.rect()))
+        return QRectF(self.rect())
+
+    def marker_tag_rect(self, marker):
+        """One tag per marker, pinned to the top of the visible chart."""
+        start, end = self._display_time_range()
+        stamp = self.markers[marker]
+        if stamp is None or not start <= stamp <= end:
+            return None
+        lane = self.lanes()[0]
+        x = lane.left() + (stamp - start) / (end - start) * lane.width()
+        left = max(lane.left() + 2, min(x - 22 if marker == 0 else x + 4, lane.right() - 20))
+        box = QRectF(left, self._visible_rect().top() + 3, 18, 18)
+        if marker == 1:
+            other = self.marker_tag_rect(0)
+            if other is not None and other.intersects(box):
+                box.translate(0, 20)
+        return box
 
     def clear_markers(self):
         changed = any(stamp is not None for stamp in self.markers)
         self.markers = [None, None]
         self._next_marker = 0
         self._drag_marker = None
+        self._drag_moved = False
+        self._hold_display = False
         if changed:
             self.markers_changed.emit(tuple(self.markers))
-            self.update()
+            self._request_paint()
 
     def _set_marker(self, marker, stamp):
+        # The click was resolved against the frame on screen. Do not let this
+        # repaint slide the time axis forward, or the line lands off the cursor.
+        self._hold_display = True
+        self._mouse_repaint = True
         if self.markers[marker] != stamp:
             self.markers[marker] = stamp
             self.markers_changed.emit(tuple(self.markers))
-            self.update()
+        self._request_paint()
 
     def set_highlight(self, column):
         if column != self.highlight:
             self.highlight = column
-            self.update()
+            self._request_paint()
 
     def _in_plot(self, position):
-        return bool(self.names) and any(lane.contains(position) for lane in self.lanes())
+        return (bool(self.names) and not self._on_axis(position)
+                and any(lane.contains(position) for lane in self.lanes()))
 
     def _gutter_lane_at(self, position):
-        if not self.names or not 0 <= position.x() < self.LABEL_WIDTH:
+        if self._on_axis(position) or not self.names or not 0 <= position.x() < self.LABEL_WIDTH:
             return None
         return next((i for i, lane in enumerate(self.lanes()[:len(self.names)])
                      if lane.top() <= position.y() <= lane.bottom()), None)
 
     def _sample_time_at(self, position):
+        """Time under the pointer on the frame currently drawn.
+
+        The marker line uses this same mapping, so it stays on the click. A
+        sample within one pixel keeps that sample's time."""
         if not self._in_plot(position) or self.buffer is None or not len(self.buffer):
             return None
         lane = self.lanes()[0]
-        begin, end = self.time_range()
-        stamp = begin + (position.x() - lane.left()) / lane.width() * (end - begin)
-        times = self.buffer.times
-        if stamp < times[0] or stamp > times[-1]:
+        begin, end = self._display_time_range()
+        span = end - begin
+        if span <= 0 or lane.width() <= 0:
             return None
-        index = bisect_left(times, stamp)
-        if index and (index == len(times) or stamp - times[index - 1] <= times[index] - stamp):
+        stamp = begin + (position.x() - lane.left()) / lane.width() * span
+        times = self.buffer.times
+        count = self._display_sample_count()
+        if not count or stamp < times[0] or stamp > times[count - 1]:
+            return None
+        index = bisect_left(times, stamp, hi=count)
+        if index and (index == count or stamp - times[index - 1] <= times[index] - stamp):
             index -= 1
-        return times[index]
+        sample = times[index]
+        sample_x = lane.left() + (sample - begin) / span * lane.width()
+        if abs(sample_x - position.x()) <= 1.0:
+            return sample
+        return stamp
+
+    def _marker_line_x(self, marker):
+        begin, end = self._display_time_range()
+        stamp = self.markers[marker]
+        if stamp is None or end <= begin or not begin <= stamp <= end:
+            return None
+        lane = self.lanes()[0]
+        return lane.left() + (stamp - begin) / (end - begin) * lane.width()
+
+    def _marker_hit(self, position, slop=6):
+        """Marker under the pointer, using the drawn line and its tag."""
+        line_hit, best = None, slop
+        if self._in_plot(position):
+            for marker in range(len(self.markers)):
+                x = self._marker_line_x(marker)
+                if x is None:
+                    continue
+                distance = abs(x - position.x())
+                if distance <= best:
+                    best, line_hit = distance, marker
+        if line_hit is not None:
+            return line_hit, True
+        for marker in range(len(self.markers)):
+            box = self.marker_tag_rect(marker)
+            if box is not None and box.contains(position):
+                return marker, False
+        return None, False
 
     def mousePressEvent(self, event):
         position = event.position()
@@ -323,19 +520,26 @@ class MonitorPlot(QWidget):
                 self.lane_clicked.emit(lane)
                 event.accept()
                 return
+            hit, on_line = self._marker_hit(position)
             stamp = self._sample_time_at(position)
-            if stamp is not None:
-                lane = self.lanes()[0]
-                begin, end = self.time_range()
-                nearby = [(abs(lane.left() + (value - begin) / (end - begin) * lane.width() - position.x()), i)
-                          for i, value in enumerate(self.markers) if value is not None and begin <= value <= end]
-                closest = min(nearby, default=(math.inf, None))
-                if self.markers[self._next_marker] is None or closest[0] > 6:
-                    marker = self._next_marker
-                    self._next_marker = 1 - marker
+            # An empty A or B is still placed, even if the click is near the
+            # other line. A badge click selects that marker without moving it.
+            adjust = hit is not None and (not on_line or self.markers[self._next_marker] is not None)
+            if adjust:
+                self._drag_marker = hit
+                self._hold_display = True
+                self._drag_moved = on_line
+                if on_line and stamp is not None:
+                    self._set_marker(hit, stamp)
                 else:
-                    marker = closest[1]
+                    self._request_paint()
+                event.accept()
+                return
+            if stamp is not None:
+                marker = self._next_marker
+                self._next_marker = 1 - marker
                 self._drag_marker = marker
+                self._drag_moved = True
                 self._set_marker(marker, stamp)
                 event.accept()
                 return
@@ -343,16 +547,23 @@ class MonitorPlot(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_marker is not None:
-            stamp = self._sample_time_at(event.position())
-            if stamp is not None:
-                self._set_marker(self._drag_marker, stamp)
+            marker = self._drag_marker
+            moved = self._drag_moved
             self._drag_marker = None
+            self._drag_moved = False
+            stamp = self._sample_time_at(event.position()) if moved else None
+            if stamp is not None:
+                self._set_marker(marker, stamp)
+            else:
+                self._hold_display = False
+                self._request_paint()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
         self._hover = event.position().x()
+        self._mouse_repaint = True
         if self._gutter_lane_at(event.position()) is None:
             self.unsetCursor()
         else:
@@ -360,42 +571,39 @@ class MonitorPlot(QWidget):
         if self._drag_marker is not None and event.buttons() & Qt.LeftButton:
             stamp = self._sample_time_at(event.position())
             if stamp is not None:
+                self._drag_moved = True
                 self._set_marker(self._drag_marker, stamp)
-        self.update()
+        self._request_paint()
 
     def leaveEvent(self, event):
         self._hover = None
-        self.update()
+        self._mouse_repaint = True
+        self._request_paint()
+        super().leaveEvent(event)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#FFFFFF"))
-        if not self.names:
-            painter.setPen(QColor("#91A0AF"))
-            painter.drawText(self.rect(), Qt.AlignCenter, "在左侧勾选寄存器，点「开始监视」绘制曲线")
-            return
+    def _paint_chart(self, painter, exposed, start, end, frame=None):
         painter.setRenderHint(QPainter.Antialiasing)
-        start, end = self.time_range()
         span = end - start
         lanes = self.lanes()
         times = self.buffer.times if self.buffer else array("d")
-        first = max(0, bisect_right(times, start) - 1)   # the sample held into view
-        last = bisect_right(times, end)
-        cache_key = (id(self.buffer), self.buffer.revision if self.buffer else 0, self.signed,
+        count = self._frame_count if frame is None else frame["count"]
+        revision = self._scene_revision if frame is None else frame["revision"]
+        paths = self._trace_cache if frame is None else frame["paths"]
+        first = max(0, bisect_right(times, start, hi=count) - 1)   # the sample held into view
+        last = bisect_right(times, end, hi=count)
+        cache_key = (id(self.buffer), revision, self.signed,
                      start, end, self.width(), self.height())
-        if cache_key != self._cache_key:
+        if frame is None and cache_key != self._cache_key:
             self._cache_key = cache_key
             self._trace_cache.clear()
-        mono, small = QFont("Consolas", 9), QFont(self.font())
+        small = QFont(self.font())
         small.setPointSize(8)
-        step = nice_step(span / max(1.0, lanes[0].width() / 110))
-        ticks = [step * k for k in range(math.ceil(start / step), math.floor(end / step) + 1)]
-        hover = None
-        if self._hover is not None and times and lanes[0].left() <= self._hover <= lanes[0].right():
-            at = start + (self._hover - lanes[0].left()) / lanes[0].width() * span
-            if times[0] <= at <= times[-1]:
-                hover = bisect_right(times, at) - 1
+        step, ticks = self._time_ticks(start, end)
         for column, (lane, name) in enumerate(zip(lanes, self.names)):
+            # A long chart is scrolled inside the dialog. Only build and draw
+            # traces in the exposed region, rather than all 32 lanes each frame.
+            if lane.bottom() < exposed.top() or lane.top() > exposed.bottom():
+                continue
             color = QColor(SERIES_COLORS[column % len(SERIES_COLORS)])
             selected = column == self.highlight
             if selected:
@@ -421,18 +629,17 @@ class MonitorPlot(QWidget):
             painter.setPen(QColor("#23374A"))
             painter.setFont(self.font())
             text_rect = gutter.adjusted(10, 2, 0, 0)
-            header_name, header_address, header_value = self.header_texts(column)
+            header_name = self.names[column]
+            offset = self.offsets[column]
+            header_address = f"+0x{offset:03X}" if offset is not None else "—"
+            suffix = f"  {header_address}"
+            width = max(0, int(text_rect.width()) - painter.fontMetrics().horizontalAdvance(suffix))
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop,
-                             painter.fontMetrics().elidedText(header_name, Qt.ElideRight, int(text_rect.width())))
-            painter.setFont(mono)
-            painter.setPen(QColor("#718397"))
-            painter.drawText(text_rect.adjusted(0, 17, 0, 0), Qt.AlignLeft | Qt.AlignTop, header_address)
-            painter.setPen(color)
-            painter.drawText(text_rect.adjusted(0, 34, 0, 0), Qt.AlignLeft | Qt.AlignTop, header_value)
+                             painter.fontMetrics().elidedText(header_name, Qt.ElideRight, width) + suffix)
             values = self.buffer.column(column, self.signed) if self.buffer else array("d")
-            if not times or not last or start > times[-1]:
+            if not times or not last or start > times[count - 1]:
                 continue
-            cached = self._trace_cache.get(column)
+            cached = paths.get(column)
             low, high = (cached[:2] if cached else self.buffer.extrema(column, first, last, self.signed))
             data_low, data_high = low, high
             if high == low:
@@ -450,7 +657,7 @@ class MonitorPlot(QWidget):
                                  Qt.AlignRight | Qt.AlignBottom, f"{data_low:.0f}")
             painter.save()
             painter.setClipRect(lane.adjusted(1, 1, -1, -1))
-            trace_end = min(len(times), last + 1)   # next point completes the held step at the right edge
+            trace_end = min(count, last + 1)   # complete the held step, using this frame's samples
             dense = trace_end - first > lane.width() * 2
             # Dense envelopes repeatedly retrace a vertical pixel column. Qt's
             # antialiased wide-pen stroker is costly for these degenerate segments.
@@ -473,7 +680,7 @@ class MonitorPlot(QWidget):
                         at = bisect_left(failures, lo)
                         if at < len(failures) and failures[at] < hi:
                             marks.append(lane.left() + pixel + 0.5)
-                self._trace_cache[column] = (data_low, data_high, polygon, marks)
+                paths[column] = (data_low, data_high, polygon, marks)
             painter.drawPolyline(polygon)
             failures = self.buffer.failures[column]
             if failures:
@@ -481,36 +688,90 @@ class MonitorPlot(QWidget):
                 for x in marks:
                     painter.drawLine(QPointF(x, lane.bottom() - 6), QPointF(x, lane.bottom() - 1))
             painter.restore()
-            if hover is not None:
-                x = max(lane.left(), lane.left() + (times[hover] - start) / span * lane.width())
-                painter.setPen(QPen(QColor("#9CAFBD"), 1, Qt.DashLine))
-                painter.drawLine(QPointF(x, lane.top()), QPointF(x, lane.bottom()))
-                text = self.value_text(column, hover)
-                painter.setFont(mono)
-                width = painter.fontMetrics().horizontalAdvance(text) + 10
-                box = QRectF(x + 6 if x + 6 + width < lane.right() else x - 6 - width,
-                             lane.top() + 3, width, 17)
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor(255, 255, 255, 225))
-                painter.drawRoundedRect(box, 3, 3)
-                painter.setPen(color)
-                painter.drawText(box, Qt.AlignCenter, text)
-        axis = lanes[-1].bottom() + 4
+
+    def paint_pinned_axis(self, painter, band, start=None, end=None):
+        """Draw the shared time axis into ``band``. Tick x matches the chart lanes."""
+        if start is None:
+            start, end = self._display_time_range()
+        if band.height() < 8 or end <= start or not self.names:
+            return
+        painter.save()
+        painter.setClipRect(band)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRect(band)
+        painter.setPen(QPen(QColor("#DEE5EC"), 1))
+        painter.drawLine(QPointF(band.left(), band.top()), QPointF(band.right(), band.top()))
+        step, ticks = self._time_ticks(start, end)
+        small = QFont(self.font())
+        small.setPointSize(8)
         painter.setFont(small)
         painter.setPen(QColor("#718397"))
+        span = end - start
+        lane = self.lanes()[0]
+        scale = lane.width() / span
         for tick in ticks:
-            x = lanes[0].left() + (tick - start) / span * lanes[0].width()
-            painter.drawText(QRectF(x - 40, axis, 80, 16), Qt.AlignCenter, format_seconds(tick, step))
-        if hover is not None:
-            x = max(lanes[0].left(), lanes[0].left() + (times[hover] - start) / span * lanes[0].width())
-            text = format_seconds(times[hover], step / 100)
-            box = QRectF(x - 45, axis, 90, 16)
+            x = lane.left() + (tick - start) * scale
+            painter.drawLine(QPointF(x, band.top()), QPointF(x, band.top() + 5))
+            painter.drawText(QRectF(x - 40, band.top() + 6, 80, 16), Qt.AlignCenter, format_seconds(tick, step))
+        if self._hover is not None and lane.left() <= self._hover <= lane.right():
+            stamp = start + (self._hover - lane.left()) * span / lane.width()
+            box = QRectF(self._hover - 45, band.top() + 4, 90, 16)
+            painter.setFont(small)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor("#203747"))
             painter.drawRoundedRect(box, 3, 3)
             painter.setPen(QColor("#FFFFFF"))
-            painter.drawText(box, Qt.AlignCenter, text)
+            painter.drawText(box, Qt.AlignCenter, format_seconds(stamp, step / 100))
+        painter.restore()
+
+    def _paint_axis(self, painter, start, end):
+        """In-chart axis, used when the dialog has not pinned one below the viewport."""
+        if self.axis_view is not None:
+            return
+        self.paint_pinned_axis(painter, self.axis_band(), start, end)
+
+    def _paint_readouts(self, painter, exposed, start, end):
+        lanes = self.lanes()
+        span = end - start
+        hover = self._hover_index()
+        indices = (hover, *(self._index_at(stamp) for stamp in self.markers))
+        pointer = self._hover is not None and lanes[0].left() <= self._hover <= lanes[0].right()
+        mono = QFont("Consolas", 9)
         painter.setRenderHint(QPainter.Antialiasing)
+        for column, lane in enumerate(lanes[:len(self.names)]):
+            if lane.bottom() < exposed.top() or lane.top() > exposed.bottom():
+                continue
+            color = QColor(SERIES_COLORS[column % len(SERIES_COLORS)])
+            values = self.readout_values(column, indices)
+            text_rect = QRectF(18, lane.top() + 2, self.LABEL_WIDTH - 26, lane.height() - 2)
+            painter.setFont(mono)
+            for line, (caption, value) in enumerate(zip(("N", "S", "A", "B"), values)):
+                painter.setPen(color if line < 2 else QColor(("#B57518", "#7A4FC4")[line - 2]))
+                painter.drawText(text_rect.adjusted(0, 17 + line * 17, 0, 0), Qt.AlignLeft | Qt.AlignTop,
+                                 f"{caption}: {value}")
+            if not pointer:
+                continue
+            # The line follows the pointer continuously; only its value is
+            # quantized to the preceding sample on the step trace.
+            x = self._hover
+            painter.setPen(QPen(QColor("#9CAFBD"), 1, Qt.DashLine))
+            painter.drawLine(QPointF(x, lane.top()), QPointF(x, lane.bottom()))
+            text = values[1]
+            width = painter.fontMetrics().horizontalAdvance(text) + 10
+            height = 17
+            if width > lane.width() - 4:
+                parts = text.split(" · ")
+                text = "\n".join(parts)
+                width = max(painter.fontMetrics().horizontalAdvance(part) for part in parts) + 10
+                height = 34
+            left = x + 6 if x + 6 + width < lane.right() else x - 6 - width
+            box = QRectF(max(lane.left() + 2, left), lane.bottom() - height - 4, width, height)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 225))
+            painter.drawRoundedRect(box, 3, 3)
+            painter.setPen(color)
+            painter.drawText(box, Qt.AlignCenter, text)
         for marker, stamp in enumerate(self.markers):
             if stamp is None or not start <= stamp <= end:
                 continue
@@ -518,12 +779,193 @@ class MonitorPlot(QWidget):
             color = QColor(("#B57518", "#7A4FC4")[marker])
             painter.setPen(QPen(color, 1.4, Qt.DashLine))
             painter.drawLine(QPointF(x, lanes[0].top()), QPointF(x, lanes[-1].bottom()))
-            box = QRectF(min(x + 4, lanes[0].right() - 20), lanes[0].top() + 3, 18, 18)
+            box = self.marker_tag_rect(marker)
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(box, 3, 3)
             painter.setPen(QColor("#FFFFFF"))
             painter.drawText(box, Qt.AlignCenter, "AB"[marker])
+        self._paint_axis(painter, start, end)
+
+    def _scene_geometry(self):
+        return (self._transform_key(), self.signed, self.highlight, self.devicePixelRatioF(), self.font().toString())
+
+    def _scene_rows(self, exposed):
+        lanes = self.lanes()[:len(self.names)]
+        rows = []
+        for column, lane in enumerate(lanes):
+            top = 0. if column == 0 else lane.top() - 4
+            rect = QRectF(0, top, self.width(), lane.bottom() + 4 - top).toAlignedRect()
+            if rect.intersects(exposed):
+                rows.append((column, rect))
+        return rows
+
+    def _render_lane(self, rect, ratio, frame=None):
+        image = QPixmap(max(1, math.ceil(rect.width() * ratio)), max(1, math.ceil(rect.height() * ratio)))
+        image.setDevicePixelRatio(ratio)
+        image.fill(QColor("#FFFFFF"))
+        chart = QPainter(image)
+        try:
+            chart.translate(-rect.x(), -rect.y())
+            interval = self._scene_range if frame is None else frame["range"]
+            self._paint_chart(chart, rect, *interval, frame=frame)
+        finally:
+            chart.end()
+        return image
+
+    def _start_prepare(self, geometry, exposed, ratio):
+        if self._prepared_frame is not None:
+            return
+        self._prepared_frame = {"geometry": geometry, "revision": self.buffer.revision if self.buffer else 0,
+                                "count": len(self.buffer) if self.buffer is not None else 0,
+                                "range": self.time_range(), "ratio": ratio, "paths": {}, "tiles": OrderedDict(),
+                                "rows": self._scene_rows(exposed), "render_ms": 0.}
+        self._prepare_timer.start(0)
+
+    def _prepare_one_lane(self):
+        frame = self._prepared_frame
+        if frame is None:
+            return
+        if self._scrolling or self._drag_marker is not None or self._hold_display:
+            return
+        if not self.isVisible() or frame["geometry"] != self._scene_geometry():
+            self._prepared_frame = None
+            if self.isVisible():
+                self._request_paint()
+            return
+        column, rect = frame["rows"].pop(0)
+        started = time.perf_counter()
+        frame["tiles"][column] = self._render_lane(rect, frame["ratio"], frame)
+        frame["render_ms"] += (time.perf_counter() - started) * 1000
+        if frame["rows"]:
+            self._prepare_timer.start(0)
+            return
+        # Commit the whole frame together so curves and their time axis never
+        # mix snapshots. Input can run between the short per-lane render jobs.
+        self._scene_key = frame["geometry"]
+        self._scene_transform = frame["geometry"][0]
+        self._scene_revision = frame["revision"]
+        self._frame_count = frame["count"]
+        self._scene_range = frame["range"]
+        self._lane_scenes = frame["tiles"]
+        self._trace_cache = frame["paths"]
+        self._cache_key = (id(self.buffer), self._scene_revision, self.signed, *self._scene_range,
+                           self.width(), self.height())
+        self._frame_render_ms = frame["render_ms"]
+        self._frame_created = time.monotonic()
+        self._scene_rect = None
+        self._prepared_frame = None
+        self._request_paint()
+
+    def _compose_scene(self, exposed, ratio):
+        """Reuse individual lane images across changes to the vertical viewport."""
+        rows = self._scene_rows(exposed)
+        image = QPixmap(max(1, math.ceil(exposed.width() * ratio)), max(1, math.ceil(exposed.height() * ratio)))
+        image.setDevicePixelRatio(ratio)
+        image.fill(QColor("#FFFFFF"))
+        target = QPainter(image)
+        try:
+            target.translate(-exposed.x(), -exposed.y())
+            for column, rect in rows:
+                tile = self._lane_scenes.get(column)
+                if tile is None:
+                    tile = self._render_lane(rect, ratio)
+                    self._lane_scenes[column] = tile
+                self._lane_scenes.move_to_end(column)
+                target.drawPixmap(rect.topLeft(), tile)
+            # Keep the visible rows plus a small recent margin, rather than a
+            # full-height image of all 32 registers at high DPI.
+            while len(self._lane_scenes) > max(8, len(rows) + 2):
+                self._lane_scenes.popitem(last=False)
+        finally:
+            target.end()
+        return image
+
+    def _blit_lanes(self, painter, exposed, ratio):
+        """Draw cached lane images. Scrolling must not rebuild traces."""
+        rows = self._scene_rows(exposed)
+        for column, rect in rows:
+            tile = self._lane_scenes.get(column)
+            if tile is None or abs(tile.devicePixelRatio() - ratio) > 0.01:
+                tile = self._render_lane(rect, ratio)
+                self._lane_scenes[column] = tile
+            self._lane_scenes.move_to_end(column)
+            painter.drawPixmap(rect.topLeft(), tile)
+        if not self._scrolling:
+            while len(self._lane_scenes) > max(8, len(rows) + 2):
+                self._lane_scenes.popitem(last=False)
+
+    def _finish_paint_flags(self, freeze):
+        self._mouse_repaint = False
+        if self._drag_marker is None:
+            self._hold_display = False
+        if not freeze:
+            self._data_refresh_requested = False
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setClipRect(event.rect())
+        painter.fillRect(event.rect(), QColor("#FFFFFF"))
+        if not self.names:
+            painter.setPen(QColor("#91A0AF"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "在左侧勾选寄存器，点「开始监视」绘制曲线")
+            return
+        # Trace work stays inside the viewport. Rebuilding every lane on a scroll
+        # tick is what made the wheel feel late once sampling had started.
+        exposed = self._visible_rect().toAlignedRect()
+        if exposed.isEmpty():
+            exposed = QRectF(event.rect()).intersected(QRectF(self.rect())).toAlignedRect()
+        if exposed.isEmpty():
+            return
+        ratio = self.devicePixelRatioF()
+        transform = self._transform_key()
+        geometry = self._scene_geometry()
+        revision = self.buffer.revision if self.buffer is not None else 0
+        changed = revision != self._scene_revision
+        # A scroll or a marker click must keep the frame the pointer was aimed
+        # at. Rebuilding here both stalls the wheel and shifts A/B off the cursor.
+        freeze = self._scrolling or self._drag_marker is not None or self._hold_display
+        structural = self._scene_key is None or geometry != self._scene_key
+        update_data = (not freeze and changed and (not self._mouse_repaint or self._data_refresh_requested))
+        if not structural and update_data and self._frame_render_ms >= 12 and self.isVisible():
+            self._start_prepare(geometry, exposed, ratio)
+            update_data = False
+        new_frame = structural or update_data
+        use_blit = (not new_frame and self._lane_scenes and self._scene_range is not None
+                    and self._scene_transform == transform)
+        if use_blit:
+            self._blit_lanes(painter, exposed, ratio)
+            self._paint_readouts(painter, exposed, *self._scene_range)
+            self._finish_paint_flags(freeze)
+            self._sync_axis_view()
+            return
+        if new_frame:
+            self._prepare_timer.stop()
+            self._prepared_frame = None
+            self._scene_range = self.time_range()
+            self._scene_transform = transform
+            self._scene_key = geometry
+            self._scene_revision = revision
+            self._frame_count = len(self.buffer) if self.buffer is not None else 0
+            self._lane_scenes.clear()
+        if new_frame or exposed != self._scene_rect or self._scene_cache is None:
+            started = time.perf_counter()
+            self._scene_cache = self._compose_scene(exposed, ratio)
+            self._scene_rect = exposed
+            if new_frame:
+                self._frame_render_ms = (time.perf_counter() - started) * 1000
+                self._frame_created = time.monotonic()
+        if self._scene_cache is not None:
+            painter.drawPixmap(exposed.topLeft(), self._scene_cache)
+        if self._scene_range is not None:
+            self._paint_readouts(painter, exposed, *self._scene_range)
+        self._finish_paint_flags(freeze)
+        self._sync_axis_view()
+
+    def _sync_axis_view(self):
+        view = self.axis_view
+        if view is not None:
+            view.repaint()
 
 
 class _MonitorBridge(QObject):
@@ -566,7 +1008,34 @@ class _MonitorRegisterDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
-class MonitorDialog(QDialog):
+class _PinnedTimeAxis(QWidget):
+    """Time axis fixed under the scrolling chart so it stays visible with many lanes."""
+
+    def __init__(self, plot, parent=None):
+        super().__init__(parent)
+        self.plot = plot
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), QColor("#FFFFFF"))
+        self.plot.paint_pinned_axis(painter, QRectF(self.rect()))
+
+    def wheelEvent(self, event):
+        area = self.parentWidget()
+        if isinstance(area, QScrollArea) and not event.modifiers() & Qt.ControlModifier:
+            self.plot._begin_scroll()
+            area.verticalScrollBar().wheelEvent(event)
+            event.accept()
+            return
+        if event.modifiers() & Qt.ControlModifier:
+            self.plot.wheelEvent(event)
+            return
+        super().wheelEvent(event)
+
+
+class MonitorDialog(ManagedDialog):
     """Pick registers of the current component, sample them on the board and plot them."""
     interval_changed = Signal(int)
     settings_changed = Signal(dict)
@@ -699,7 +1168,24 @@ class MonitorDialog(QDialog):
         # Toolbar: view options on the left, data actions on the right; markers sit under the chart.
         main.addLayout(row(self.zoom_button, self.zoom_label, self.signed_check, 1,
                            self.clear_button, self.export_button, spacing=8))
-        main.addWidget(self.plot, 1)
+        self.plot_scroll = QScrollArea()
+        self.plot_scroll.setFrameShape(QFrame.NoFrame)
+        self.plot_scroll.setWidgetResizable(True)
+        self.plot_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.plot_scroll.setMinimumSize(self.plot.minimumWidth(), 220)
+        self.plot_scroll.setWidget(self.plot)
+        self.plot_scroll.setViewportMargins(0, 0, 0, self.plot.AXIS_HEIGHT)
+        self.axis_footer = _PinnedTimeAxis(self.plot, self.plot_scroll)
+        self.plot.axis_view = self.axis_footer
+        self.plot.installEventFilter(self)
+        self.plot_scroll.installEventFilter(self)
+        self.plot_scroll.viewport().installEventFilter(self)
+        # Tags are pinned to the viewport, so a scroll still repaints that strip.
+        # The plot only blits cached lanes; it does not rebuild traces mid-gesture.
+        self.plot_scroll.verticalScrollBar().valueChanged.connect(self.plot.scroll_changed)
+        self.plot_scroll.verticalScrollBar().rangeChanged.connect(lambda *_: self._position_axis_footer())
+        main.addWidget(self.plot_scroll, 1)
+        self._position_axis_footer()
         markers = row(self.marker_label, self.clear_markers_button, spacing=8)
         markers.setStretchFactor(self.marker_label, 1)
         main.addLayout(markers)
@@ -740,6 +1226,14 @@ class MonitorDialog(QDialog):
             side = self.splitter.widget(0)
             if side is not None:
                 side.setMaximumWidth(max(side.minimumWidth(), self.width() // 2))
+        if hasattr(self, "axis_footer"):
+            self._position_axis_footer()
+
+    def _position_axis_footer(self):
+        viewport = self.plot_scroll.viewport()
+        geo = viewport.geometry()
+        self.axis_footer.setGeometry(geo.x(), geo.bottom() + 1, viewport.width(), self.plot.AXIS_HEIGHT)
+        self.axis_footer.raise_()
 
     # -- register list -------------------------------------------------------------------
     def set_registers(self, title, registers, preselect=(), key=None, kind=None):
@@ -817,6 +1311,16 @@ class MonitorDialog(QDialog):
             self.settings_changed.emit(copy.deepcopy(self.settings))
 
     def eventFilter(self, watched, event):
+        if (event.type() == QEvent.Wheel and watched is getattr(self, "plot", None)
+                and not event.modifiers() & Qt.ControlModifier):
+            # Mark the gesture before the scrollbar paints, so that paint cannot
+            # rebuild the live chart on the same turn.
+            self.plot._begin_scroll()
+            self.plot_scroll.verticalScrollBar().wheelEvent(event)
+            return event.isAccepted()
+        scroll = getattr(self, "plot_scroll", None)
+        if event.type() == QEvent.Resize and scroll is not None and watched in (scroll, scroll.viewport()):
+            self._position_axis_footer()
         if (watched is self.list.viewport() and event.type() == QEvent.MouseButtonPress
                 and event.button() == Qt.LeftButton):
             item = self.list.itemAt(event.position().toPoint())
@@ -829,6 +1333,12 @@ class MonitorDialog(QDialog):
         self.list.itemDelegate().focus = address
         self.list.viewport().update()
         self._sync_highlight()
+        if self.plot.highlight is not None:
+            lane = self.plot.lanes()[self.plot.highlight]
+            margin = round(lane.height() / 2)
+            if self.plot.highlight == len(self.plot.names) - 1:
+                margin += self.plot.AXIS_HEIGHT
+            self.plot_scroll.ensureVisible(0, round(lane.center().y()), 0, margin)
 
     def _sync_highlight(self):
         address = self.list.itemDelegate().focus
@@ -1012,12 +1522,15 @@ class MonitorDialog(QDialog):
         return int(idle) if idle > max(MONITOR_STALE_TIMEOUT_S, self.interval_ms / 1000 * 3 + 0.5) else 0
 
     def _refresh(self):
+        # Status text asks the layout to recompute. Skip that while the wheel is moving.
+        if self.plot._scrolling:
+            return
         paused = self._paused_seconds()
         if self._dirty or paused != self._shown_pause:
             self._shown_pause = paused
             if self._dirty:
                 self._dirty = False
-                self.plot.update()
+                self.plot.refresh_data()
             if self.state != "running":
                 return
             if paused:

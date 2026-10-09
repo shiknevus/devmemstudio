@@ -13,9 +13,10 @@ from .core import write_command, DEFAULT_BIT_DIR
 from .widgets import label, button, row, ComboBox, Worker
 from .theme import icon
 from .log_view import LogView, LogSearchEdit
+from .window_state import ManagedDialog
 
 
-class BatchDialog(QDialog):
+class BatchDialog(ManagedDialog):
     def __init__(self, registers, parent=None):
         super().__init__(parent)
         self.setWindowTitle("批量写入预览")
@@ -70,7 +71,7 @@ class BatchDialog(QDialog):
         self.confirm.setEnabled(bool(self.selected()))
 
 
-class BoardLogDialog(QDialog):
+class BoardLogDialog(ManagedDialog):
     start_requested = Signal(str)
     stop_requested = Signal()
 
@@ -78,7 +79,7 @@ class BoardLogDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("打印日志")
         # A full window: minimize/maximize enabled, with its own taskbar entry.
-        self.setWindowFlags(Qt.Window)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         self.setWindowModality(Qt.NonModal)
         self._connected = True
         self._stream_state = "stopped"
@@ -247,7 +248,7 @@ class BoardLogDialog(QDialog):
         event.accept()
 
 
-class HostKeyDialog(QDialog):
+class HostKeyDialog(ManagedDialog):
     def __init__(self, change, parent=None):
         super().__init__(parent)
         self.setWindowTitle("确认板卡主机密钥")
@@ -323,7 +324,7 @@ class RemoteDirCombo(ComboBox):
             self.set_directories(known + extra, self.path_text())
 
 
-class FileChoiceDialog(QDialog):
+class FileChoiceDialog(ManagedDialog):
     """Pick one of several files found under a folder; the first row is preselected."""
 
     def __init__(self, title, hint, root, rows, headers, parent=None):
@@ -378,7 +379,7 @@ def file_time(mtime):
     return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
 
 
-class BitUploadDialog(QDialog):
+class BitUploadDialog(ManagedDialog):
     """Pick (file or folder scan), drop or paste a .bit file and send it to the board as sunny_fpga.bit."""
     upload_requested = Signal(str, str)  # local path, remote dir
     remote_dir_changed = Signal(str)
@@ -592,7 +593,7 @@ class BitUploadDialog(QDialog):
         self.upload_requested.emit(self._local_path, self.remote_dir.path_text())
 
 
-class BitRollbackDialog(QDialog):
+class BitRollbackDialog(ManagedDialog):
     """Pick a timestamped bit backup to restore as the live sunny_fpga.bit.
 
     The window lists board-side backups, then runs the rollback rename on a worker
@@ -714,7 +715,7 @@ class BitRollbackDialog(QDialog):
 
 
 def show_help(parent):
-    dialog = QDialog(parent)
+    dialog = ManagedDialog(parent)
     dialog.setWindowTitle("使用指南")
     dialog.resize(720, 520)
     layout = QVBoxLayout(dialog)
@@ -731,8 +732,8 @@ def show_help(parent):
     </style>
     <h3>1. 连接设备</h3><p>左栏「设备连接」卡片：SSH 行填写主板地址、端口、用户名和密码后点 <code>连接</code>；连接中按钮变红为 <code>取消</code>，可随时中止。serial 行选本机端口与波特率后点 <code>连接</code>，终端自动切到 <code>serial</code> 实时显示板卡输出。SSH 与 serial 相互独立、可同时在线，状态见各行圆点；寄存器读写始终走 SSH。串口线拔出会立即断开并提示。</p>
     <h3>2. 导入 top 并选择组件</h3><p>连接前先点 <code>导入 top</code> 选择文件夹，自动查找其下（含子目录）包含 ec_ 控件的 top，找到多个时列表选择。组件按类型分组列出，点击组件即加载其精确寄存器表并自动读取。基地址自动取自 <code>components_param.vh</code> 。</p>
-    <h3>3. 切换视图读写</h3><p>用 <code>基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部</code> 页签切换视图。选中行后右侧显示位状态与字段解析；双击待写入值或选预设，点 <code>写入并回读</code> 。<code>批量写入</code> 先预览再执行；<code>自动读取</code> 按所选间隔轮询。<code>监视</code> 勾选一个或多个寄存器（最多 8 个），在板端按采样间隔（最小 5 ms）连续采样并绘制随时间变化的曲线，悬停查看任一时刻的值，可导出 CSV。</p>
-    <h3>4. 打包 / 上传 / 回退 bit、日志与重启</h3><p><code>打包bit</code> 打开内置 Bit_pack 本地打包窗口，无需连接设备；选择或拖入 .bit、填写项目号与输出目录后生成 <code>项目号_bit_时间戳.zip</code>，ZIP 内为 <code>sunny_fpga.bit</code>，源文件保留。弹窗与工作台风格一致，重复点击复用窗口；取消或关闭窗口时先安全取消并清理任务，再关闭。<code>上传bit</code> 选择文件、选择文件夹（自动查找其下 .bit，多个时列表选择）或拖入 .bit，上传到下拉选择的板端目录（默认 <code>/run/media/sda</code>，自动列出板端 /run/media 下的挂载目录，记住上次使用的目录），完整传完后才备份板端旧文件并换入为 <code>sunny_fpga.bit</code>（传输失败原文件不变）；<code>回退bit</code> 列出所选板端目录下的时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 发送 reboot 并断开。</p>
+    <h3>3. 切换视图读写</h3><p>用 <code>基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部</code> 页签切换视图。选中行后右侧显示位状态与字段解析；双击待写入值或选预设，点 <code>写入并回读</code> 。<code>批量写入</code> 先预览再执行；<code>自动读取</code> 按所选间隔轮询。<code>监视</code> 勾选一个或多个寄存器（最多 32 个），在板端按采样间隔（最小 5 ms）连续采样并绘制随时间变化的曲线，滚轮上下浏览，点击左侧寄存器定位对应曲线，鼠标移动时显示跟随线与悬浮值，地址显示在名称后，表头常驻显示 N（最新值）、S（鼠标线读数）、A、B 的十六进制和十进制值；A/B 未设置时显示「—」，十六进制不补前导零。A/B 标识只在当前可见图表顶部显示一组，纵向滚动时保持在顶部。时间轴固定在图表可视区域底部，滚动时保持可见并随采样更新。可测量时间差、导出 CSV。图表不弹出使用说明气泡。</p>
+    <h3>4. 打包 / 上传 / 回退 bit、日志与重启</h3><p><code>打包bit</code> 打开内置 Bit_pack 本地打包窗口，无需连接设备；选择或拖入 .bit、填写项目号与输出目录后生成 <code>项目号_bit_时间戳.zip</code>，ZIP 内为 <code>sunny_fpga.bit</code>，源文件保留。弹窗与工作台风格一致，重复点击复用窗口；取消或关闭窗口时先安全取消并清理任务，再关闭。<code>上传bit</code> 选择文件、选择文件夹（自动查找其下 .bit，多个时列表选择）或拖入 .bit，上传到下拉选择的板端目录（默认 <code>/run/media/sda</code>，自动列出板端 /run/media 下的挂载目录，记住上次使用的目录），完整传完后才备份板端旧文件并换入为 <code>sunny_fpga.bit</code>（传输失败原文件不变）；<code>回退bit</code> 列出所选板端目录下的时间戳备份，选择版本后当前 bit 先备份、所选版本恢复为 <code>sunny_fpga.bit</code> ；<code>下载log</code> 把板端 <code>sunny.log</code> 保存到本地；<code>重启设备</code> 可通过 SSH 或串口发送 reboot：仅串口连接或终端来源为 serial 时使用串口并保持连接以接收启动日志；使用 SSH 时发送后断开 SSH，确认框明确显示发送通道。</p>
     <h3>5. 会话终端</h3><p>来源选 <code>ssh</code> 时在底部 <code>❯</code> 提示行输入命令，回车执行，<kbd>↑</kbd><kbd>↓</kbd> 翻历史。来源选 <code>serial</code> 时终端就是串口控制台：板卡自发的打印（启动日志、内核消息）实时显示，按键逐个直发板卡（Tab 补全、<kbd>↑</kbd><kbd>↓</kbd> 历史由板端 shell 处理）；进 U-Boot：板卡启动倒计时时点一下终端并按住 <kbd>Shift</kbd>+<kbd>7</kbd>，或先勾选工具栏 <code>U-Boot</code> 再重启/上电，软件会在倒计时出现时自动按住 &amp; 直到停在 U-Boot 提示符。无选中文字时 <kbd>Ctrl+C</kbd> 发送中断，有选中时复制；<kbd>Ctrl+V</kbd> 粘贴发送。<code>tail log</code> 与 <code>system</code> 视图只读。SSH 连上后自动后台打印板端 <code>sunny.log</code>，切到 <code>tail log</code> 查看；连接生命周期等软件消息在 <code>system</code> 。<code>查找日志</code> 随输随查并显示 当前/总数 计数，选中终端文字后按 <kbd>Ctrl+F</kbd> 自动填充；<code>换行</code> / <code>跟随</code> 控制显示；<code>导出</code> 保存当前终端内容，<code>清空</code> 清除当前终端。</p>
     <h3>6. 组件定义更新</h3><p>RTL 组件内部修改后，点 <code>导入组件</code> 选择该组件文件夹（或上级目录批量导入），重新解析寄存器定义，立即生效并保存到本机。</p>
     <h3>7. 快捷键</h3><p><kbd>F5</kbd> 读取全部 · <kbd>Ctrl+F</kbd> 查找日志 · <kbd>Ctrl+L</kbd> 终端聚焦 · <kbd>Ctrl+Shift+S</kbd> 导出快照 · <kbd>Esc</kbd> 停止后续操作。</p>
