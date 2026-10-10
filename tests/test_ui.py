@@ -21,6 +21,7 @@ from devmem_studio import top_import
 from devmem_studio.core import ConfigStore, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH, parse_addr
 from devmem_studio.theme import STYLE
 from devmem_studio.window import MainWindow
+from devmem_studio.dialogs import FileChoiceDialog
 
 IMPORT_TOP_FIXTURE = """// --- flow_comp_1 --A0001_测试轴---
 ec_slv_pul_axis
@@ -848,6 +849,134 @@ class StaleDeletedButton:
 
 
 class TopImportUiTests(UiTestBase):
+    def test_cancel_single_top_list_does_not_confirm_or_replace_the_current_top(self):
+        self.window.disconnect()
+        self.settle(lambda: not self.window._busy)
+        folder = Path(self.temp.name) / 'single-top'
+        folder.mkdir()
+        candidate = self.write_fixture_top('single-top/mix_top.sv')
+        original = self.window.cfg['top_path']
+        shown = []
+
+        def cancel(chooser):
+            self.assertEqual(chooser.table.rowCount(), 1)
+            self.assertEqual(chooser.selected_path(), str(candidate))
+            shown.append(chooser.selected_path())
+            return QDialog.Rejected
+
+        with patch.object(FileChoiceDialog, 'exec', new=cancel), \
+                patch('devmem_studio.window.QMessageBox.question') as confirm:
+            self.window.import_top_folder(str(folder))
+            self.settle(lambda: shown and not self.window._busy)
+        confirm.assert_not_called()
+        self.assertEqual(self.window.cfg['top_path'], original)
+
+    def test_cancel_single_component_list_skips_parsing_and_confirmation(self):
+        folder = Path(self.temp.name) / 'component'
+        folder.mkdir()
+        (folder / 'ps_rw_pl_reg_component.sv').write_text('module d; endmodule', encoding='utf-8')
+
+        def cancel(chooser):
+            self.assertEqual(chooser.table.rowCount(), 1)
+            self.assertEqual(chooser.table.item(0, 0).text(), 'component')
+            self.assertEqual(chooser.selected_paths(), [str(folder)])
+            return QDialog.Rejected
+
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(folder)), \
+                patch.object(FileChoiceDialog, 'exec', new=cancel), \
+                patch('devmem_studio.window.component_parse.parse_component_folder') as parse, \
+                patch('devmem_studio.window.QMessageBox.question') as confirm:
+            self.window.import_component()
+        parse.assert_not_called()
+        confirm.assert_not_called()
+
+    def test_component_list_imports_only_the_selected_folders(self):
+        root = Path(self.temp.name) / 'component-parent'
+        include = root / 'include_files'
+        include.mkdir(parents=True)
+        (include / 'reg_addr_pl.vh').write_text("`define EC_ID 9'h00C\n", encoding='utf-8')
+        for name in ('ec_1di', 'ec_1do'):
+            folder = root / name
+            folder.mkdir()
+            (folder / 'ps_rw_pl_reg_example.sv').write_text(
+                "module d(input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+                "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
+                " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding='utf-8')
+
+        def choose(chooser):
+            self.assertEqual(chooser.table.rowCount(), 2)
+            self.assertEqual(len(chooser.selected_paths()), 2)   # existing batch behavior is retained
+            chooser.table.clearSelection()
+            for row in range(chooser.table.rowCount()):
+                if Path(chooser.table.item(row, 0).data(Qt.UserRole)).name == 'ec_1do':
+                    chooser.table.selectRow(row)
+            self.assertEqual(chooser.selected_paths(), [str(root / 'ec_1do')])
+            return QDialog.Accepted
+
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(root)), \
+                patch.object(FileChoiceDialog, 'exec', new=choose), \
+                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
+                patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
+            self.window.import_component()
+        saved = Path(self.temp.name) / 'component_overrides'
+        self.assertTrue((saved / 'ec_1do.json').is_file())
+        self.assertFalse((saved / 'ec_1di.json').exists())
+
+    def test_import_pickers_remember_separate_folders_across_restart_and_cancel(self):
+        self.window.disconnect()
+        self.settle(lambda: not self.window._busy)
+        root = Path(self.temp.name) / 'top-search-root'
+        nested = root / 'rtl'
+        nested.mkdir(parents=True)
+        self.write_fixture_top('top-search-root/rtl/mix_top.sv')
+        old_top = self.window.cfg['top_path']
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(root)), \
+                patch.object(FileChoiceDialog, 'exec', return_value=QDialog.Accepted), \
+                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.No) as question:
+            self.window.import_button.click()
+            self.settle(lambda: question.called and not self.window._busy)
+        self.assertEqual(self.window.cfg['top_import_dir'], str(root))
+        self.assertEqual(self.window.cfg['top_path'], old_top)
+        component_folder = Path(self.temp.name) / 'component-search-root'
+        component_folder.mkdir()
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(component_folder)), \
+                patch('devmem_studio.window.QMessageBox.warning'):
+            self.window.import_component()
+        self.assertEqual(self.window.cfg['component_import_dir'], str(component_folder))
+        # Exercise the real settings save path in this isolated test directory.
+        self.window.persist = True
+        try:
+            self.assertTrue(self.window.save_settings())
+        finally:
+            self.window.persist = False
+        restored = MainWindow(ConfigStore(self.window.store.path), persist=False)
+        try:
+            with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value='') as pick:
+                restored.import_top_folder()
+                self.assertEqual(pick.call_args.args[2], str(root))
+                restored.import_component()
+                self.assertEqual(pick.call_args.args[2], str(component_folder))
+            self.assertEqual(restored.cfg['top_import_dir'], str(root))
+            self.assertEqual(restored.cfg['component_import_dir'], str(component_folder))
+        finally:
+            restored.close()
+            restored.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_import_pickers_fall_back_to_an_existing_top_directory(self):
+        self.window.disconnect()
+        self.settle(lambda: not self.window._busy)
+        self.window.cfg.update(top_import_dir=str(Path(self.temp.name) / 'gone-top-dir'),
+                               component_import_dir=str(Path(self.temp.name) / 'gone-component-dir'))
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value='') as pick:
+            for action in (self.window.import_top_folder, self.window.import_component):
+                action()
+                self.assertEqual(pick.call_args.args[2], self.temp.name)
+            self.window.cfg['top_path'] = str(Path(self.temp.name) / 'missing' / 'top.sv')
+            for action in (self.window.import_top_folder, self.window.import_component):
+                action()
+                self.assertEqual(pick.call_args.args[2], '')
+
     def test_import_populates_tree_and_selects_exact_registers(self):
         self.window.load_top(self.write_fixture_top())
         self.assertEqual(self.window.component_tree.topLevelItemCount(), 3)
@@ -1139,6 +1268,7 @@ class TopImportUiTests(UiTestBase):
         folder.mkdir()
         fresh = self.write_fixture_top("confirm/confirm-top.sv")
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)) as pick, \
+                patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No) as question:
             self.window.import_button.click()                               # straight to the folder picker
             self.settle(lambda: question.called)
@@ -1147,6 +1277,7 @@ class TopImportUiTests(UiTestBase):
             self.assertIn("主板卡死", question.call_args[0][2])          # explicit danger warning
             self.assertNotEqual(self.window.top_info["path"], str(fresh))
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
+                patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
             self.window.import_button.click()
             self.settle(lambda: self.window.top_info["path"] == str(fresh))
@@ -1209,10 +1340,12 @@ class TopImportUiTests(UiTestBase):
         include.mkdir(exist_ok=True)
         (include / "reg_addr_pl.vh").write_text("`define EC_ID 9'h00C\n", encoding="utf-8")
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
+                patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No):
             self.window.import_component()
         self.assertNotIn("imported_from", self.window.type_catalog["types"]["ec_1do"])
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
+                patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
                 patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
             self.window.import_component()
@@ -1238,6 +1371,7 @@ class TopImportUiTests(UiTestBase):
         (include / "reg_addr_pl.vh").write_text("`define EC_ID 9'h00C\n", encoding="utf-8")
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory",
                    return_value=str(Path(self.temp.name))), \
+                patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question",
                       return_value=QMessageBox.Yes) as question, \
                 patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
@@ -1368,12 +1502,19 @@ class TopImportUiTests(UiTestBase):
             self.window.import_top_folder(str(folder))
             self.settle(lambda: self.window.top_info["path"] == str(first))
         self.assertEqual(rows, ["2 个控件", "1 个控件"])   # most controls first; plain.v is not a top
-        # A folder with a single top goes straight to the confirmation.
-        with patch.object(FileChoiceDialog, "exec") as chooser, \
+        # A single result still shows its path and metadata before confirmation.
+        single_rows = []
+
+        def choose_single(chooser):
+            self.assertEqual(chooser.table.rowCount(), 1)
+            single_rows.append(chooser.selected_path())
+            return QDialog.Accepted
+
+        with patch.object(FileChoiceDialog, "exec", new=choose_single), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
             self.window.import_top_folder(str(folder / "sub"))
             self.settle(lambda: self.window.top_info["path"] == str(second))
-        chooser.assert_not_called()
+        self.assertEqual(single_rows, [str(second)])
         empty = Path(self.temp.name) / "empty"
         empty.mkdir()
         with patch("devmem_studio.window.QMessageBox.warning") as warning:

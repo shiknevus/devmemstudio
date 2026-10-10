@@ -212,11 +212,14 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "registers.json"
             path.write_text(json.dumps({"port": "wrong", "base": None,
-                                        "last_category": "missing", "write_cache": []}), encoding="utf-8")
+                                        "last_category": "missing", "write_cache": [],
+                                        "top_import_dir": {}, "component_import_dir": [1]}), encoding="utf-8")
             cfg = ConfigStore(path).load()
             self.assertEqual(cfg["port"], 22)
             self.assertEqual(cfg["last_category"], "axis")
             self.assertEqual(cfg["write_cache"], {})
+            self.assertEqual(cfg["top_import_dir"], "")
+            self.assertEqual(cfg["component_import_dir"], "")
             self.assertNotIn("connect_timeout", cfg)
 
 

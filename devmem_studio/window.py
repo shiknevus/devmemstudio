@@ -341,11 +341,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_connection_card())
         layout.addSpacing(10)
         self.import_button = button("导入 top", lambda: self.import_top_folder(), "demo", "import")
-        self.import_button.setToolTip("选择文件夹，自动查找其中（含子目录）的 emcc mix top（多个时列表选择），"
+        self.import_button.setToolTip("选择文件夹，自动查找其中（含子目录）的 emcc mix top，先列出再选择（只有一个也列出），"
                                       "按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
         self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
-        self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹导单个，"
-                                                "选上级目录（如 emcc_ctrl）批量导入其下全部组件。")
+        self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹或上级目录，"
+                                                "先列出组件（只有一个也列出），默认全选，也可只选择部分组件导入。")
         layout.addLayout(row(label("组件目录", "sideCaption"), 1, self.import_component_button, self.import_button))
         self.component_search = QLineEdit()
         self.component_search.setPlaceholderText("搜索设备名 / 类型 / 地址")
@@ -886,17 +886,26 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.load_top(Path(path))
 
+    def _import_start_dir(self, field):
+        """Use this picker's last folder, falling back to the loaded top's parent."""
+        top_path = self.cfg.get("top_path") or ""
+        for directory in (self.cfg.get(field) or "", Path(top_path).parent if top_path else ""):
+            if directory and Path(directory).is_dir():
+                return str(Path(directory).resolve())
+        return ""
+
     def import_top_folder(self, folder=None):
-        """Search a folder (and sub-folders) for mix-top files; several → list to choose from."""
+        """Search a folder (and sub-folders), then list every top candidate for selection."""
         if self._closing or self._busy or self.connected:
             return
         if not folder:
-            top_path = self.cfg.get("top_path") or ""
-            start = str(Path(top_path).parent) if top_path else ""
+            start = self._import_start_dir("top_import_dir")
             folder = QFileDialog.getExistingDirectory(self, "选择包含 top 文件的文件夹", start)
             if not folder:
                 return
         folder = Path(folder)
+        self.cfg["top_import_dir"] = str(folder.resolve())
+        self._schedule_save()
         self.append_log("SYSTEM", f"正在查找 {folder} 下的 top 文件…")
         self._run_task(lambda progress: top_import.find_top_files(folder),
                        lambda result: self._top_folder_scanned(folder, *result), "查找 top 文件")
@@ -905,9 +914,6 @@ class MainWindow(QMainWindow):
         partial = "" if complete else "（目录过深或文件过多，仅列出部分结果）"
         if not candidates:
             QMessageBox.warning(self, "未找到 top", f"{folder} 及其子目录下没有包含 ec_ 控件的 .sv/.v 文件{partial}。")
-            return
-        if len(candidates) == 1:
-            QTimer.singleShot(0, lambda: self._confirm_import_top(str(candidates[0]["path"])))
             return
         rows = [(item["path"], [f"{item['components']} 个控件", file_time(item["mtime"])]) for item in candidates]
         QTimer.singleShot(0, lambda: self._choose_top(folder, rows, partial))
@@ -923,15 +929,17 @@ class MainWindow(QMainWindow):
         """Re-parse component register definitions at runtime (RTL changed, no rebuild).
 
         A picked folder that carries ps_rw_pl_reg_* imports that one component; any other
-        folder is scanned recursively and imports every component found beneath it."""
+        folder is scanned recursively. Always list candidates before parsing the selection."""
         if self._closing or self._busy:
             return
-        start = self.cfg.get("top_path") or ""
+        start = self._import_start_dir("component_import_dir")
         folder = QFileDialog.getExistingDirectory(
             self, "选择组件文件夹，或上级目录（批量导入其下全部组件）", start)
         if not folder:
             return
         folder = Path(folder)
+        self.cfg["component_import_dir"] = str(folder.resolve())
+        self._schedule_save()
         if any(folder.glob("ps_rw_pl_reg_*.sv")) or any(folder.glob("ps_rw_pl_reg_*.v")):
             targets = [folder]
         else:
@@ -940,6 +948,19 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "导入组件失败",
                                     "所选目录及其子目录中未找到组件（需含 ps_rw_pl_reg_*.sv/.v）。")
                 return
+        rows = [(target, [self._canonical_type_key(target),
+                          ", ".join(sorted(path.name for pattern in ("ps_rw_pl_reg_*.sv", "ps_rw_pl_reg_*.v")
+                                          for path in target.glob(pattern)))]) for target in targets]
+        chooser = FileChoiceDialog(
+            "选择要导入的组件", f"在 {folder} 下找到 {len(rows)} 个组件目录。已默认全选，"
+            "可点击行取消或重新选择；点「选择」后解析并确认导入。", folder, rows,
+            ["类型", "寄存器定义文件"], self, multiple=True, path_header="组件目录")
+        if chooser.exec() != QDialog.Accepted:
+            return
+        selected = set(chooser.selected_paths())
+        targets = [target for target in targets if str(target) in selected]
+        if not targets:
+            return
         results, failures = [], []
         for target in targets:
             try:

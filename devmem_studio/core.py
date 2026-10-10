@@ -314,7 +314,8 @@ def default_config() -> dict:
     return {"host": "", "port": 22, "username": "root", "password": "",
             "base": "0xb0100000", "default_width": 32, "last_category": "axis",
             "last_address": "0x0800", "remember_password": False,
-            "top_path": "", "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
+            "top_path": "", "top_import_dir": "", "component_import_dir": "",
+            "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
             "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits",
             "bitpack_settings": {}, "bit_remote_dir": DEFAULT_BIT_DIR, "bit_remote_dirs": [DEFAULT_BIT_DIR],
@@ -402,7 +403,8 @@ class ConfigStore:
             except ValueError:
                 pass
         cfg["bit_remote_dirs"] = remember_dir(history or [DEFAULT_BIT_DIR], cfg["bit_remote_dir"])
-        cfg["bit_local_dir"] = cfg["bit_local_dir"] if isinstance(cfg.get("bit_local_dir"), str) else ""
+        for field in ("bit_local_dir", "top_import_dir", "component_import_dir"):
+            cfg[field] = cfg[field] if isinstance(cfg.get(field), str) else ""
         cfg["monitor_settings"] = normalize_monitor_settings(cfg.get("monitor_settings"))
         return cfg
 
