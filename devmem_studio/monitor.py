@@ -155,6 +155,7 @@ class MonitorPlot(QWidget):
         self.buffer = None
         self.names = []
         self.offsets = []
+        self.columns = []   # buffer column of each lane; None = no data
         self.zoom_factor = 1.0
         self._view_range = None
         self.signed = False
@@ -200,22 +201,38 @@ class MonitorPlot(QWidget):
         self.setAccessibleDescription("单击图表放置 A/B 标记，同一位置再次单击取消该标记，拖动标记调整位置，右键清除标记。"
                                       "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴。")
 
-    def set_series(self, buffer, names, offsets=()):
+    def set_series(self, buffer, names, offsets=(), columns=None):
         self.clear_markers()
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
         self._hover = None
         self._view_range = None
         self.offsets = list(offsets) if offsets else [None] * len(self.names)
-        self._scene_cache = None
-        self._scene_key = None
-        self._lane_scenes.clear()
-        self._prepare_timer.stop()
-        self._prepared_frame = None
+        self.columns = list(columns) if columns is not None else list(range(len(self.names)))
         self._scroll_idle.stop()
         self._scrolling = False
         self._hold_display = False
         self._drag_moved = False
+        self._relayout()
+
+    def set_lanes(self, buffer, names, offsets, columns):
+        """Lanes follow a new pick; markers and zoom stay while the data does."""
+        names, offsets, columns = list(names), list(offsets), list(columns)
+        if buffer is not self.buffer:
+            self.set_series(buffer, names, offsets, columns)
+        elif (names, offsets, columns) != (self.names, self.offsets, self.columns):
+            self.names, self.offsets, self.columns = names, offsets, columns
+            self.highlight = None
+            self._relayout()
+
+    def _relayout(self):
+        self._scene_cache = None
+        self._scene_key = None
+        self._lane_scenes.clear()
+        self._trace_cache.clear()
+        self._cache_key = None
+        self._prepare_timer.stop()
+        self._prepared_frame = None
         self.setMinimumHeight(max(220, len(self.names) * self.LANE_MIN_HEIGHT + max(0, len(self.names) - 1) * 8
                                   + self._axis_reserve() + 6))
         self._request_paint()
@@ -323,6 +340,9 @@ class MonitorPlot(QWidget):
         return points
 
     def value_text(self, column, index):
+        column = self.columns[column]
+        if column is None:
+            return "—"
         failures = self.buffer.failures[column]
         at = bisect_left(failures, index)
         if at < len(failures) and failures[at] == index:
@@ -678,11 +698,12 @@ class MonitorPlot(QWidget):
             width = max(0, int(text_rect.width()) - painter.fontMetrics().horizontalAdvance(suffix))
             painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop,
                              painter.fontMetrics().elidedText(header_name, Qt.ElideRight, width) + suffix)
-            values = self.buffer.column(column, self.signed) if self.buffer else array("d")
-            if not times or not last or start > times[count - 1]:
+            source = self.columns[column]
+            if source is None or not times or not last or start > times[count - 1]:
                 continue
+            values = self.buffer.column(source, self.signed)
             cached = paths.get(column)
-            low, high = (cached[:2] if cached else self.buffer.extrema(column, first, last, self.signed))
+            low, high = (cached[:2] if cached else self.buffer.extrema(source, first, last, self.signed))
             data_low, data_high = low, high
             if high == low:
                 low, high = low - 1, high + 1
@@ -710,10 +731,10 @@ class MonitorPlot(QWidget):
                 polygon, marks = cached[2:]
             else:
                 polygon = QPolygonF(self.trace(times, values, first, start, span, lane, y_of,
-                                              lambda lo, hi: self.buffer.extrema(column, lo, hi, self.signed),
+                                              lambda lo, hi: self.buffer.extrema(source, lo, hi, self.signed),
                                               last=trace_end))
                 marks = []
-                failures = self.buffer.failures[column]
+                failures = self.buffer.failures[source]
                 if failures:
                     width = max(1, int(lane.width()))
                     for pixel in range(width):
@@ -727,7 +748,7 @@ class MonitorPlot(QWidget):
                 painter.drawEllipse(polygon[0], 2, 2)
             else:
                 painter.drawPolyline(polygon)
-            failures = self.buffer.failures[column]
+            failures = self.buffer.failures[source]
             if failures:
                 painter.setPen(QPen(QColor("#C44848"), 1))
                 for x in marks:
@@ -1130,6 +1151,7 @@ class MonitorDialog(ManagedDialog):
         self.buffer = None
         self.monitored = []   # (name, address) of the current/last run
         self.monitored_offsets = []
+        self._shown = None    # idle lanes when they differ from the run, see shown
         self.sampler = ""     # board-side sampler of the current/last run, see SAMPLER_LABELS
         self._last_data = None   # monotonic time of the latest samples of this run
         self._shown_pause = 0
@@ -1349,6 +1371,7 @@ class MonitorDialog(ManagedDialog):
         self._trim_checks()
         self._filter_list()
         self._update_count()   # only user edits are remembered, so untouched instances keep following the type
+        self._show_selection()
         return True
 
     def _items(self):
@@ -1375,6 +1398,25 @@ class MonitorDialog(ManagedDialog):
             self._set_status(f"最多同时监视 {MONITOR_MAX_REGISTERS} 个寄存器。", "warn")
         self._update_count()
         self._remember_selection()
+        self._show_selection()
+
+    @property
+    def shown(self):
+        """(name, address) of the chart lanes: the run while active, else the checked registers."""
+        return self.monitored if self.state != "idle" or self._shown is None else self._shown
+
+    def _show_selection(self):
+        """Idle chart follows the checks; registers of the last run keep their data."""
+        if self.state != "idle":
+            return
+        chosen = self.checked_registers()
+        runs = {address: i for i, (_, address) in enumerate(self.monitored)} if self.buffer is not None else {}
+        columns = [runs.get(address) for _, address in chosen]
+        offsets = {item.data(Qt.UserRole): item.data(Qt.UserRole + 2) for item in self._items()}
+        self._shown = chosen
+        self.plot.set_lanes(self.buffer if any(c is not None for c in columns) else None,
+                            [name for name, _ in chosen], [offsets[address] for _, address in chosen], columns)
+        self._sync_highlight()
 
     def _remember_selection(self):
         if self._selection_key is not None:
@@ -1417,13 +1459,13 @@ class MonitorDialog(ManagedDialog):
 
     def _sync_highlight(self):
         address = self.list.itemDelegate().focus
-        addresses = [monitored for _, monitored in self.monitored]
+        addresses = [shown for _, shown in self.shown]
         self.plot.set_highlight(addresses.index(address) if address in addresses else None)
 
     def _lane_clicked(self, column):
-        if column >= len(self.monitored):
+        if column >= len(self.shown):
             return
-        address = self.monitored[column][1]
+        address = self.shown[column][1]
         item = next((item for item in self._items() if item.data(Qt.UserRole) == address), None)
         if item is not None and not item.isHidden():
             self.list.scrollToItem(item)
@@ -1448,6 +1490,7 @@ class MonitorDialog(ManagedDialog):
                     item.setCheckState(Qt.Unchecked)
         self._update_count()
         self._remember_selection()
+        self._show_selection()
         return True
 
     # -- run control ---------------------------------------------------------------------
@@ -1473,6 +1516,7 @@ class MonitorDialog(ManagedDialog):
         token = self._epoch
         self._stop = stop = threading.Event()
         self.monitored = chosen
+        self._shown = None
         offsets = {item.data(Qt.UserRole): item.data(Qt.UserRole + 2) for item in self._items()}
         self.monitored_offsets = [offsets[address] for _, address in chosen]
         self.sampler = ""
@@ -1509,8 +1553,11 @@ class MonitorDialog(ManagedDialog):
     def clear(self):
         if self.monitored:
             self.buffer = MonitorBuffer(len(self.monitored))
-            self.plot.set_series(self.buffer, [name for name, _ in self.monitored], self.monitored_offsets)
-            self._sync_highlight()
+            if self.state == "idle" and self._shown is not None:
+                self._show_selection()
+            else:
+                self.plot.set_series(self.buffer, [name for name, _ in self.monitored], self.monitored_offsets)
+                self._sync_highlight()
         self._set_status("已清空。" if self.state == "idle" else self._summary("监视中"))
 
     def _started(self, token, ok):
