@@ -276,7 +276,10 @@ class MonitorParser:
                     raise ValueError("采样方式在运行中改变，监视已停止，避免混用时间基准。")
                 self.sampler = kind
             elif self._stamp is not None and (line == "x" or re.fullmatch(r"0[xX][0-9a-fA-F]+", line)):
-                self._values.append(None if line == "x" else int(line, 16))
+                value = None if line == "x" else int(line, 16)
+                if value is not None and value > 0xFFFFFFFF:
+                    raise ValueError("板端返回的寄存器值超出 32 位范围，监视已停止。")
+                self._values.append(value)
                 if len(self._values) == self.count:
                     if self._last_stamp is not None and self._stamp < self._last_stamp:
                         raise ValueError("板端时间倒退，监视已停止，避免绘制错误时间轴。")

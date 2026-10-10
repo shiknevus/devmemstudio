@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -124,6 +125,12 @@ class SamplerScriptTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_value_outside_uint32_is_reported_before_it_reaches_the_ui(self):
+        parser = MonitorParser(1)
+        with self.assertRaisesRegex(ValueError, '32 位'):
+            parser.feed(b'@1000000000\n0x100000000\n')
+        self.assertEqual(parser.take(), [])
+
     def test_32_columns_survive_fragmented_stream_and_failed_reads(self):
         parser = MonitorParser(32)
         wire = b"#regmon 1\n@1000000000\n" + b"".join(
@@ -189,6 +196,26 @@ class CommandTests(unittest.TestCase):
 
 
 class BufferTests(unittest.TestCase):
+    def test_compact_storage_keeps_uint32_boundaries_and_signed_values_exact(self):
+        buffer = MonitorBuffer(1)
+        buffer.extend([(float(i), (value,)) for i, value in enumerate((0, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF))])
+        self.assertEqual(list(buffer.raw[0]), [0, 2147483647, 2147483648, 4294967295])
+        self.assertEqual(list(buffer.signed[0]), [0, 2147483647, -2147483648, -1])
+        self.assertEqual(buffer.raw[0].itemsize, 4)
+        self.assertEqual(buffer.signed[0].itemsize, 4)
+
+    def test_partial_cached_blocks_exclude_discarded_spikes_over_repeated_drops(self):
+        buffer = MonitorBuffer(1, limit=129)
+        for batch in range(15):
+            buffer.extend([(float(i), (0xFFFFFFFF if i % 67 == 0 else i,))
+                           for i in range(batch * 37, (batch + 1) * 37)])
+            for signed in (False, True):
+                values = buffer.column(0, signed)
+                for begin in range(0, len(values), 7):
+                    for end in range(begin + 1, len(values) + 1, 13):
+                        self.assertEqual(buffer.extrema(0, begin, end, signed),
+                                         (min(values[begin:end]), max(values[begin:end])))
+
     def test_cached_extrema_match_raw_and_signed_values_across_drop_boundaries(self):
         rng = random.Random(42)
         buffer = MonitorBuffer(2, limit=350)
@@ -224,6 +251,84 @@ class BufferTests(unittest.TestCase):
 
 
 class DialogTests(unittest.TestCase):
+    def test_background_export_keeps_ui_responsive_and_exports_a_stable_snapshot(self):
+        self.dialog.monitored = [('R0', 0x1000)]
+        self.dialog.buffer = MonitorBuffer(1, limit=8)
+        self.dialog.buffer.extend([(i*.01, (None if i == 2 else i,)) for i in range(8)])
+        self.dialog.plot.set_series(self.dialog.buffer, ['R0'])
+        entered, release = threading.Event(), threading.Event()
+        write = self.dialog._write_export
+        thread_ids = []
+
+        def blocked_write(request):
+            thread_ids.append(threading.get_ident())
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError('test did not release exporter')
+            return write(request)
+
+        with tempfile.TemporaryDirectory() as folder:
+            packed = Path(folder) / 'monitor.zip'
+            try:
+                with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=(str(packed), '')):
+                    with patch.object(self.dialog, '_write_export', side_effect=blocked_write):
+                        self.dialog.export_button.click()
+                        deadline = time.monotonic() + 3
+                        while not entered.is_set() and time.monotonic() < deadline:
+                            self.app.processEvents()
+                            time.sleep(.005)
+                        self.assertTrue(entered.is_set())
+                        self.assertNotEqual(thread_ids, [threading.get_ident()])
+                        self.assertFalse(self.dialog.export_button.isEnabled())
+                        # Real sampling and clear may change the original arrays
+                        # while the export worker is using its independent copy.
+                        self.dialog.buffer.extend([(1.0, (0xFFFFFFFF,))])
+                        self.dialog.clear()
+                        self.dialog.signed_check.setChecked(True)
+                        self.app.processEvents()
+                        self.assertEqual(len(self.dialog.buffer), 0)
+                        release.set()
+                        deadline = time.monotonic() + 3
+                        while self.dialog._exporting and time.monotonic() < deadline:
+                            self.app.processEvents()
+                            time.sleep(.005)
+                self.assertFalse(self.dialog._exporting)
+                self.assertTrue(self.dialog.export_button.isEnabled())
+                with ZipFile(packed) as archive:
+                    rows = archive.read('monitor.csv').decode('utf-8-sig').splitlines()
+                self.assertEqual(len(rows), 9)
+                self.assertEqual(rows[3], '0.020000,')
+                self.assertEqual(rows[-1], '0.070000,7')
+            finally:
+                release.set()
+                self.dialog.export_pool.waitForDone(5000)
+                self.app.processEvents()
+
+    def test_background_export_failure_restores_button_and_reports_error(self):
+        self.dialog.monitored = [('R0', 0x1000)]
+        self.dialog.buffer = MonitorBuffer(1)
+        self.dialog.buffer.extend([(0., (1,))])
+        with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=('monitor.zip', '')):
+            with patch.object(self.dialog, '_write_export', side_effect=OSError('disk full')):
+                self.dialog.export_data()
+                deadline = time.monotonic() + 3
+                while self.dialog._exporting and time.monotonic() < deadline:
+                    self.app.processEvents()
+                    time.sleep(.005)
+        self.assertFalse(self.dialog._exporting)
+        self.assertTrue(self.dialog.export_button.isEnabled())
+        self.assertIn('导出失败：disk full', self.dialog.status.text())
+
+    def test_live_search_filters_locked_rows_without_changing_sampling_selection(self):
+        self.dialog.set_registers('A', self.registers, [0x1000, 0x1004])
+        self.dialog._set_state('running')
+        self.assertTrue(self.dialog.search.isEnabled())
+        self.assertFalse(self.dialog.interval_spin.isEnabled())
+        self.dialog.search.setText('R1')
+        self.assertTrue(self.dialog.list.item(0).isHidden())
+        self.assertFalse(self.dialog.list.item(1).isHidden())
+        self.assertEqual(self.dialog.checked_addresses(), [0x1000, 0x1004])
+
     def test_zip_matches_csv_for_32_columns_failures_signed_values_and_dropped_samples(self):
         self.dialog.monitored = [(f'测试R{i}', 0x1000 + 4*i) for i in range(32)]
         self.dialog.buffer = MonitorBuffer(32, limit=8)
@@ -665,7 +770,7 @@ class DialogTests(unittest.TestCase):
         view = self.show_register_list()
         self.dialog.monitored = self.dialog.checked_registers()
         self.dialog.buffer = MonitorBuffer(2)
-        self.dialog.buffer.extend([(i * .01, (i, -i)) for i in range(50)])
+        self.dialog.buffer.extend([(i * .01, (i, (-i) & 0xFFFFFFFF)) for i in range(50)])
         self.dialog.plot.set_series(self.dialog.buffer, ["R0", "R2"], [0, 8])
         self.dialog._set_state("running")
         plot, delegate = self.dialog.plot, view.itemDelegate()
@@ -990,6 +1095,121 @@ class DialogTests(unittest.TestCase):
 
 
 class PlotTests(unittest.TestCase):
+    def test_repeated_click_toggles_one_marker_and_reuses_the_empty_slot(self):
+        plot = self.marker_plot()
+        try:
+            first = self.mark_position(plot, 2)
+            second = self.mark_position(plot, 7)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            self.assertEqual(plot.markers, [2., None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            self.assertEqual(plot.markers, [None, None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=second)
+            self.assertEqual(plot.markers, [2., 7.])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            self.assertEqual(plot.markers, [None, 7.])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=self.mark_position(plot, 4))
+            self.assertEqual(plot.markers, [4., 7.])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=second)
+            self.assertEqual(plot.markers, [4., None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=self.mark_position(plot, 4))
+            self.assertEqual(plot.markers, [None, None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=second)
+            self.assertEqual(plot.markers, [7., None])
+        finally:
+            plot.close()
+
+    def test_lane_gap_accepts_placement_toggling_and_marker_drag(self):
+        plot = self.marker_plot()
+        try:
+            lanes = plot.lanes()
+            gap_y = round((lanes[0].bottom() + lanes[1].top()) / 2)
+            first = QPoint(self.mark_position(plot, 2).x(), gap_y)
+            second = QPoint(self.mark_position(plot, 7).x(), gap_y)
+            self.assertTrue(plot._in_plot(QPointF(first)))
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            self.assertEqual(plot.markers, [2., None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            self.assertEqual(plot.markers, [None, None])
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=second)
+            QTest.mousePress(plot, Qt.LeftButton, pos=first)
+            target = QPoint(self.mark_position(plot, 4).x(), gap_y)
+            QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(target), QPointF(target),
+                                                     Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=target)
+            self.assertEqual(plot.markers, [4., 7.])
+        finally:
+            plot.close()
+
+    def test_marker_badge_click_keeps_its_value_and_small_pointer_jitter_still_toggles(self):
+        plot = self.marker_plot()
+        try:
+            first = self.mark_position(plot, 2)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=plot.marker_tag_rect(0).center().toPoint())
+            self.assertEqual(plot.markers, [2., None])
+            QTest.mousePress(plot, Qt.LeftButton, pos=first)
+            jitter = first + QPoint(0, 1)
+            QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(jitter), QPointF(jitter),
+                                                     Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=jitter)
+            self.assertEqual(plot.markers, [None, None])
+        finally:
+            plot.close()
+
+    def test_single_sample_has_a_visible_point_before_a_second_sample_arrives(self):
+        plot = MonitorPlot()
+        try:
+            plot.resize(900, 320)
+            buffer = MonitorBuffer(1)
+            buffer.extend([(0., (5,))])
+            plot.set_series(buffer, ['R0'])
+            image = plot.grab().toImage()
+            lane = plot.lanes()[0]
+            self.assertTrue(any(image.pixelColor(x, y).blue() > image.pixelColor(x, y).red() + 40
+                                for x in range(int(lane.left()) + 1, int(lane.left()) + 4)
+                                for y in range(int(lane.center().y()) - 3, int(lane.center().y()) + 4)))
+        finally:
+            plot.close()
+
+    def test_failed_readouts_do_not_present_the_previous_value_as_a_valid_read(self):
+        plot = MonitorPlot()
+        try:
+            buffer = MonitorBuffer(1)
+            buffer.extend([(0., (0xFFFFFFFF,)), (1., (None,)), (2., (None,))])
+            plot.set_series(buffer, ['R0'])
+            for signed in (False, True):
+                plot.signed = signed
+                self.assertEqual(plot.readout_values(0, (1, 0, 2)),
+                                 ('读取失败', '读取失败', '0xFFFFFFFF · -1' if signed else '0xFFFFFFFF · 4294967295', '读取失败'))
+        finally:
+            plot.close()
+
+    def test_new_samples_do_not_restart_a_partially_prepared_slow_frame(self):
+        plot = self.marker_plot()
+        try:
+            plot.grab()
+            plot._start_prepare(plot._scene_geometry(), QRectF(plot.rect()).toAlignedRect(), plot.devicePixelRatioF())
+            frame = plot._prepared_frame
+            plot._prepare_timer.stop()
+            plot._prepare_one_lane()
+            self.assertEqual(len(frame['rows']), 1)
+            plot.buffer.extend([(11., (5, 6))])
+            plot._start_prepare(plot._scene_geometry(), QRectF(plot.rect()).toAlignedRect(), plot.devicePixelRatioF())
+            self.assertIs(plot._prepared_frame, frame)
+            plot._prepare_timer.stop()
+            plot._prepare_one_lane()
+            self.assertIsNone(plot._prepared_frame)
+            self.assertEqual(plot._scene_revision, frame['revision'])
+            plot.refresh_data()
+            plot.repaint()
+            QTest.qWait(80)
+            self.assertEqual(plot._scene_revision, plot.buffer.revision)
+        finally:
+            plot.close()
+
     def test_live_pointer_uses_pixels_and_readouts_always_show_n_s_a_b(self):
         plot = MonitorPlot()
         plot.resize(900, 320)
@@ -1216,7 +1436,7 @@ class PlotTests(unittest.TestCase):
         finally:
             plot.close()
 
-    def test_pending_samples_do_not_shift_the_marker_under_the_pointer(self):
+    def test_pending_samples_toggle_the_marker_on_the_drawn_frame(self):
         plot = self.marker_plot()
         try:
             plot.grab()
@@ -1229,7 +1449,7 @@ class PlotTests(unittest.TestCase):
             x = round(lane.left() + (8.0 - begin) / (end - begin) * lane.width())
             QTest.mouseClick(plot, Qt.LeftButton, pos=QPoint(x, round(lane.center().y())))
             self.assertAlmostEqual(plot.markers[0], 2.0)
-            self.assertAlmostEqual(plot.markers[1], 8.0, delta=0.02)
+            self.assertIsNone(plot.markers[1])
         finally:
             plot.close()
 
