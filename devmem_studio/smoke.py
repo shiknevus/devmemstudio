@@ -11,7 +11,7 @@ import traceback
 import paramiko
 from PySide6.QtCore import Qt, QCoreApplication, QEvent
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QApplication, QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit
+from PySide6.QtWidgets import (QApplication, QDialog, QMessageBox, QScrollArea, QLineEdit, QPlainTextEdit)
 from unittest.mock import patch
 from . import bitpack, file_scan, top_import
 from .core import ConfigStore, DemoSession, HostKeyChangedError
@@ -229,6 +229,7 @@ def run_smoke(app, directory: Path):
             " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(directory)), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
+                patch("devmem_studio.window.FileChoiceDialog.exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.user_data_dir", return_value=directory):
             window.import_component()
         imported = window.type_catalog["types"]["ec_slv_pul_axis"]

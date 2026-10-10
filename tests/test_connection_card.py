@@ -32,7 +32,13 @@ class ConnectionCardTests(unittest.TestCase):
     def tearDown(self):
         if self.window is not None:
             self.window.close()
-            self.settle(lambda: not self.window._busy and not self.window._serial_busy)
+            # DemoSession connect auto-starts the sunny.log stream worker; under load it
+            # may outlive closeEvent, which then defers the close (file logger stays open).
+            self.settle(lambda: not self.window._busy and not self.window._serial_busy
+                        and not self.window._stream_workers)
+            self.window.close()   # now that async work drained, the deferred close completes
+            self.settle(lambda: not self.window._busy and not self.window._serial_busy
+                        and not self.window._stream_workers)
             self.window.deleteLater()
             self.app.processEvents()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)

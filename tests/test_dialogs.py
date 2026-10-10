@@ -7,10 +7,48 @@ import unittest
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtCore import Qt, QEvent  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QDialogButtonBox  # noqa: E402
 
-from devmem_studio.dialogs import BitUploadDialog, BitRollbackDialog  # noqa: E402
+from devmem_studio.dialogs import BitUploadDialog, BitRollbackDialog, FileChoiceDialog  # noqa: E402
+
+
+class FileChoiceDialogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_single_result_is_visible_and_selected(self):
+        root = Path(tempfile.gettempdir())
+        candidate = root / 'one-top.sv'
+        dialog = FileChoiceDialog('top', 'choose', root, [(candidate, ['2'])], ['components'])
+        try:
+            self.assertEqual(dialog.table.rowCount(), 1)
+            self.assertEqual(dialog.table.item(0, 0).text(), candidate.name)
+            self.assertEqual(dialog.selected_path(), str(candidate))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_multiple_selection_keeps_batch_default_and_disables_empty_acceptance(self):
+        root = Path(tempfile.gettempdir())
+        candidates = [root / 'component-a', root / 'component-b']
+        dialog = FileChoiceDialog('components', 'choose', root, [(path, []) for path in candidates], [],
+                                  multiple=True, path_header='component folder')
+        try:
+            self.assertEqual(dialog.selected_paths(), list(map(str, candidates)))
+            accept = dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
+            dialog.table.clearSelection()
+            self.assertEqual(dialog.selected_paths(), [])
+            self.assertFalse(accept.isEnabled())
+            dialog.table.selectRow(1)
+            self.assertEqual(dialog.selected_paths(), [str(candidates[1])])
+            self.assertTrue(accept.isEnabled())
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 class BitUploadDialogTests(unittest.TestCase):
