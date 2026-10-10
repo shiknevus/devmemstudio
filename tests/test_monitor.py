@@ -573,6 +573,7 @@ class DialogTests(unittest.TestCase):
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
         self.dialog.set_registers("32 registers", registers)
         self.dialog.monitored = [(reg["name"], reg["_address"]) for reg in registers]
+        self.dialog._shown = None   # as start() does
         buffer = MonitorBuffer(32)
         buffer.extend([(float(i), tuple(i + column for column in range(32))) for i in range(11)])
         self.dialog.buffer = buffer
@@ -790,6 +791,39 @@ class DialogTests(unittest.TestCase):
         self.dialog.stop()
         view.setCurrentRow(0)
         self.assertEqual((delegate.focus, plot.highlight), (0x1000, 0))
+
+    def test_idle_chart_follows_checks_and_keeps_last_run_data(self):
+        self.dialog.set_registers("A", self.registers, [0x1000, 0x1008])
+        plot = self.dialog.plot
+        self.assertEqual((plot.names, plot.offsets, plot.columns, plot.buffer), (["R0", "R2"], [0, 8], [None, None], None))
+        self.dialog.monitored = self.dialog.checked_registers()   # a finished run of R0 + R2
+        self.dialog._shown = None
+        self.dialog.buffer = buffer = MonitorBuffer(2)
+        buffer.extend([(i * .01, (i, 100 + i)) for i in range(50)])
+        plot.set_series(buffer, ["R0", "R2"], [0, 8])
+        plot.markers = [0.1, None]
+        self.dialog.focus_register(0x1008)
+        self.dialog.list.item(1).setCheckState(Qt.Checked)
+        self.assertEqual((plot.names, plot.columns), (["R0", "R1", "R2"], [0, None, 1]))
+        self.assertIs(plot.buffer, buffer)
+        self.assertEqual(plot.markers, [0.1, None])                    # same data keeps markers
+        self.assertEqual(plot.highlight, 2)
+        self.assertEqual(plot.readout_values(1)[0], "—")
+        self.assertEqual(plot.readout_values(2)[0], "0x95 · 149")
+        self.assertFalse(plot.grab().isNull())
+        self.dialog.list.item(0).setCheckState(Qt.Unchecked)
+        self.assertEqual((plot.names, plot.columns, plot.highlight), (["R1", "R2"], [None, 1], 1))
+        self.dialog._lane_clicked(0)
+        self.assertEqual(self.dialog.list.itemDelegate().focus, 0x1004)
+        self.dialog.list.item(2).setCheckState(Qt.Unchecked)
+        self.assertEqual((plot.names, plot.buffer), (["R1"], None))   # nothing of the run left
+        self.dialog.list.item(2).setCheckState(Qt.Checked)
+        self.assertIs(plot.buffer, buffer)
+        self.dialog.set_registers("B", [dict(reg, _address=reg["_address"] + 0x400) for reg in self.registers],
+                                  [0x1400], key="B")
+        self.assertEqual((plot.names, plot.columns, plot.buffer), (["R0"], [None], None))
+        self.dialog.clear_selection()
+        self.assertEqual(plot.names, [])
 
     def test_active_register_list_scrolls_without_changing_checks(self):
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(100)]
