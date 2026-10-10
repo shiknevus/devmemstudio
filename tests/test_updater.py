@@ -342,6 +342,39 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertEqual(dialog.status.property("state"), "ok")
         dialog.close()
 
+    def test_notes_and_title_render_centered(self):
+        """Release notes render centered, with equal left/right whitespace."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage, QPainter
+        from devmem_studio.update_dialog import UpdateDialog
+        dialog = UpdateDialog()
+        release = updater.parse_release(release_payload())
+        with patch.object(updater, "check_release", return_value=release):
+            dialog.check()
+            self.settle(dialog)
+        dialog.show()
+        self.drain()
+        self.assertEqual(dialog.notes_title.alignment() & Qt.AlignHorizontal_Mask, Qt.AlignHCenter)
+        document = dialog.notes.document()
+        block = document.begin()
+        while block.isValid():
+            self.assertEqual(block.blockFormat().alignment(), Qt.AlignHCenter, block.text())
+            block = block.next()
+        image = QImage(int(document.size().width()), int(document.size().height()), QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        document.drawContents(painter)
+        painter.end()
+        left = right = None
+        for y in range(0, image.height(), 2):
+            for x in range(0, image.width(), 2):
+                if image.pixelColor(x, y).alpha():
+                    left = x if left is None else min(left, x)
+                    right = x if right is None else max(right, x)
+        self.assertIsNotNone(left)
+        self.assertAlmostEqual(left, image.width() - 1 - right, delta=2)
+        dialog.close()
+
     def test_automatic_network_failure_stays_hidden(self):
         from devmem_studio.update_dialog import UpdateDialog
         dialog = UpdateDialog()

@@ -3,7 +3,7 @@ import shutil
 import threading
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QTextBrowser,
                                QProgressBar, QMessageBox, QWidget)
 
@@ -62,7 +62,10 @@ class UpdateDialog(ManagedDialog):
         notes = QVBoxLayout(notes_card)
         notes.setContentsMargins(18, 14, 10, 12)
         notes.setSpacing(8)
-        notes.addWidget(label("更新说明", "sectionTitle"))
+        notes_title = label("更新说明", "sectionTitle")
+        notes_title.setAlignment(Qt.AlignHCenter)
+        self.notes_title = notes_title
+        notes.addWidget(notes_title)
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(True)
         self.notes.document().setDocumentMargin(0)
@@ -168,6 +171,14 @@ class UpdateDialog(ManagedDialog):
         self._set_status("正在检查 GitHub 正式发布版本…")
         self._start(lambda cancel, progress: updater.check_release(cancel), self._checked)
 
+    def _center_notes(self):
+        """Center every block of the rendered release notes (heading, paragraphs, list items)."""
+        cursor = self.notes.textCursor()
+        cursor.select(QTextCursor.Document)
+        block_format = QTextBlockFormat()
+        block_format.setAlignment(Qt.AlignHCenter)
+        cursor.setBlockFormat(block_format)
+
     def _checked(self, release):
         self._checked_once = True
         self.release = release
@@ -180,6 +191,7 @@ class UpdateDialog(ManagedDialog):
             self.download = None
         self._set_status(f"发现新版本 {release.version}，可下载后重启升级。", "ok")
         self.notes.setMarkdown(release.notes)
+        self._center_notes()
         if self._automatic:
             self.present(activate=False)
 
