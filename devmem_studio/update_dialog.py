@@ -3,11 +3,13 @@ import shutil
 import threading
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QTextBlockFormat, QTextCursor
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QTextBlockFormat, QTextCharFormat,
+                           QTextCursor)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFrame, QCheckBox, QTextBrowser,
                                QProgressBar, QMessageBox, QWidget)
 
 from . import __version__, updater
+from .theme import COLORS
 from .widgets import label, button, row, restyle, Worker
 from .window_state import ManagedDialog
 
@@ -61,6 +63,9 @@ class UpdateDialog(ManagedDialog):
         notes_card.setObjectName("card")
         notes = QVBoxLayout(notes_card)
         notes.setContentsMargins(18, 14, 10, 12)
+        self._code_format = QTextCharFormat()
+        self._code_format.setFontFamilies(["Consolas", "monospace"])
+        self._code_format.setBackground(QColor(COLORS["alloy"]))
         notes.setSpacing(8)
         notes_title = label("更新说明", "sectionTitle")
         notes_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -171,13 +176,46 @@ class UpdateDialog(ManagedDialog):
         self._set_status("正在检查 GitHub 正式发布版本…")
         self._start(lambda cancel, progress: updater.check_release(cancel), self._checked)
 
-    def _center_notes(self):
-        """Center every block of the rendered release notes (heading, paragraphs, list items)."""
-        cursor = self.notes.textCursor()
-        cursor.select(QTextCursor.Document)
-        block_format = QTextBlockFormat()
-        block_format.setAlignment(Qt.AlignHCenter)
-        cursor.setBlockFormat(block_format)
+    def _style_notes(self):
+        """Left-aligned notes with a version / section / item hierarchy."""
+        document = self.notes.document()
+        document.setIndentWidth(16)
+        font = self.notes.font()   # theme sets px; char formats only take pt
+        base = font.pointSizeF() if font.pointSizeF() > 0 else font.pixelSize() * 72 / self.notes.logicalDpiY()
+        block = document.begin()
+        while block.isValid():
+            level = block.blockFormat().headingLevel()
+            fmt = block.blockFormat()
+            fmt.setAlignment(Qt.AlignLeft)
+            fmt.setLineHeight(145 if not level else 120, QTextBlockFormat.ProportionalHeight.value)
+            text = QTextCharFormat()   # fresh: markdown's FontSizeAdjustment would pin the size
+            if level == 1 or level == 2:
+                fmt.setTopMargin(0 if block == document.begin() else 22)
+                fmt.setBottomMargin(0)
+                text.setFontPointSize(base * 1.25)
+                text.setFontWeight(QFont.DemiBold)
+                text.setForeground(QColor(COLORS["blue"]))
+            elif level:
+                fmt.setTopMargin(10)
+                fmt.setBottomMargin(2)
+                text.setFontPointSize(base)
+                text.setFontWeight(QFont.DemiBold)
+                text.setForeground(QColor("#526D83"))
+            else:
+                fmt.setTopMargin(0)
+                fmt.setBottomMargin(3)
+            cursor = QTextCursor(block)
+            cursor.setBlockFormat(fmt)
+            if level:
+                cursor.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+                cursor.setCharFormat(text)
+            code = [(item.fragment().position(), item.fragment().length()) for item in block
+                    if "monospace" in (item.fragment().charFormat().fontFamilies() or [])]   # md and <code>
+            for position, length in code:
+                cursor.setPosition(position)
+                cursor.setPosition(position + length, QTextCursor.KeepAnchor)
+                cursor.mergeCharFormat(self._code_format)
+            block = block.next()
 
     def _checked(self, release):
         self._checked_once = True
@@ -194,7 +232,7 @@ class UpdateDialog(ManagedDialog):
             self.notes.setHtml(release.notes)   # Atom feed fallback ships rendered HTML
         else:
             self.notes.setMarkdown(release.notes)
-        self._center_notes()
+        self._style_notes()
         if self._automatic:
             self.present(activate=False)
 

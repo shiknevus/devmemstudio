@@ -175,6 +175,17 @@ def latest_from_redirect(cancel=None, current=__version__):
                    name, base + name, 0, "", base + name + ".sha256", bool(notes))
 
 
+_PAGE_ONLY = "升级方式|校验|验证"   # release-page sections, redundant inside the updater
+
+
+def _dialog_markdown(body):
+    return re.sub(rf"^###\s*(?:{_PAGE_ONLY})\s*$.*?(?=^#{{1,3}}\s|\Z)", "", body, flags=re.M | re.S).strip()
+
+
+def _dialog_html(body):
+    return re.sub(rf"<h3[^>]*>\s*(?:{_PAGE_ONLY})\s*</h3>.*?(?=<h[1-3][\s>]|\Z)", "", body, flags=re.S).strip()
+
+
 def feed_notes(data, current, latest):
     """HTML notes from the releases Atom feed for every version in (current, latest], newest first.
 
@@ -198,7 +209,7 @@ def feed_notes(data, current, latest):
     sections = []
     for version in wanted:
         text = ".".join(map(str, version))
-        body = bodies[version] or "<p>暂无更新说明。</p>"
+        body = _dialog_html(bodies[version]) or "<p>暂无更新说明。</p>"
         if not re.match(rf"\s*<h[1-6][^>]*>[^<]*\b{re.escape(text)}\b", body):
             body = f"<h2>DevmemStudio {text}</h2>{body}"
         sections.append(body)
@@ -224,7 +235,7 @@ def combined_notes(payloads, current, latest):
     for payload in payloads:
         version = _formal_version(payload)
         if version is not None and low < version <= high:
-            bodies[version] = str(payload.get("body") or "").strip() or "暂无更新说明。"
+            bodies[version] = _dialog_markdown(str(payload.get("body") or "")) or "暂无更新说明。"
     sections = []
     for version in sorted(bodies, reverse=True):
         text = ".".join(map(str, version))
