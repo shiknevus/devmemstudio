@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -400,9 +401,12 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
     # Tests and offline acceptance opt out of the machine's real overrides via env flag.
     if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
         overrides = user_data_dir() / "component_overrides"
+        bundled_at = _catalog_timestamp(data.get("generated_at"))
         if overrides.is_dir():
             for item in sorted(overrides.glob("*.json")):
                 try:
+                    if bundled_at is not None and item.stat().st_mtime < bundled_at:
+                        continue   # imported before this build's catalog: bundled table is newer
                     entry = json.loads(item.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
@@ -410,6 +414,14 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
                 if normalized is not None:
                     data["types"][item.stem] = normalized
     return data
+
+
+def _catalog_timestamp(value) -> float | None:
+    """generated_at (local ISO time) as epoch seconds; None when absent or malformed."""
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def _parse_offset(item) -> int | None:

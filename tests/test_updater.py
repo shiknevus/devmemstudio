@@ -127,18 +127,75 @@ class UpdateTransportTests(unittest.TestCase):
                                          lambda value: cancel.set(), directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
+    def test_check_shows_notes_of_every_version_since_current(self):
+        def payload(tag, body, **extra):
+            item = release_payload() if tag == "v99.0.0" else {"tag_name": tag, "assets": []}
+            item.update({"tag_name": tag, "body": body, "draft": False, "prerelease": False, **extra})
+            return item
+        payloads = [payload("v98.0.0", "- middle"), payload("v99.0.0", "## 99.0.0 发布\n\n- newest"),
+                    payload("v97.0.0", "- current"), payload("v96.0.0", "- older"),
+                    payload("v98.5.0", "- draft", draft=True), payload("v98.6.0", "- beta", prerelease=True),
+                    payload("v97.5.0", "")]
+        data = json.dumps(payloads).encode()
+        with patch.object(updater, "_open", return_value=io.BytesIO(data)):
+            release = updater.check_release(current="97.0.0")
+        self.assertEqual(release.version, "99.0.0")
+        self.assertEqual(release.notes, "## 99.0.0 发布\n\n- newest\n\n## DevmemStudio 98.0.0\n\n- middle"
+                                        "\n\n## DevmemStudio 97.5.0\n\n暂无更新说明。")
+        with patch.object(updater, "_open", return_value=io.BytesIO(data)):
+            self.assertIsNone(updater.check_release(current="99.0.0"))
+        with patch.object(updater, "_open", return_value=io.BytesIO(b"[]")), self.assertRaises(updater.NotFound):
+            updater.check_release()
+
     def test_rate_limited_api_falls_back_to_latest_redirect(self):
         redirect = io.BytesIO()
         redirect.headers = {"Location": f"https://github.com/{updater.REPOSITORY}/releases/tag/v99.0.0"}
-        with patch.object(updater, "_open", side_effect=[updater.RateLimited("quota"), redirect]):
+        with patch.object(updater, "_open", side_effect=[updater.RateLimited("quota"), redirect,
+                                                         RuntimeError("feed offline")]):
             release = updater.check_release()
         self.assertEqual((release.version, release.size, release.digest), ("99.0.0", 0, ""))
         self.assertTrue(release.checksum_url.endswith("/releases/download/v99.0.0/DevmemStudio-99.0.0-win64.zip.sha256"))
+        self.assertFalse(release.notes_html)
+        self.assertIn("发布页", release.notes)
         redirect = io.BytesIO()
         redirect.headers = {"Location": f"https://github.com/{updater.REPOSITORY}/releases"}
         with patch.object(updater, "_open", side_effect=[updater.RateLimited("quota"), redirect]), \
                 self.assertRaises(updater.NotFound):
             updater.check_release()
+
+    @staticmethod
+    def atom_feed(*entries):
+        from xml.sax.saxutils import escape
+        items = "".join(
+            f'<entry><link rel="alternate" type="text/html" '
+            f'href="https://github.com/{updater.REPOSITORY}/releases/tag/{tag}"/>'
+            f'<title>DevmemStudio {tag}</title><content type="html">{escape(body)}</content></entry>'
+            for tag, body in entries)
+        return f'<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom">{items}</feed>'.encode()
+
+    def test_rate_limited_api_reads_notes_from_atom_feed(self):
+        redirect = io.BytesIO()
+        redirect.headers = {"Location": f"https://github.com/{updater.REPOSITORY}/releases/tag/v99.0.0"}
+        feed = self.atom_feed(("v99.0.0", "<h2>DevmemStudio 99.0.0</h2><ul><li>newest</li></ul>"),
+                              ("v98.0.0", "<p>middle</p>"), ("v97.5.0", ""), ("v97.0.0", "<p>current</p>"),
+                              ("nightly", "<p>odd tag</p>"))
+        with patch.object(updater, "_open", side_effect=[updater.RateLimited("quota"), redirect, io.BytesIO(feed)]):
+            release = updater.check_release(current="97.0.0")
+        self.assertTrue(release.notes_html)
+        self.assertEqual(release.notes, "<h2>DevmemStudio 99.0.0</h2><ul><li>newest</li></ul>\n"
+                                        "<h2>DevmemStudio 98.0.0</h2><p>middle</p>\n"
+                                        "<h2>DevmemStudio 97.5.0</h2><p>暂无更新说明。</p>")
+
+    def test_atom_feed_notes_flag_missing_versions(self):
+        # Feed (newest 10 only) stops short of current, or lags behind the new release.
+        feed = self.atom_feed(("v99.0.0", "<p>newest</p>"), ("v98.0.0", "<p>middle</p>"))
+        self.assertIn("部分版本的说明未列出", updater.feed_notes(feed, "90.0.0", "99.0.0"))
+        self.assertIn("部分版本的说明未列出", updater.feed_notes(feed, "97.0.0", "100.0.0"))
+        feed = self.atom_feed(("v99.0.0", "<p>newest</p>"), ("v97.0.0", "<p>current</p>"))
+        self.assertNotIn("部分版本的说明未列出", updater.feed_notes(feed, "97.0.0", "99.0.0"))
+        self.assertEqual(updater.feed_notes(feed, "99.0.0", "99.0.0"), "")
+        with self.assertRaises(SyntaxError):
+            updater.feed_notes(b"<feed", "97.0.0", "99.0.0")
 
     def test_redirect_release_downloads_with_content_length_and_sidecar(self):
         data = package_bytes()
@@ -342,8 +399,21 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertEqual(dialog.status.property("state"), "ok")
         dialog.close()
 
-    def test_notes_and_title_render_centered(self):
-        """Release notes render centered, with equal left/right whitespace."""
+    def test_feed_html_notes_render_as_rich_text(self):
+        from PySide6.QtCore import Qt
+        from devmem_studio.update_dialog import UpdateDialog
+        dialog = UpdateDialog()
+        release = updater.Release("99.0.0", "<h2>DevmemStudio 99.0.0</h2><ul><li>newest</li></ul>",
+                                  "DevmemStudio-99.0.0-win64.zip", "", 0, notes_html=True)
+        with patch.object(updater, "check_release", return_value=release):
+            dialog.check()
+            self.settle(dialog)
+        self.assertEqual(dialog.notes.toPlainText().split("\n"), ["DevmemStudio 99.0.0", "newest"])
+        self.assertEqual(dialog.notes.document().lastBlock().blockFormat().alignment(), Qt.AlignHCenter)
+        dialog.close()
+
+    def test_notes_render_centered_under_left_title(self):
+        """Release notes render centered, with equal left/right whitespace; the title stays left."""
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QImage, QPainter
         from devmem_studio.update_dialog import UpdateDialog
@@ -354,7 +424,7 @@ class UpdateDialogTests(unittest.TestCase):
             self.settle(dialog)
         dialog.show()
         self.drain()
-        self.assertEqual(dialog.notes_title.alignment() & Qt.AlignHorizontal_Mask, Qt.AlignHCenter)
+        self.assertEqual(dialog.notes_title.alignment() & Qt.AlignHorizontal_Mask, Qt.AlignLeft)
         document = dialog.notes.document()
         block = document.begin()
         while block.isValid():

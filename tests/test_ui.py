@@ -757,7 +757,7 @@ class UiTests(UiTestBase):
         self.settle(lambda: not self.window._busy)
         self.window.bit_mode.click()
         for name, label, expected in (("PARAM35", "实际值 (mm/s | °/s)", "12.5"),
-                                      ("PARAM33", "实际值 (mm/s | °/s)", "0.8"),
+                                      ("PARAM33", "实际值 (mm/s² | °/s²)", "0.8"),   # touch_dec
                                       ("PARAM5", "实际值 (mm/s² | °/s²)", "25"),
                                       ("PARAM2", "实际值 (mm/s² | °/s²)", "250"),
                                       ("PARAM3", "实际值 (mm/s² | °/s²)", "2.5")):
@@ -1082,6 +1082,14 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(self.window.table.item(pos["_row"], 4).text(), str(pos["_value"]))
 
     def test_param_rows_show_actual_signal_names(self):
+        # Current RTL wires every pulse-axis PARAM; mark one unwired to cover that state.
+        for item in self.window.type_catalog["types"]["ec_slv_pul_axis"]["registers"]:
+            if item["name"] == "PARAM4":
+                item.pop("signal", None)
+                item["unwired"] = True
+        self.window._last_context = None
+        self.window.rebuild_registers()
+        self.settle(lambda: not self.window._busy)
         self.window.view_buttons["param"].click()
         self.settle(lambda: not self.window._busy)
         row = self.row_of("PARAM1")
