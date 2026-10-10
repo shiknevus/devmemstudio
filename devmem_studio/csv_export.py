@@ -27,7 +27,7 @@ def csv_export(path):
         temporary = Path(temp.name)
     try:
         if target.suffix.lower() == ".zip":
-            with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+            with ZipFile(temporary, "w", compression=ZIP_DEFLATED, compresslevel=6) as archive:
                 with archive.open(target.with_suffix(".csv").name, "w", force_zip64=True) as entry:
                     with io.TextIOWrapper(entry, encoding="utf-8-sig", newline="") as handle:
                         yield handle

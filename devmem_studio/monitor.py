@@ -44,13 +44,14 @@ class MonitorBuffer:
         self.limit = limit
         self.t0 = None
         self.times = array("d")
-        self.raw = [array("d") for _ in range(count)]
-        self.signed = [array("d") for _ in range(count)]
-        self.failures = [array("q") for _ in range(count)]   # sample indices
+        self.raw = [array("I") for _ in range(count)]
+        self.signed = [array("i") for _ in range(count)]
+        self.failures = [array("I") for _ in range(count)]   # retained sample indices
         self.total = 0
         self.failed = 0
         self.revision = 0
         self._ranges = [([], [], [], []) for _ in range(count)]
+        self._range_offset = 0   # retained data's position in the first cached block
 
     def __len__(self):
         return len(self.times)
@@ -72,7 +73,7 @@ class MonitorBuffer:
                 self.signed[column].append(signed)
                 for summary, candidate, minimum in zip(self._ranges[column], (value, value, signed, signed),
                                                         (True, False, True, False)):
-                    if index % RANGE_BLOCK == 0:
+                    if (index + self._range_offset) % RANGE_BLOCK == 0:
                         summary.append(candidate)
                     elif (minimum and candidate < summary[-1]) or (not minimum and candidate > summary[-1]):
                         summary[-1] = candidate
@@ -82,19 +83,17 @@ class MonitorBuffer:
             self._drop(len(self.times) - self.limit * 3 // 4)
 
     def _drop(self, count):
+        blocks, self._range_offset = divmod(self._range_offset + count, RANGE_BLOCK)
         del self.times[:count]
         for column in range(len(self.raw)):
             del self.raw[column][:count]
             del self.signed[column][:count]
-            self.failures[column] = array("q", (i - count for i in self.failures[column] if i >= count))
-            summaries = ([], [], [], [])
-            for start in range(0, len(self.times), RANGE_BLOCK):
-                for values, low, high in ((self.raw[column], summaries[0], summaries[1]),
-                                          (self.signed[column], summaries[2], summaries[3])):
-                    chunk = values[start:start + RANGE_BLOCK]
-                    low.append(min(chunk))
-                    high.append(max(chunk))
-            self._ranges[column] = summaries
+            failures = self.failures[column]
+            self.failures[column] = array("I", (i - count for i in failures[bisect_left(failures, count):]))
+            # Whole blocks remain valid. The partial leading block is scanned
+            # directly by extrema(), so discarded values cannot affect its result.
+            for summary in self._ranges[column]:
+                del summary[:blocks]
 
     def column(self, index, signed=False):
         return (self.signed if signed else self.raw)[index]
@@ -102,14 +101,16 @@ class MonitorBuffer:
     def extrema(self, column, begin, end, signed=False):
         """Exact extrema: inspect small boundary fragments and cached whole blocks."""
         values = self.column(column, signed)
-        first, last = (begin + RANGE_BLOCK - 1) // RANGE_BLOCK, end // RANGE_BLOCK
+        first = (begin + self._range_offset + RANGE_BLOCK - 1) // RANGE_BLOCK
+        last = (end + self._range_offset) // RANGE_BLOCK
         if first >= last:
             chunk = values[begin:end]
             return min(chunk), max(chunk)
         offset = 2 if signed else 0
         low = min(self._ranges[column][offset][first:last])
         high = max(self._ranges[column][offset + 1][first:last])
-        for chunk in (values[begin:first * RANGE_BLOCK], values[last * RANGE_BLOCK:end]):
+        for chunk in (values[begin:first * RANGE_BLOCK - self._range_offset],
+                      values[last * RANGE_BLOCK - self._range_offset:end]):
             if chunk:
                 low, high = min(low, min(chunk)), max(high, max(chunk))
         return low, high
@@ -187,6 +188,8 @@ class MonitorPlot(QWidget):
         self._data_refresh_requested = False
         self._hold_display = False   # keep the drawn time axis for the click that placed a marker
         self._drag_moved = False
+        self._toggle_marker = None
+        self._marker_press_pos = None
         self._axis_sync_pending = False
         self.axis_view = None   # pinned footer; when set, the axis is not drawn inside the scrolling chart
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
@@ -194,7 +197,7 @@ class MonitorPlot(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(420, 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setAccessibleDescription("单击图线放置 A/B 标记，拖动标记调整位置，右键清除标记。"
+        self.setAccessibleDescription("单击图表放置 A/B 标记，同一位置再次单击取消该标记，拖动标记调整位置，右键清除标记。"
                                       "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴。")
 
     def set_series(self, buffer, names, offsets=()):
@@ -320,6 +323,10 @@ class MonitorPlot(QWidget):
         return points
 
     def value_text(self, column, index):
+        failures = self.buffer.failures[column]
+        at = bisect_left(failures, index)
+        if at < len(failures) and failures[at] == index:
+            return "读取失败"
         raw = int(self.buffer.raw[column][index])
         return f"0x{raw:X} · {to_signed(raw) if self.signed else raw}"
 
@@ -428,6 +435,8 @@ class MonitorPlot(QWidget):
         self._drag_marker = None
         self._drag_moved = False
         self._hold_display = False
+        self._toggle_marker = None
+        self._marker_press_pos = None
         if changed:
             self.markers_changed.emit(tuple(self.markers))
             self._request_paint()
@@ -448,8 +457,12 @@ class MonitorPlot(QWidget):
             self._request_paint()
 
     def _in_plot(self, position):
-        return (bool(self.names) and not self._on_axis(position)
-                and any(lane.contains(position) for lane in self.lanes()))
+        if not self.names or self._on_axis(position):
+            return False
+        lanes = self.lanes()
+        # Marker lines span the gaps between lanes, so their entire shared
+        # plotting area must also accept placement, toggling and dragging.
+        return QRectF(lanes[0].topLeft(), lanes[-1].bottomRight()).contains(position)
 
     def _gutter_lane_at(self, position):
         if self._on_axis(position) or not self.names or not 0 <= position.x() < self.LABEL_WIDTH:
@@ -524,6 +537,20 @@ class MonitorPlot(QWidget):
                 return
             hit, on_line = self._marker_hit(position)
             stamp = self._sample_time_at(position)
+            self._toggle_marker = None
+            self._marker_press_pos = None
+            if hit is not None and on_line and abs(self._marker_line_x(hit) - position.x()) <= 1.0:
+                # Decide on release: a stationary click removes this marker,
+                # while a drag moves it. Nearby distinct positions can still
+                # place the other marker even within the wider drag hit area.
+                self._drag_marker = hit
+                self._toggle_marker = hit
+                self._marker_press_pos = QPointF(position)
+                self._drag_moved = False
+                self._hold_display = True
+                self._request_paint()
+                event.accept()
+                return
             # An empty A or B is still placed, even if the click is near the
             # other line. A badge click selects that marker without moving it.
             adjust = hit is not None and (not on_line or self.markers[self._next_marker] is not None)
@@ -551,14 +578,23 @@ class MonitorPlot(QWidget):
         if event.button() == Qt.LeftButton and self._drag_marker is not None:
             marker = self._drag_marker
             moved = self._drag_moved
+            toggle = self._toggle_marker == marker
+            distance = ((event.position() - self._marker_press_pos).manhattanLength()
+                        if self._marker_press_pos is not None else 0)
             self._drag_marker = None
             self._drag_moved = False
-            stamp = self._sample_time_at(event.position()) if moved else None
-            if stamp is not None:
-                self._set_marker(marker, stamp)
+            self._toggle_marker = None
+            self._marker_press_pos = None
+            if toggle and not moved and distance < 3:
+                self._set_marker(marker, None)
+                self._next_marker = marker if any(stamp is not None for stamp in self.markers) else 0
             else:
-                self._hold_display = False
-                self._request_paint()
+                stamp = self._sample_time_at(event.position()) if moved or toggle and distance >= 3 else None
+                if stamp is not None:
+                    self._set_marker(marker, stamp)
+                else:
+                    self._hold_display = False
+                    self._request_paint()
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -571,6 +607,10 @@ class MonitorPlot(QWidget):
         else:
             self.setCursor(Qt.PointingHandCursor)
         if self._drag_marker is not None and event.buttons() & Qt.LeftButton:
+            if (self._toggle_marker is not None and not self._drag_moved
+                    and (event.position() - self._marker_press_pos).manhattanLength() < 3):
+                self._request_paint()
+                return
             stamp = self._sample_time_at(event.position())
             if stamp is not None:
                 self._drag_moved = True
@@ -683,7 +723,10 @@ class MonitorPlot(QWidget):
                         if at < len(failures) and failures[at] < hi:
                             marks.append(lane.left() + pixel + 0.5)
                 paths[column] = (data_low, data_high, polygon, marks)
-            painter.drawPolyline(polygon)
+            if len(polygon) == 1:
+                painter.drawEllipse(polygon[0], 2, 2)
+            else:
+                painter.drawPolyline(polygon)
             failures = self.buffer.failures[column]
             if failures:
                 painter.setPen(QPen(QColor("#C44848"), 1))
@@ -749,7 +792,8 @@ class MonitorPlot(QWidget):
             text_rect = QRectF(18, lane.top() + 2, self.LABEL_WIDTH - 26, lane.height() - 2)
             painter.setFont(mono)
             for line, (caption, value) in enumerate(zip(("N", "S", "A", "B"), values)):
-                painter.setPen(color if line < 2 else QColor(("#B57518", "#7A4FC4")[line - 2]))
+                readout_color = color if line < 2 else QColor(("#B57518", "#7A4FC4")[line - 2])
+                painter.setPen(QColor("#C44848") if value == "读取失败" else readout_color)
                 painter.drawText(text_rect.adjusted(0, 17 + line * 17, 0, 0), Qt.AlignLeft | Qt.AlignTop,
                                  f"{caption}: {value}")
             if not pointer:
@@ -772,7 +816,7 @@ class MonitorPlot(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(255, 255, 255, 225))
             painter.drawRoundedRect(box, 3, 3)
-            painter.setPen(color)
+            painter.setPen(QColor("#C44848") if text == "读取失败" else color)
             painter.drawText(box, Qt.AlignCenter, text)
         for marker, stamp in enumerate(self.markers):
             if stamp is None or not start <= stamp <= end:
@@ -817,8 +861,11 @@ class MonitorPlot(QWidget):
 
     def _start_prepare(self, geometry, exposed, ratio):
         if self._prepared_frame is not None:
-            current = self.buffer.revision if self.buffer is not None else 0
-            if self._prepare_timer.isActive() and self._prepared_frame.get("revision") == current:
+            # Appended samples do not invalidate this frame's bounded indices.
+            # Restarting on every batch starved slow frames before all lanes finished.
+            if self._prepared_frame["geometry"] == geometry:
+                if not self._prepare_timer.isActive():
+                    self._prepare_timer.start(0)
                 return
             self._prepare_timer.stop()
             self._prepared_frame = None
@@ -995,6 +1042,7 @@ class _MonitorBridge(QObject):
     samples = Signal(int, object)
     stopped = Signal(int, str)
     sampler = Signal(int, str)
+    export_failed = Signal(int, str)
 
 
 class _MonitorRegisterDelegate(QStyledItemDelegate):
@@ -1088,11 +1136,15 @@ class MonitorDialog(ManagedDialog):
         self.interval_ms = interval_ms
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
+        self.export_pool = QThreadPool(self)
+        self.export_pool.setMaxThreadCount(1)
+        self._exporting = False
         self.bridge = _MonitorBridge(self)
         self.bridge.started.connect(self._started)
         self.bridge.samples.connect(self._samples)
         self.bridge.stopped.connect(self._stopped)
         self.bridge.sampler.connect(self._sampler_known)
+        self.bridge.export_failed.connect(self._export_failed)
 
         layout = QVBoxLayout(self)
         layout.setVerticalSizeConstraint(QLayout.SetMinimumSize)
@@ -1107,7 +1159,7 @@ class MonitorDialog(ManagedDialog):
         self.interval_spin.setFixedWidth(control_width)
         self.interval_spin.setValue(max(MONITOR_MIN_INTERVAL_MS, min(60000, int(interval_ms))))
         self.interval_spin.setToolTip(f"板端采样间隔，最小 {MONITOR_MIN_INTERVAL_MS} ms。aarch64 板子上由常驻采样程序"
-                                      "一次映射、循环读取，CPU 占用很低；无法使用时改为每点每寄存器启动一次 devmem，"
+                                      "一次映射、循环读取，减少重复启动 devmem 的开销；无法使用时改为每点每寄存器启动一次 devmem，"
                                       "寄存器越多、间隔越小，CPU 占用越高。跟不上时按实际速度采样并在状态栏提示。")
         self.interval_spin.valueChanged.connect(self.interval_changed)
         self.start_button = button("开始监视", self.toggle, "primary", "play")
@@ -1160,7 +1212,7 @@ class MonitorDialog(ManagedDialog):
         self.signed_check.toggled.connect(self._signed_changed)
         self.clear_button = button("清空数据", self.clear, "flat", "clear")
         self.clear_button.setToolTip("清空当前采样数据与标记")
-        self.export_button = button("导出数据", self.export_csv, "flat", "export")
+        self.export_button = button("导出数据", self.export_data, "flat", "export")
         self.export_button.setToolTip("导出全部保留的采样数据：ZIP 无损压缩（解压后为 CSV）或普通 CSV")
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
@@ -1505,8 +1557,7 @@ class MonitorDialog(ManagedDialog):
                 flags = item.flags()
                 if flags & Qt.ItemIsUserCheckable:
                     item.setFlags(flags | Qt.ItemIsEnabled if idle else flags & ~Qt.ItemIsEnabled)
-        for control in (self.search, self.interval_spin):
-            control.setEnabled(idle)
+        self.interval_spin.setEnabled(idle)
         self._update_count()
         self._update_state_dot()
         if idle:
@@ -1587,9 +1638,9 @@ class MonitorDialog(ManagedDialog):
         self.plot.signed = on
         self.settings["signed"] = on
         self.settings_changed.emit(copy.deepcopy(self.settings))
-        self.plot.update()
+        self.plot._request_paint()
 
-    def export_csv(self):
+    def _export_request(self):
         buffer = self.buffer
         if buffer is None or not len(buffer):
             self._set_status("还没有可导出的数据。", "warn")
@@ -1599,22 +1650,83 @@ class MonitorDialog(ManagedDialog):
         if not path:
             return None
         path = export_path(path, selected_filter)
+        # The native file dialog processes incoming samples. Capture the current
+        # buffer after it closes, then copy once so a worker can export safely.
+        buffer = self.buffer
+        if buffer is None or not len(buffer):
+            self._set_status("还没有可导出的数据。", "warn")
+            return None
         signed = self.signed_check.isChecked()
-        failures = [set(column) for column in buffer.failures]
-        columns = [buffer.column(index, signed) for index in range(len(self.monitored))]
+        return dict(path=path, times=buffer.times[:],
+                    columns=[buffer.column(index, signed)[:] for index in range(len(self.monitored))],
+                    failures=[column[:] for column in buffer.failures],
+                    monitored=tuple(self.monitored), count=len(buffer), dropped=buffer.dropped, epoch=self._epoch)
+
+    @staticmethod
+    def _write_export(request):
+        with csv_export(request["path"]) as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["time_s"] + [f"{name} (0x{address:08X})" for name, address in request["monitored"]])
+            pending = [iter(column) for column in request["failures"]]
+            next_failure = [next(column, None) for column in pending]
+            for index, stamp in enumerate(request["times"]):
+                row_values = [f"{stamp:.6f}"]
+                for column, values in enumerate(request["columns"]):
+                    if index == next_failure[column]:
+                        row_values.append("")
+                        next_failure[column] = next(pending[column], None)
+                    else:
+                        row_values.append(str(values[index]))
+                writer.writerow(row_values)
+        # Queue only completion metadata back to the UI.
+        return {key: request[key] for key in ("path", "count", "dropped", "epoch")}
+
+    def _export_finished(self, result):
+        if result["epoch"] != self._epoch:
+            return   # a previous run must not replace the new run's status
+        note = f"（已丢弃 {result['dropped']:,} 点旧数据）" if result["dropped"] else ""
+        self._set_status(f"已导出保留的 {result['count']:,} 点到 {result['path']}{note}",
+                         "warn" if result["dropped"] else "")
+
+    def export_csv(self):
+        """Synchronous export for callers; the UI uses export_data() in a worker."""
+        request = self._export_request()
+        if request is None:
+            return None
         try:
-            with csv_export(path) as handle:
-                writer = csv.writer(handle)
-                writer.writerow(["time_s"] + [f"{name} (0x{address:08X})" for name, address in self.monitored])
-                for index, stamp in enumerate(buffer.times):
-                    writer.writerow([f"{stamp:.6f}"] + ["" if index in failures[column] else f"{values[index]:.0f}"
-                                                        for column, values in enumerate(columns)])
+            result = self._write_export(request)
         except OSError as exc:
             self._set_status(f"导出失败：{exc}", "error")
             return None
-        note = f"（已丢弃 {buffer.dropped:,} 点旧数据）" if buffer.dropped else ""
-        self._set_status(f"已导出保留的 {len(buffer):,} 点到 {path}{note}", "warn" if buffer.dropped else "")
-        return path
+        self._export_finished(result)
+        return result["path"]
+
+    def export_data(self):
+        if self._exporting:
+            return
+        request = self._export_request()
+        if request is None:
+            return
+        self._exporting = True
+        self.export_button.setEnabled(False)
+        self.export_button.setText("导出中…")
+        self._set_status(f"正在导出 {request['count']:,} 点…")
+        worker = Worker(lambda progress: self._write_export(request))
+        worker.signals.result.connect(self._export_finished)
+        worker.signals.failed.connect(lambda message: self.bridge.export_failed.emit(request["epoch"], message))
+        worker.signals.finished.connect(self._export_done)
+        worker.signals.finished.connect(lambda: self._workers.discard(worker))
+        self._workers.add(worker)
+        self.export_pool.start(worker)
+
+    def _export_failed(self, token, message):
+        if token == self._epoch:
+            self._set_status(f"导出失败：{message}", "error")
+
+    def _export_done(self):
+        self._exporting = False
+        self.export_button.setEnabled(True)
+        self.export_button.setText("导出数据")
 
     def shutdown(self):
         """Owner is closing: stop sampling and drop late results."""
