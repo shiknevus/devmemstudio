@@ -147,6 +147,14 @@ class UpdateTransportTests(unittest.TestCase):
         with patch.object(updater, "_open", return_value=io.BytesIO(b"[]")), self.assertRaises(updater.NotFound):
             updater.check_release()
 
+    def test_notes_drop_release_page_sections(self):
+        body = ("## DevmemStudio 99.0.0\n\n### 寄存器\n- fix `C:\\new`\n\n### 升级方式\n- click\n\n"
+                "### 校验\n`x.zip` SHA-256：`ab`\n\n### 验证\n462 项")
+        self.assertEqual(updater._dialog_markdown(body), "## DevmemStudio 99.0.0\n\n### 寄存器\n- fix `C:\\new`")
+        self.assertEqual(updater._dialog_markdown("### 升级方式\n- click"), "")
+        html = "<h3>寄存器</h3><ul><li>fix</li></ul><h3>升级方式</h3><ul><li>click</li></ul><h3>验证</h3><p>462</p>"
+        self.assertEqual(updater._dialog_html(html), "<h3>寄存器</h3><ul><li>fix</li></ul>")
+
     def test_rate_limited_api_falls_back_to_latest_redirect(self):
         redirect = io.BytesIO()
         redirect.headers = {"Location": f"https://github.com/{updater.REPOSITORY}/releases/tag/v99.0.0"}
@@ -409,40 +417,31 @@ class UpdateDialogTests(unittest.TestCase):
             dialog.check()
             self.settle(dialog)
         self.assertEqual(dialog.notes.toPlainText().split("\n"), ["DevmemStudio 99.0.0", "newest"])
-        self.assertEqual(dialog.notes.document().lastBlock().blockFormat().alignment(), Qt.AlignHCenter)
+        self.assertEqual(dialog.notes.document().lastBlock().blockFormat().alignment(), Qt.AlignLeft)
         dialog.close()
 
-    def test_notes_render_centered_under_left_title(self):
-        """Release notes render centered, with equal left/right whitespace; the title stays left."""
+    def test_notes_render_left_with_heading_hierarchy(self):
+        """Notes are left-aligned; version headings outrank section headings; inline code is styled."""
         from PySide6.QtCore import Qt
-        from PySide6.QtGui import QImage, QPainter
         from devmem_studio.update_dialog import UpdateDialog
         dialog = UpdateDialog()
-        release = updater.parse_release(release_payload())
+        release = updater.Release("99.0.0", "## DevmemStudio 99.0.0\n\n### 寄存器\n\n- item `CODE`\n\n"
+                                  "## DevmemStudio 98.0.0\n\n- older", "DevmemStudio-99.0.0-win64.zip", "", 0)
         with patch.object(updater, "check_release", return_value=release):
             dialog.check()
             self.settle(dialog)
-        dialog.show()
-        self.drain()
         self.assertEqual(dialog.notes_title.alignment() & Qt.AlignHorizontal_Mask, Qt.AlignLeft)
-        document = dialog.notes.document()
-        block = document.begin()
+        blocks, block = {}, dialog.notes.document().begin()
         while block.isValid():
-            self.assertEqual(block.blockFormat().alignment(), Qt.AlignHCenter, block.text())
+            self.assertEqual(block.blockFormat().alignment(), Qt.AlignLeft, block.text())
+            blocks[block.text()] = block
             block = block.next()
-        image = QImage(int(document.size().width()), int(document.size().height()), QImage.Format_ARGB32)
-        image.fill(Qt.transparent)
-        painter = QPainter(image)
-        document.drawContents(painter)
-        painter.end()
-        left = right = None
-        for y in range(0, image.height(), 2):
-            for x in range(0, image.width(), 2):
-                if image.pixelColor(x, y).alpha():
-                    left = x if left is None else min(left, x)
-                    right = x if right is None else max(right, x)
-        self.assertIsNotNone(left)
-        self.assertAlmostEqual(left, image.width() - 1 - right, delta=2)
+        size = {text: item.begin().fragment().charFormat().font().pointSizeF() for text, item in blocks.items()}
+        self.assertGreater(size["DevmemStudio 99.0.0"], size["寄存器"])
+        self.assertEqual(blocks["DevmemStudio 99.0.0"].blockFormat().topMargin(), 0)
+        self.assertGreater(blocks["DevmemStudio 98.0.0"].blockFormat().topMargin(), 0)
+        code = [item.fragment() for item in blocks["item CODE"] if item.fragment().text() == "CODE"][0]
+        self.assertIn("Consolas", code.charFormat().fontFamilies())
         dialog.close()
 
     def test_automatic_network_failure_stays_hidden(self):
