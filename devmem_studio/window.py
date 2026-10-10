@@ -1378,7 +1378,9 @@ class MainWindow(QMainWindow):
         Position-family signals (r_pf_abspos, rserv_target/step_pulse, rcfg_pos_*)
         show mm | °; speed/accel/decel config signals (rcfg_*spd/acc/dec) show
         per-second scaled values."""
-        signals = {part.split("[")[0] for part in reg.get("signal", "").split("/")}
+        if reg["name"] == "PARAM4":
+            return None   # the divisor itself (also touch speed): always 1 unit/s
+        signals ={part.split("[")[0] for part in reg.get("signal", "").split("/")}
         pulse_positions = {"r_pf_abspos", "rserv_target_pulse", "rserv_step_pulse"}
         if any(s in pulse_positions or s.startswith("rcfg_pos") for s in signals):
             return "实际值 (mm | °)"

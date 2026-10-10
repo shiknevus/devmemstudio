@@ -1,6 +1,6 @@
 {
   "schema": 8,
-  "generated_at": "2026-09-16T01:23:33",
+  "generated_at": "2026-10-10T23:08:28",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -7099,8 +7099,7 @@
           "offset": "0x0E0",
           "name": "PARAM3",
           "width": 32,
-          "readonly": false,
-          "signal": "ctrl_signal"
+          "readonly": false
         },
         {
           "offset": "0x1B4",
@@ -7140,19 +7139,7 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 1
-            }
-          ]
+          "readonly": true
         }
       ],
       "notes": {
@@ -7160,7 +7147,7 @@
       },
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_4di2do": {
@@ -13435,7 +13422,8 @@
           "offset": "0x0E4",
           "name": "PARAM4",
           "width": 32,
-          "readonly": false
+          "readonly": false,
+          "signal": "rcfg_touch_spd"
         },
         {
           "offset": "0x0E8",
@@ -13507,7 +13495,7 @@
           "name": "PARAM33",
           "width": 32,
           "readonly": false,
-          "signal": "rcfg_touch_spd"
+          "signal": "rcfg_touch_dec"
         },
         {
           "offset": "0x15C",
@@ -13576,14 +13564,7 @@
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf",
-          "fields": [
-            {
-              "name": "i_axis_limf",
-              "low": 0,
-              "width": 1
-            }
-          ]
+          "signal": "i_axis_limf/w_soft_lim_f"
         },
         {
           "offset": "0x1B0",
@@ -13611,7 +13592,7 @@
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb"
+          "signal": "i_axis_limb/w_soft_lim_b"
         },
         {
           "offset": "0x1BC",
@@ -13654,11 +13635,12 @@
         }
       ],
       "notes": {
+        "PARAM4": "home touch speed",
         "PARAM52": "diff out [1]dir [0]pulse",
-        "PARAM64": "fwd limit",
+        "PARAM64": "fwd limit (hw|soft)",
         "PARAM65": "servo ready",
         "PARAM66": "servo done",
-        "PARAM67": "bwd limit",
+        "PARAM67": "bwd limit (hw|soft)",
         "PARAM68": "origin",
         "PARAM69": "drive input alm",
         "PARAM70": "drive output son"
@@ -15553,7 +15535,7 @@
           "name": "PARAM4",
           "width": 32,
           "readonly": false,
-          "unwired": true
+          "signal": "rcfg_touch_spd"
         },
         {
           "offset": "0x0E8",
@@ -15625,7 +15607,7 @@
           "name": "PARAM33",
           "width": 32,
           "readonly": false,
-          "signal": "rcfg_touch_spd"
+          "signal": "rcfg_touch_dec"
         },
         {
           "offset": "0x15C",
@@ -15689,14 +15671,7 @@
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf",
-          "fields": [
-            {
-              "name": "i_axis_limf",
-              "low": 0,
-              "width": 1
-            }
-          ]
+          "signal": "i_axis_limf/w_soft_lim_f"
         },
         {
           "offset": "0x1B0",
@@ -15724,7 +15699,7 @@
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb"
+          "signal": "i_axis_limb/w_soft_lim_b"
         },
         {
           "offset": "0x1BC",
@@ -15767,11 +15742,12 @@
         }
       ],
       "notes": {
+        "PARAM4": "home touch speed",
         "PARAM52": "out cmd [2]rst [1]son [0]dir",
-        "PARAM64": "fwd limit",
+        "PARAM64": "fwd limit (hw|soft)",
         "PARAM65": "servo ready",
         "PARAM66": "servo done",
-        "PARAM67": "bwd limit",
+        "PARAM67": "bwd limit (hw|soft)",
         "PARAM68": "origin",
         "PARAM69": "remote drive alm",
         "PARAM70": "son cmd to slv"
@@ -16252,7 +16228,8 @@
           "offset": "0x114",
           "name": "PARAM16",
           "width": 8,
-          "readonly": false
+          "readonly": false,
+          "signal": "parity"
         },
         {
           "offset": "0x118",
@@ -16464,7 +16441,8 @@
           "offset": "0x114",
           "name": "PARAM16",
           "width": 8,
-          "readonly": false
+          "readonly": false,
+          "signal": "parity"
         },
         {
           "offset": "0x118",

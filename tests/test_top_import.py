@@ -1,5 +1,6 @@
 """Parser and catalog regressions for the imported mix-top component directory."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -454,6 +455,33 @@ class CatalogTests(unittest.TestCase):
         self.assertTrue(exact)
         self.assertEqual([item["name"] for item in registers], ["IRQ_REG1", "IRQ_REG2"])
 
+    def test_override_older_than_bundled_catalog_is_ignored(self):
+        """After an online upgrade, a stale local 导入组件 must not mask the newer bundled table."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundled = root / "catalog.json"
+            bundled.write_text(json.dumps({"generated_at": "2026-10-10T12:00:00", "types": {
+                name: {"registers": [{"offset": "0x00C", "name": "EC_ID", "width": 32}]}
+                for name in ("ec_old", "ec_new")}}), encoding="utf-8")
+            overrides = root / "component_overrides"
+            overrides.mkdir()
+            imported = {"registers": [{"offset": "0x010", "name": "IMPORTED", "width": 32}]}
+            for name, stamp in (("ec_old", "2026-10-10T11:59:00"), ("ec_new", "2026-10-10T12:01:00")):
+                item = overrides / f"{name}.json"
+                item.write_text(json.dumps(imported), encoding="utf-8")
+                moment = top_import._catalog_timestamp(stamp)
+                os.utime(item, (moment, moment))
+            with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
+                    patch("devmem_studio.top_import.resource_path", return_value=bundled), \
+                    patch("devmem_studio.top_import.user_data_dir", return_value=root):
+                catalog = top_import.load_type_catalog()
+        names = {key: [reg["name"] for reg in top_import.registers_for(catalog, key)[0]]
+                 for key in ("ec_old", "ec_new")}
+        self.assertIn("EC_ID", names["ec_old"])
+        self.assertNotIn("IMPORTED", names["ec_old"])
+        self.assertIn("IMPORTED", names["ec_new"])
+
     def test_registers_for_skips_malformed_override_offsets(self):
         """User-edited override JSON with a broken offset must not crash the table rebuild."""
         catalog = {"types": {"ec_uut": {"registers": [
@@ -484,14 +512,15 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(spindle["EC_ID"]["width"], 14)
         self.assertFalse(spindle["EC_ID"]["readonly"])
         self.assertEqual(spindle["PARAM1"]["signal"], "rcfg_spd_max")
-        self.assertEqual(spindle["PARAM64"]["signal"], "i_axis_limf")
-        self.assertTrue(spindle["PARAM4"]["unwired"])
-        # 最大/最小位置（软限位）与触摸速度：与速度/位置族一样带信号与有符号换算。
+        self.assertEqual(spindle["PARAM64"]["signal"], "i_axis_limf/w_soft_lim_f")   # hw | soft limit
+        self.assertEqual(spindle["PARAM4"]["signal"], "rcfg_touch_spd")
+        self.assertNotIn("unwired", spindle["PARAM4"])
+        # 最大/最小位置（软限位）与触零减速：与速度/位置族一样带信号与有符号换算。
         self.assertEqual(spindle["PARAM31"]["signal"], "rcfg_pos_max")
         self.assertTrue(spindle["PARAM31"].get("signed"))
         self.assertEqual(spindle["PARAM32"]["signal"], "rcfg_pos_min")
         self.assertTrue(spindle["PARAM32"].get("signed"))
-        self.assertEqual(spindle["PARAM33"]["signal"], "rcfg_touch_spd")
+        self.assertEqual(spindle["PARAM33"]["signal"], "rcfg_touch_dec")
         # 目标/步进脉冲同属位置族：带信号且按补码显示。
         self.assertEqual(spindle["PARAM36"]["signal"], "rserv_target_pulse")
         self.assertTrue(spindle["PARAM36"].get("signed"))

@@ -1,5 +1,5 @@
 """GitHub Releases transport and preparation; never replace a running EXE here."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -19,7 +19,8 @@ from .core import resource_path, user_data_dir
 
 REPOSITORY = "shiknevus/devmemstudio"
 RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
-API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+FEED_URL = f"{RELEASES_URL}.atom"   # web feed, not counted against the API quota
+API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"   # one call: latest + skipped notes
 MAX_PACKAGE = 512 * 1024 * 1024
 TIMEOUT = 15
 
@@ -120,6 +121,7 @@ class Release:
     size: int
     digest: str = ""
     checksum_url: str = ""
+    notes_html: bool = False
 
 
 def parse_release(payload, current=__version__):
@@ -164,17 +166,89 @@ def latest_from_redirect(cancel=None, current=__version__):
     version = ".".join(map(str, remote))
     name = f"DevmemStudio-{version}-win64.zip"
     base = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
-    # Size and notes come from the API only; download uses Content-Length and the .sha256 asset.
-    return Release(version, "GitHub API 访问次数已达上限，暂未获取更新说明，可点击“打开发布页”查看。",
-                   name, base + name, 0, "", base + name + ".sha256")
-
-
-def check_release(cancel=None):
+    # Size comes from the API only; download uses Content-Length and the .sha256 asset.
     try:
-        return parse_release(json.loads(_read(API_URL, 2 * 1024 * 1024, cancel).decode("utf-8")))
+        notes = feed_notes(_read(FEED_URL, 4 * 1024 * 1024, cancel), current, version)
+    except (RuntimeError, ValueError, OSError, SyntaxError):   # SyntaxError covers ElementTree.ParseError
+        notes = ""
+    return Release(version, notes or "GitHub API 访问次数已达上限，暂未获取更新说明，可点击“打开发布页”查看。",
+                   name, base + name, 0, "", base + name + ".sha256", bool(notes))
+
+
+def feed_notes(data, current, latest):
+    """HTML notes from the releases Atom feed for every version in (current, latest], newest first.
+
+    The feed is a web page outside the API quota but lists only the newest 10 releases."""
+    from xml.etree import ElementTree   # lazy: only needed when the API quota is exhausted
+
+    atom = "{http://www.w3.org/2005/Atom}"
+    low, high = version_tuple(current), version_tuple(latest)
+    bodies = {}
+    for entry in ElementTree.fromstring(data).iter(f"{atom}entry"):
+        link = entry.find(f"{atom}link")
+        match = re.search(r"/releases/tag/([^/?#]+)$", link.get("href", "") if link is not None else "")
+        try:
+            version = version_tuple(match.group(1))
+        except (AttributeError, ValueError):
+            continue
+        bodies.setdefault(version, (entry.findtext(f"{atom}content") or "").strip())
+    wanted = sorted((version for version in bodies if low < version <= high), reverse=True)
+    if not wanted:
+        return ""
+    sections = []
+    for version in wanted:
+        text = ".".join(map(str, version))
+        body = bodies[version] or "<p>暂无更新说明。</p>"
+        if not re.match(rf"\s*<h[1-6][^>]*>[^<]*\b{re.escape(text)}\b", body):
+            body = f"<h2>DevmemStudio {text}</h2>{body}"
+        sections.append(body)
+    if high not in bodies or min(bodies) > low:   # feed lags a new release or stops short of current
+        sections.append("<p>部分版本的说明未列出，可点击“打开发布页”查看。</p>")
+    return "\n".join(sections)[:100000]
+
+
+def _formal_version(payload):
+    """Version tuple of a published formal release, or None for drafts/prereleases/odd tags."""
+    if not isinstance(payload, dict) or payload.get("draft") or payload.get("prerelease"):
+        return None
+    try:
+        return version_tuple(payload.get("tag_name", ""))
+    except ValueError:
+        return None
+
+
+def combined_notes(payloads, current, latest):
+    """Notes of every formal release in (current, latest], newest first, one section each."""
+    low, high = version_tuple(current), version_tuple(latest)
+    bodies = {}
+    for payload in payloads:
+        version = _formal_version(payload)
+        if version is not None and low < version <= high:
+            bodies[version] = str(payload.get("body") or "").strip() or "暂无更新说明。"
+    sections = []
+    for version in sorted(bodies, reverse=True):
+        text = ".".join(map(str, version))
+        body = bodies[version]
+        first = body.splitlines()[0]
+        sections.append(body if first.startswith("#") and text in first else f"## DevmemStudio {text}\n\n{body}")
+    return "\n\n".join(sections)
+
+
+def check_release(cancel=None, current=__version__):
+    try:
+        payloads = json.loads(_read(API_URL, 8 * 1024 * 1024, cancel).decode("utf-8"))
     except RateLimited:
         # Anonymous API allows 60 requests/hour per IP, shared by everyone behind an office NAT.
-        return latest_from_redirect(cancel)
+        return latest_from_redirect(cancel, current)
+    if not isinstance(payloads, list):
+        raise ValueError("更新源返回的发布列表格式无效。")
+    formal = [payload for payload in payloads if _formal_version(payload) is not None]
+    if not formal:
+        raise NotFound("未找到正式发布版本；请检查 GitHub Releases 是否已发布。")
+    release = parse_release(max(formal, key=_formal_version), current)
+    if release is None:
+        return None
+    return replace(release, notes=combined_notes(formal, current, release.version)[:100000])
 
 
 def parse_checksum(data, name):

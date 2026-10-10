@@ -63,7 +63,7 @@ class UpdateDialog(ManagedDialog):
         notes.setContentsMargins(18, 14, 10, 12)
         notes.setSpacing(8)
         notes_title = label("更新说明", "sectionTitle")
-        notes_title.setAlignment(Qt.AlignHCenter)
+        notes_title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.notes_title = notes_title
         notes.addWidget(notes_title)
         self.notes = QTextBrowser()
@@ -190,7 +190,10 @@ class UpdateDialog(ManagedDialog):
         if self.download and self.download.version != release.version:
             self.download = None
         self._set_status(f"发现新版本 {release.version}，可下载后重启升级。", "ok")
-        self.notes.setMarkdown(release.notes)
+        if release.notes_html:
+            self.notes.setHtml(release.notes)   # Atom feed fallback ships rendered HTML
+        else:
+            self.notes.setMarkdown(release.notes)
         self._center_notes()
         if self._automatic:
             self.present(activate=False)
