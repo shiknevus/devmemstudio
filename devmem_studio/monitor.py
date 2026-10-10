@@ -10,7 +10,7 @@ import math
 import threading
 import time
 
-from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QLineF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxLayout, QVBoxLayout, QSplitter,
                                QListWidget, QListWidgetItem,
@@ -185,11 +185,17 @@ class MonitorPlot(QWidget):
         self._prepare_timer = QTimer(self)
         self._prepare_timer.setSingleShot(True)
         self._prepare_timer.timeout.connect(self._prepare_one_lane)
+        self._pending_tiles = OrderedDict()
+        self._tile_timer = QTimer(self)
+        self._tile_timer.setSingleShot(True)
+        self._tile_timer.setInterval(1)   # yield to input between individual lane renders
+        self._tile_timer.timeout.connect(self._prepare_tile)
         self._mouse_repaint = False
         self._data_refresh_requested = False
         self._hold_display = False   # keep the drawn time axis for the click that placed a marker
         self._drag_moved = False
         self._toggle_marker = None
+        self._toggle_stamp = None
         self._marker_press_pos = None
         self._axis_sync_pending = False
         self.axis_view = None   # pinned footer; when set, the axis is not drawn inside the scrolling chart
@@ -226,6 +232,8 @@ class MonitorPlot(QWidget):
             self._relayout()
 
     def _relayout(self):
+        self._tile_timer.stop()
+        self._pending_tiles.clear()
         self._scene_cache = None
         self._scene_key = None
         self._lane_scenes.clear()
@@ -339,6 +347,29 @@ class MonitorPlot(QWidget):
                 low = high
         return points
 
+    @staticmethod
+    def envelope_lines(times, values, first, start, span, rect, y_of, extrema, last):
+        """Same dense envelope as trace(), drawing each vertical column only once."""
+        width = max(1, int(rect.width()))
+        scale = rect.width() / span
+        lines = []
+        low = first
+        previous_x = previous_y = None
+        for column in range(width + 1):
+            high = bisect_right(times, start + (column + 1) / scale, low, last)
+            if high <= low:
+                continue
+            bottom, top = extrema(low, high)
+            x = rect.left() + column
+            y1, y2 = y_of(bottom), y_of(top)
+            if previous_y is not None:
+                lines.append(QLineF(previous_x, previous_y, x, previous_y))
+                y1, y2 = min(y1, y2, previous_y), max(y1, y2, previous_y)
+            lines.append(QLineF(x, y1, x, y2))
+            previous_x, previous_y = x, y_of(values[high - 1])
+            low = high
+        return lines
+
     def value_text(self, column, index):
         column = self.columns[column]
         if column is None:
@@ -361,7 +392,7 @@ class MonitorPlot(QWidget):
         return bisect_right(times, stamp, hi=count) - 1
 
     def _display_sample_count(self):
-        if self._scene_cache is not None and self._scene_transform == self._transform_key():
+        if self._scene_range is not None and self._scene_transform == self._transform_key():
             return self._frame_count
         return len(self.buffer) if self.buffer is not None else 0
 
@@ -387,7 +418,7 @@ class MonitorPlot(QWidget):
         return (id(self.buffer), self.zoom_factor, self._view_range, self.width(), self.height(), first)
 
     def _display_time_range(self):
-        if self._scene_cache is not None and self._scene_transform == self._transform_key():
+        if self._scene_range is not None and self._scene_transform == self._transform_key():
             return self._scene_range
         return self.time_range()
 
@@ -407,6 +438,7 @@ class MonitorPlot(QWidget):
         self._scrolling = True
         self._scroll_idle.start()
         self._prepare_timer.stop()
+        self._prepared_frame = None   # prioritize tiles entering the viewport
 
     def scroll_changed(self, _value=None):
         self._begin_scroll()
@@ -456,6 +488,7 @@ class MonitorPlot(QWidget):
         self._drag_moved = False
         self._hold_display = False
         self._toggle_marker = None
+        self._toggle_stamp = None
         self._marker_press_pos = None
         if changed:
             self.markers_changed.emit(tuple(self.markers))
@@ -470,6 +503,17 @@ class MonitorPlot(QWidget):
             self.markers[marker] = stamp
             self.markers_changed.emit(tuple(self.markers))
         self._request_paint()
+
+    def _repaint_marker_change(self):
+        """Show a click immediately when every visible curve tile is already cached."""
+        if not self.isVisible() or self._scene_key != self._scene_geometry():
+            return
+        exposed = self._visible_rect().toAlignedRect()
+        if (not exposed.isEmpty() and self._lane_scenes
+                and all(column in self._lane_scenes for column, _ in self._scene_rows(exposed))):
+            # _hold_display keeps this a cached blit plus the marker/readout
+            # overlay. Never start an expensive curve render inside an input event.
+            self.repaint(exposed)
 
     def set_highlight(self, column):
         if column != self.highlight:
@@ -558,17 +602,18 @@ class MonitorPlot(QWidget):
             hit, on_line = self._marker_hit(position)
             stamp = self._sample_time_at(position)
             self._toggle_marker = None
+            self._toggle_stamp = None
             self._marker_press_pos = None
             if hit is not None and on_line and abs(self._marker_line_x(hit) - position.x()) <= 1.0:
-                # Decide on release: a stationary click removes this marker,
-                # while a drag moves it. Nearby distinct positions can still
-                # place the other marker even within the wider drag hit area.
+                # Hide on press for immediate feedback. Keep its original time
+                # so a subsequent drag can move it or restore an invalid drop.
                 self._drag_marker = hit
                 self._toggle_marker = hit
+                self._toggle_stamp = self.markers[hit]
                 self._marker_press_pos = QPointF(position)
                 self._drag_moved = False
-                self._hold_display = True
-                self._request_paint()
+                self._set_marker(hit, None)
+                self._repaint_marker_change()
                 event.accept()
                 return
             # An empty A or B is still placed, even if the click is near the
@@ -599,11 +644,13 @@ class MonitorPlot(QWidget):
             marker = self._drag_marker
             moved = self._drag_moved
             toggle = self._toggle_marker == marker
+            original_stamp = self._toggle_stamp
             distance = ((event.position() - self._marker_press_pos).manhattanLength()
                         if self._marker_press_pos is not None else 0)
             self._drag_marker = None
             self._drag_moved = False
             self._toggle_marker = None
+            self._toggle_stamp = None
             self._marker_press_pos = None
             if toggle and not moved and distance < 3:
                 self._set_marker(marker, None)
@@ -612,6 +659,8 @@ class MonitorPlot(QWidget):
                 stamp = self._sample_time_at(event.position()) if moved or toggle and distance >= 3 else None
                 if stamp is not None:
                     self._set_marker(marker, stamp)
+                elif toggle and self.markers[marker] is None:
+                    self._set_marker(marker, original_stamp)
                 else:
                     self._hold_display = False
                     self._request_paint()
@@ -728,11 +777,12 @@ class MonitorPlot(QWidget):
             painter.setPen(QPen(color, 1.0 if dense else 1.4))
             painter.setBrush(Qt.NoBrush)
             if cached:
-                polygon, marks = cached[2:]
+                path, marks = cached[2:]
             else:
-                polygon = QPolygonF(self.trace(times, values, first, start, span, lane, y_of,
-                                              lambda lo, hi: self.buffer.extrema(source, lo, hi, self.signed),
-                                              last=trace_end))
+                extrema = lambda lo, hi: self.buffer.extrema(source, lo, hi, self.signed)
+                path = (self.envelope_lines(times, values, first, start, span, lane, y_of, extrema, trace_end)
+                        if dense else QPolygonF(self.trace(times, values, first, start, span, lane, y_of,
+                                                          last=trace_end)))
                 marks = []
                 failures = self.buffer.failures[source]
                 if failures:
@@ -743,11 +793,13 @@ class MonitorPlot(QWidget):
                         at = bisect_left(failures, lo)
                         if at < len(failures) and failures[at] < hi:
                             marks.append(lane.left() + pixel + 0.5)
-                paths[column] = (data_low, data_high, polygon, marks)
-            if len(polygon) == 1:
-                painter.drawEllipse(polygon[0], 2, 2)
+                paths[column] = (data_low, data_high, path, marks)
+            if dense:
+                painter.drawLines(path)
+            elif len(path) == 1:
+                painter.drawEllipse(path[0], 2, 2)
             else:
-                painter.drawPolyline(polygon)
+                painter.drawPolyline(path)
             failures = self.buffer.failures[source]
             if failures:
                 painter.setPen(QPen(QColor("#C44848"), 1))
@@ -890,6 +942,8 @@ class MonitorPlot(QWidget):
                 return
             self._prepare_timer.stop()
             self._prepared_frame = None
+        self._tile_timer.stop()
+        self._pending_tiles.clear()
         self._prepared_frame = {"geometry": geometry, "revision": self.buffer.revision if self.buffer else 0,
                                 "count": len(self.buffer) if self.buffer is not None else 0,
                                 "range": self.time_range(), "ratio": ratio, "paths": {}, "tiles": OrderedDict(),
@@ -935,7 +989,49 @@ class MonitorPlot(QWidget):
         self._frame_created = time.monotonic()
         self._scene_rect = None
         self._prepared_frame = None
+        self._tile_timer.stop()
+        self._pending_tiles.clear()
         self._request_paint()
+
+    def _tile_frame_key(self):
+        return (self._scene_key, self._scene_revision, self._frame_count, self._scene_range)
+
+    def _queue_tiles(self, exposed, ratio):
+        """Prepare visible cache misses first, then nearby rows during a scroll."""
+        visible = self._scene_rows(exposed)
+        wanted = OrderedDict(visible)
+        if self._scrolling:
+            margin = 2 * (self.LANE_MIN_HEIGHT + 8)
+            for column, rect in self._scene_rows(exposed.adjusted(0, -margin, 0, margin)):
+                wanted.setdefault(column, rect)
+        key = self._tile_frame_key()
+        self._pending_tiles = OrderedDict(
+            (column, (rect, ratio, key)) for column, rect in wanted.items()
+            if column not in self._lane_scenes or abs(self._lane_scenes[column].devicePixelRatio() - ratio) > .01)
+        if self._pending_tiles and not self._tile_timer.isActive():
+            self._tile_timer.start(1)
+        elif not self._pending_tiles:
+            self._tile_timer.stop()
+
+    def _prepare_tile(self):
+        if not self.isVisible() or not self._pending_tiles:
+            self._pending_tiles.clear()
+            return
+        if self._drag_marker is not None or self._hold_display:
+            self._tile_timer.start(30)
+            return
+        column, (rect, ratio, key) = self._pending_tiles.popitem(last=False)
+        if key != self._tile_frame_key() or self._scene_key != self._scene_geometry():
+            self._pending_tiles.clear()
+            self._request_paint()
+            return
+        # This job runs between input/paint events, never inside a wheel repaint.
+        # Appends keep the captured prefix valid; buffer drops invalidate the key.
+        self._lane_scenes[column] = self._render_lane(rect, ratio)
+        self._lane_scenes.move_to_end(column)
+        self._request_paint()
+        if self._pending_tiles:
+            self._tile_timer.start(1)
 
     def _compose_scene(self, exposed, ratio):
         """Reuse individual lane images across changes to the vertical viewport."""
@@ -962,13 +1058,21 @@ class MonitorPlot(QWidget):
         return image
 
     def _blit_lanes(self, painter, exposed, ratio):
-        """Draw cached lane images. Scrolling must not rebuild traces."""
+        """Draw cached lanes; defer missing curves instead of blocking scrolling."""
         rows = self._scene_rows(exposed)
+        missing = any(column not in self._lane_scenes
+                      or abs(self._lane_scenes[column].devicePixelRatio() - ratio) > .01
+                      for column, _ in rows)
+        if missing:
+            # Show labels/grid immediately while the next short tile job prepares
+            # the curve. A count of zero skips every sample/extrema/trace scan.
+            self._paint_chart(painter, exposed, *self._scene_range,
+                              frame={"count": 0, "revision": self._scene_revision, "paths": {}})
+        self._queue_tiles(exposed, ratio)
         for column, rect in rows:
             tile = self._lane_scenes.get(column)
             if tile is None or abs(tile.devicePixelRatio() - ratio) > 0.01:
-                tile = self._render_lane(rect, ratio)
-                self._lane_scenes[column] = tile
+                continue
             self._lane_scenes.move_to_end(column)
             painter.drawPixmap(rect.topLeft(), tile)
         if not self._scrolling:
@@ -1008,12 +1112,32 @@ class MonitorPlot(QWidget):
         # at. Rebuilding here both stalls the wheel and shifts A/B off the cursor.
         freeze = self._interaction_frozen()
         structural = self._scene_key is None or geometry != self._scene_key
+        if self._scrolling:
+            if structural:
+                # A resize, lane change or retained-buffer drop invalidates the
+                # old frame. Start fresh metadata, but leave curve work deferred.
+                self._tile_timer.stop()
+                self._pending_tiles.clear()
+                self._scene_range = self.time_range()
+                self._scene_transform = transform
+                self._scene_key = geometry
+                self._scene_revision = revision
+                self._frame_count = len(self.buffer) if self.buffer is not None else 0
+                self._lane_scenes.clear()
+                self._trace_cache.clear()
+                self._cache_key = None
+                self._scene_cache = None
+            self._blit_lanes(painter, exposed, ratio)
+            self._paint_readouts(painter, exposed, *self._scene_range)
+            self._finish_paint_flags(True)
+            self._sync_axis_view()
+            return
         update_data = (not freeze and changed and (not self._mouse_repaint or self._data_refresh_requested))
         if not structural and update_data and self._frame_render_ms >= 12 and self.isVisible():
             self._start_prepare(geometry, exposed, ratio)
             update_data = False
         new_frame = structural or update_data
-        use_blit = (not new_frame and self._lane_scenes and self._scene_range is not None
+        use_blit = (not new_frame and self._scene_range is not None
                     and self._scene_transform == transform)
         if use_blit:
             self._blit_lanes(painter, exposed, ratio)
@@ -1022,6 +1146,8 @@ class MonitorPlot(QWidget):
             self._sync_axis_view()
             return
         if new_frame:
+            self._tile_timer.stop()
+            self._pending_tiles.clear()
             self._prepare_timer.stop()
             self._prepared_frame = None
             self._scene_range = self.time_range()
