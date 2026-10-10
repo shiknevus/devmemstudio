@@ -1,5 +1,6 @@
 """Register monitor: board sampler script, stream parser, sample buffer and plot."""
 import os
+import inspect
 import random
 from pathlib import Path
 import shutil
@@ -251,6 +252,84 @@ class BufferTests(unittest.TestCase):
 
 
 class DialogTests(unittest.TestCase):
+    def test_scroll_cache_misses_render_between_events_and_keep_receiving_samples(self):
+        buffer = MonitorBuffer(32)
+        buffer.extend([(i*.01, tuple(i+column for column in range(32))) for i in range(1500)])
+        self.dialog.buffer = buffer
+        self.dialog.monitored = [(f'R{i}', 0x1000+i*4) for i in range(32)]
+        plot = self.dialog.plot
+        plot.set_series(buffer, [name for name, _ in self.dialog.monitored])
+        self.dialog.show()
+        self.app.processEvents()
+        plot.repaint()
+        drawn = plot._display_time_range()
+        calls = []
+        render = MonitorPlot._render_lane
+
+        def record_render(widget, *args, **kwargs):
+            cursor = inspect.currentframe().f_back
+            try:
+                while cursor is not None and cursor.f_code is not MonitorPlot.paintEvent.__code__:
+                    cursor = cursor.f_back
+                calls.append(cursor is not None)
+            finally:
+                del cursor
+            return render(widget, *args, **kwargs)
+
+        with patch.object(MonitorPlot, '_render_lane', new=record_render):
+            scrollbar = self.dialog.plot_scroll.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+            plot._scroll_idle.stop()   # keep the simulated gesture active
+            plot.repaint()
+            self.assertEqual(calls, [])
+            self.dialog._samples(self.dialog._epoch, [(15., tuple(range(32)))])
+            self.assertEqual(buffer.total, 1501)
+            deadline = time.monotonic() + 2
+            while 31 not in plot._trace_cache and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.005)
+            self.assertIn(31, plot._trace_cache)
+            self.assertTrue(calls)
+            self.assertFalse(any(calls), 'scroll paint synchronously rendered a missing curve')
+            self.assertEqual(plot._display_time_range(), drawn)
+        plot._scroll_finished()
+        plot.repaint()
+        deadline = time.monotonic() + 2
+        while plot._scene_revision != buffer.revision and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertEqual(plot._scene_revision, buffer.revision)
+
+    def test_scroll_rejects_tiles_from_before_a_retained_buffer_drop(self):
+        buffer = MonitorBuffer(32, limit=64)
+        buffer.extend([(i*.01, tuple(i+column for column in range(32))) for i in range(64)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.set_series(buffer, [f'R{i}' for i in range(32)])
+        self.dialog.show()
+        self.app.processEvents()
+        plot.repaint()
+        scrollbar = self.dialog.plot_scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        plot._scroll_idle.stop()
+        plot.repaint()
+        buffer.extend([(i*.01, tuple(i+column for column in range(32))) for i in range(64, 73)])
+        with patch.object(MonitorPlot, '_render_lane') as render:
+            plot._prepare_tile()
+            render.assert_not_called()
+            plot.repaint()
+            render.assert_not_called()
+            # Ending the gesture before a first tile is ready must not fall
+            # back to a synchronous render of the whole newly visible area.
+            plot._scroll_finished()
+            plot.repaint()
+            render.assert_not_called()
+        self.assertEqual(plot._frame_count, len(buffer))
+        self.assertEqual(plot._display_time_range()[0], buffer.times[0])
+        plot._tile_timer.stop()
+        plot._prepare_tile()
+        self.assertTrue(plot._trace_cache)
+
     def test_background_export_keeps_ui_responsive_and_exports_a_stable_snapshot(self):
         self.dialog.monitored = [('R0', 0x1000)]
         self.dialog.buffer = MonitorBuffer(1, limit=8)
@@ -557,6 +636,12 @@ class DialogTests(unittest.TestCase):
         visible_top = scrollbar.value()
         self.assertGreaterEqual(lane.top(), visible_top)
         self.assertLessEqual(lane.bottom(), visible_top + self.dialog.plot_scroll.viewport().height())
+        # Newly visible rows are prepared between input events rather than
+        # synchronously in the scroll repaint.
+        deadline = time.monotonic() + 2
+        while 31 not in self.dialog.plot._trace_cache and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
         self.assertIn(31, self.dialog.plot._trace_cache)
         self.dialog.stop()
         with tempfile.TemporaryDirectory() as folder:
@@ -1129,6 +1214,93 @@ class DialogTests(unittest.TestCase):
 
 
 class PlotTests(unittest.TestCase):
+    def test_dense_lines_preserve_the_reference_envelope_and_single_sample_pulses(self):
+        rng = random.Random(42)
+        buffer = MonitorBuffer(1)
+        buffer.extend([(i*.001, (rng.randrange(100),)) for i in range(1000)])
+        rect = QRectF(0, 0, 20, 100)
+        points = MonitorPlot.trace(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value)
+        lines = MonitorPlot.envelope_lines(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value,
+                                           lambda low, high: buffer.extrema(0, low, high), len(buffer))
+        reference = {}
+        for first, second in zip(points, points[1:]):
+            if first.x() == second.x():
+                low, high = sorted((first.y(), second.y()))
+                previous = reference.get(first.x(), (low, high))
+                reference[first.x()] = (min(previous[0], low), max(previous[1], high))
+        optimized = {line.x1(): tuple(sorted((line.y1(), line.y2()))) for line in lines if line.x1() == line.x2()}
+        self.assertEqual(optimized, reference)
+        self.assertLessEqual(len(lines), 2*(int(rect.width())+1))
+        buffer = MonitorBuffer(1)
+        buffer.extend([(i*.001, (100 if i == 500 else 0,)) for i in range(1000)])
+        lines = MonitorPlot.envelope_lines(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value,
+                                           lambda low, high: buffer.extrema(0, low, high), len(buffer))
+        self.assertTrue(any({line.y1(), line.y2()} == {0, 100} for line in lines))
+
+    def tearDown(self):
+        # Dispose standalone charts through Qt while its event loop is alive.
+        # Leaving their timers and paint requests to Python GC made a later
+        # test intermittently destroy native widgets in the middle of painting.
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, MonitorPlot):
+                widget._prepare_timer.stop()
+                widget._scroll_idle.stop()
+                widget._tile_timer.stop()
+                widget.close()
+                widget.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_marker_cancels_and_paints_on_press_without_rebuilding_curves(self):
+        plot = self.marker_plot()
+        try:
+            first = self.mark_position(plot, 2)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=self.mark_position(plot, 7))
+            plot.grab()
+            plot.buffer.extend([(11., (5, 6))])
+            plot._data_refresh_requested = True
+            changes = QSignalSpy(plot.markers_changed)
+            overlays = []
+            paint_readouts = MonitorPlot._paint_readouts
+
+            def record_readouts(widget, *args):
+                overlays.append(tuple(widget.markers))
+                return paint_readouts(widget, *args)
+
+            with patch.object(MonitorPlot, '_render_lane', side_effect=AssertionError('click rebuilt a curve')):
+                with patch.object(MonitorPlot, '_paint_readouts', new=record_readouts):
+                    QTest.mousePress(plot, Qt.LeftButton, pos=first)
+                    self.assertEqual(plot.markers, [None, 7.])
+                    self.assertEqual(changes.count(), 1)
+                    self.assertIn((None, 7.), overlays)
+                    QTest.mouseRelease(plot, Qt.LeftButton, pos=first)
+                    self.assertEqual(plot.markers, [None, 7.])
+                    self.assertEqual(changes.count(), 1)
+        finally:
+            plot.close()
+            plot.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    def test_cancel_press_can_still_drag_and_invalid_drop_restores_original_marker(self):
+        plot = self.marker_plot()
+        try:
+            first = self.mark_position(plot, 2)
+            QTest.mouseClick(plot, Qt.LeftButton, pos=first)
+            QTest.mousePress(plot, Qt.LeftButton, pos=first)
+            self.assertIsNone(plot.markers[0])
+            # Even platforms that omit intermediate mouse moves can complete
+            # a drag with a release at a different valid location.
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=self.mark_position(plot, 5))
+            self.assertEqual(plot.markers, [5., None])
+            QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, 5))
+            self.assertIsNone(plot.markers[0])
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=QPoint(50, 50))
+            self.assertEqual(plot.markers, [5., None])
+        finally:
+            plot.close()
+            plot.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     def test_repeated_click_toggles_one_marker_and_reuses_the_empty_slot(self):
         plot = self.marker_plot()
         try:
