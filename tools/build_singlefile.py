@@ -8,9 +8,10 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
 from ctypes import wintypes as w
-from datetime import datetime, timezone
 import hashlib
+import inspect
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -52,6 +53,30 @@ def compress_lzms(raw):
         return result.raw[:size.value]
     finally:
         api.CloseCompressor(handle)
+
+
+def codec_key():
+    """Everything that shapes the LZMS bytes; any change invalidates the cached payload."""
+    source = inspect.getsource(compress_lzms) + inspect.getsource(split_blocks)
+    return hashlib.sha256(json.dumps([LZMS, BLOCK_SIZE_INFO, MAX_BLOCK, BLOCKS, source]).encode()).hexdigest()
+
+
+def split_blocks(raw):
+    step = -(-len(raw) // BLOCKS)
+    return [raw[offset:offset + step] for offset in range(0, len(raw), step)]
+
+
+def runtime_stamp(content, environ=None):
+    """FILETIME (even second) for the unpacked files: SOURCE_DATE_EPOCH, else derived from the runtime content.
+
+    Never the build time, so rebuilding the same sources gives the same EXE and keeps users' caches valid."""
+    environ = os.environ if environ is None else environ
+    epoch = environ.get("SOURCE_DATE_EPOCH", "")
+    if epoch.isdigit() and 315532800 <= int(epoch) < 4102444800:   # 1980..2100: FAT/ZIP representable
+        seconds = int(epoch)
+    else:
+        seconds = 1577836800 + int(content[:12], 16) % (10 * 365 * 86400)   # 2020..2030
+    return (seconds // 2 * 2 + 11644473600) * 10_000_000
 
 
 def c_wide(text):
@@ -102,20 +127,21 @@ def main():
         cached = json.loads(payload_key.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cached = {}
-    reused = payload.is_file() and cached.get("raw_sha256") == raw_sha.hex() and len(cached.get("blocks", ())) == BLOCKS
-    if reused:   # unchanged runtime: the LZMS bytes would be identical
+    codec = codec_key()
+    reused = (payload.is_file() and cached.get("raw_sha256") == raw_sha.hex() and cached.get("codec") == codec
+              and len(cached.get("blocks", ())) == BLOCKS and sum(item[0] for item in cached["blocks"]) == payload.stat().st_size)
+    if reused:   # unchanged runtime and codec: the LZMS bytes would be identical
         packed, blocks = payload.read_bytes(), cached["blocks"]
     else:
         payload_key.unlink(missing_ok=True)
-        step = -(-len(raw) // BLOCKS)
-        parts = [raw[offset:offset + step] for offset in range(0, len(raw), step)]
+        parts = split_blocks(raw)
         with ThreadPoolExecutor(len(parts)) as pool:
             packed_parts = list(pool.map(compress_lzms, parts))
         packed = b"".join(packed_parts)
         blocks = [[len(done), len(part)] for done, part in zip(packed_parts, parts)]
         payload.write_bytes(packed)
-        payload_key.write_text(json.dumps({"raw_sha256": raw_sha.hex(), "blocks": blocks}), encoding="utf-8")
-    stamp = (int(datetime.now(timezone.utc).timestamp()) // 2 * 2 + 11644473600) * 10_000_000   # FILETIME, even second
+        payload_key.write_text(json.dumps({"raw_sha256": raw_sha.hex(), "codec": codec, "blocks": blocks}), encoding="utf-8")
+    stamp = runtime_stamp(content)
     digest = ",".join(f"0x{byte:02x}" for byte in raw_sha)
     lines = ["#include <stddef.h>",
              f'#define RUNTIME_ID L"{runtime_id}"',
@@ -190,7 +216,7 @@ END
     result = build / "DevmemStudio.new.exe"
     subprocess.run([gcc, "-std=c11", "-Os", "-s", "-Wall", "-Wextra", "-Werror", "-municode", "-mwindows",
                     "-fno-ident", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
-                    "-Wl,--dynamicbase,--nxcompat,--high-entropy-va", "-I", str(build),
+                    "-Wl,--dynamicbase,--nxcompat,--high-entropy-va,--no-insert-timestamp", "-I", str(build),   # reproducible EXE
                     str(ROOT / "tools" / "runtime_launcher" / "launcher.c"), "launcher.res",
                     "-lcabinet", "-lbcrypt", "-o", str(result)], cwd=build, check=True)
     target = args.output.resolve()

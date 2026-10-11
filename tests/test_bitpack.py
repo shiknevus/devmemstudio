@@ -1,13 +1,17 @@
 """Bundled tool extraction, launch lifecycle and safe failure regressions."""
 import hashlib
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from devmem_studio import bitpack
 from devmem_studio.core import resource_path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class BitPackTests(unittest.TestCase):
@@ -168,6 +172,57 @@ class BitPackTests(unittest.TestCase):
             first.close()
             first.close()
             second.close()
+
+
+@unittest.skipUnless(sys.platform == "win32" and shutil.which("gcc"), "Windows and MinGW gcc required")
+class NativeSourceTests(unittest.TestCase):
+    """The current C sources, built into scratch space; the bundled EXE may lag behind them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.scratch = tempfile.TemporaryDirectory(prefix="bitpack-src-")
+        cls.base = Path(cls.scratch.name)
+        source = ROOT / "tools" / "bitpack"
+        flags = ["-std=c11", "-Os", "-Wall", "-Wextra", "-Wpedantic", "-Wformat=2", "-Werror", "-municode"]
+        libs = ["-lshell32", "-lole32", "-luuid", "-ladvapi32", "-lcomctl32"]
+        for name, files, extra in (("core_tests.exe", [source / "tests" / "core_tests.c"], libs),
+                                   ("tool_stub.exe", [source / "tests" / "tool_stub.c"], []),
+                                   ("pack_bit.exe", [source / "pack_bit.c", source / "pack_core.c"], ["-mwindows", *libs])):
+            subprocess.run([shutil.which("gcc"), *flags, "-o", str(cls.base / name), *map(str, files), *extra],
+                           check=True, capture_output=True, timeout=180, creationflags=subprocess.CREATE_NO_WINDOW)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.scratch.cleanup()
+
+    def test_core_suite_passes(self):
+        result = subprocess.run([str(self.base / "core_tests.exe"), str(self.base / "core-work"), str(self.base / "tool_stub.exe")],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(", 0 failed", result.stdout)
+
+    def test_cli_auto_pick_ignores_junction_beside_the_bit(self):
+        folder, target = self.base / "pick", self.base / "pick-target"
+        folder.mkdir()
+        target.mkdir()
+        (folder / "only.bit").write_bytes(bytes(range(256)) * 4)
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(folder / "link"), str(target)], check=True, capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            result = subprocess.run([str(self.base / "pack_bit.exe"), "AUTO1"], cwd=folder, capture_output=True,
+                                    text=True, encoding="utf-8", errors="replace", timeout=120,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(len(list(folder.glob("AUTO1_bit_*.zip"))), 1)
+            (folder / "second.bit").write_bytes(b"other")
+            result = subprocess.run([str(self.base / "pack_bit.exe"), "AUTO2"], cwd=folder, capture_output=True,
+                                    text=True, encoding="utf-8", errors="replace", timeout=120,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("没有唯一可确认的 .bit", result.stdout)
+        finally:
+            (folder / "link").rmdir()
 
 
 if __name__ == "__main__":

@@ -3,29 +3,39 @@
 EXE's 更新控件 feature (runtime re-parse of a single component folder)."""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import re
 
 from .top_import import read_text_resilient
 
 ALIASES = {"ec_sf_door": "sf_doo"}
-DEFINE = re.compile(r"^[ \t]*`define\s+(\w+)\s+\d*\s*'\s*[hH]\s*([0-9A-Fa-f_]+)", re.M)
-WRITE = re.compile(r"wr_task_addr(?:\s*\[[^\]]*\])?\s*==\s*`(\w+)\b[^?;]*?\?\s*i_st_wr_data"
-                   r"(?:\s*\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\])?")
+# 9'h1B4 / 12'd16 / plain 436 (a plain number must end the line: no expressions).
+DEFINE = re.compile(r"^[ \t]*`define[ \t]+(\w+)[ \t]+(?:\d*[ \t]*'[ \t]*[sS]?([hHdD])[ \t]*([0-9A-Fa-f_]+)"
+                    r"|(\d[\d_]*)[ \t\r]*$)", re.M)
+_WR_ADDR = r"wr_task_addr(?:\s*\[[^\]]*\])?\s*==\s*`(\w+)\b"
+# i_st_wr_data[15:0], optionally behind high padding: {16'd0, i_st_wr_data[15:0]}.
+_WR_DATA = (r"(?:\{\s*(?:\d+\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,\s*)+)?"
+            r"i_st_wr_data(?:\s*\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\])?")
+WRITE = re.compile(_WR_ADDR + r"[^?;]*?\?\s*" + _WR_DATA)
+WRITE_IF = re.compile(r"\bif\s*\([^;]*?" + _WR_ADDR + r"[^;]*?\)\s*(?:begin\b\s*)?"
+                      r"[A-Za-z_]\w*(?:\s*\[[^\]]*\])*\s*<?=\s*" + _WR_DATA)
 READ_CASE = re.compile(r"case\s*\(\s*rd_addr_d2(?:\s*\[[^\]]*\])?\s*\)(.*?)endcase", re.S)
-# One read arm only ([^;\n] stops at the arm's end); <= or =, any radix padding literal.
-READ_PADDED = re.compile(r"`(\w+)\s*:[^;\n]*?<?=\s*\{\s*(\d+)\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,")
-# Net/variable declarations: numeric [m:n] or none (1 bit); parameterized ranges stay unknown.
-DECLARATION = re.compile(r"\b(?:input|output|inout|wire|reg|logic)\b"
-                         r"(?:\s+(?:wire|reg|logic|var|signed|unsigned)\b)*\s*"
-                         r"(\[[^\]\n]*\])?\s*((?:(?!\b(?:input|output|inout|wire|reg|logic)\b)[^;\n)])*)")
+# One read arm only ([^;\n] stops at the arm's end); <= or =, concat value.
+READ_CONCAT = re.compile(r"`(\w+)\s*:[^;\n]*?<?=\s*(\{[^;\n]*\})\s*;")
+_RD_ADDR = r"\b(?:rd_addr_d1|rd_addr_d2|rd_task_addr)\b(?:\s*\[[^\]]*\])?"
+READ_COMPARE = re.compile(_RD_ADDR + r"\s*[!=]==?\s*`(\w+)|`(\w+)\s*[!=]==?\s*" + _RD_ADDR)
+DECLARATION_KEYWORD = re.compile(r"\b(?:input|output|inout|wire|reg|logic)\b")
+DECLARATION_HEAD = re.compile(r"\b(?:input|output|inout|wire|reg|logic)\b"
+                              r"((?:\s+(?:wire|reg|logic|var|signed|unsigned)\b)*)\s*((?:\[[^\]]*\]\s*)*)")
 DECLARATION_KEYWORDS = {"input", "output", "inout", "wire", "reg", "logic", "var", "signed", "unsigned"}
-PARAM_NOTE = re.compile(r"^[ \t]*,?[ \t]*\.[ \t]*([Pp][Aa][Rr][Aa][Mm]\d+)[ \t]*\([^()\n]*\)[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
-BHA_NUM = re.compile(r"localparam\s+([ABC])_BHA_NUM\s*=\s*\d+\s*;[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
+PARAM_NOTE = re.compile(r"^[ \t]*,?[ \t]*\.[ \t]*([Pp][Aa][Rr][Aa][Mm]\d+)[ \t]*\((?:[^()\n]|\([^()\n]*\))*\)"
+                        r"[ \t]*,?[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
+BHA_NUM = re.compile(r"^[ \t]*localparam\s+([ABC])_BHA_NUM\s*=\s*\d+\s*;[ \t\r]*(?://[ \t]*(.*?))?[ \t\r]*$", re.M)
 BEHAVIOR_PAIR = re.compile(r"(\d+)\s*([A-Za-z_][\w\-]*(?:\[[\w\-]+\])?)")
 SIGNAL_PORT = re.compile(r"\.\s*([A-Za-z_]\w*)\s*\(\s*param(\d+)\s*(?:\[[^\]\n]*\])?\s*\)")
 SIGNAL_ASSIGN = re.compile(r"assign\s+([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*=\s*param(\d+)\b(?:\[[^\]\n]*\])?")
-PARAM_EXPR = re.compile(r"[,.]?\s*\.\s*param(\d+)\s*\(\s*([^()\n]*?)\s*\)", re.I)
+PARAM_HEAD = re.compile(r"\.\s*param(\d+)\s*\(", re.I)
 SIZED_LITERAL = re.compile(r"\d+'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+")
 IDENTIFIER = re.compile(r"\b[A-Za-z_]\w*\b")
 PLAINTEXT_MARKERS = ("wr_task_addr", "rd_addr_d2")
@@ -33,7 +43,7 @@ PLAINTEXT_MARKERS = ("wr_task_addr", "rd_addr_d2")
 DEBUG_REG_NOTE = ("{channel} 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。"
                   "状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 "
                   "10发40 11等40应答 12/13结束")
-DEBUG_HOOKUP = re.compile(r"[,.]?\s*\.\s*debug_reg(\d)\s*\(\s*([^()\n]*?)\s*\)", re.I)
+DEBUG_HEAD = re.compile(r"\.\s*debug_reg(\d)\s*\(", re.I)
 REPLICATION = re.compile(r"^(\d+)\s*\{\s*(\d+)'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*\}$")
 SIZED_LITERAL_LINE = re.compile(r"^(\d+)'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+$")
 HOOKUP_IDENT = re.compile(r"^([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?$")
@@ -63,14 +73,67 @@ def strip_comments(text: str) -> str:
     return re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
 
 
-def parse_define_table(text: str) -> dict[str, int]:
-    return {name: int(offset.replace("_", ""), 16) for name, offset in DEFINE.findall(text)}
+def strip_block_comments(text: str) -> str:
+    """Drop /* */ comments only (same scan as strip_comments), keeping // trailing notes."""
+    return re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: m.group(0) if m.group(0).startswith("//")
+                  else "\n" * m.group(0).count("\n"), text, flags=re.S)
+
+
+def port_hookups(body: str, head: re.Pattern) -> list[tuple[str, str]]:
+    """(number, expression) per `.portN ( expr )`; parens are counted, so nested and multi-line hookups work."""
+    found = []
+    for match in head.finditer(body):
+        depth, cursor = 1, match.end()
+        while cursor < len(body) and depth:
+            depth += {"(": 1, ")": -1}.get(body[cursor], 0)
+            cursor += 1
+        if not depth:
+            found.append((match.group(1), " ".join(body[match.end():cursor - 1].split())))
+    return found
+
+
+def parse_define_table(text: str, warnings: list[str] | None = None) -> dict[str, int]:
+    """Register offsets from reg_addr_pl.vh; a later redefinition wins (warned when it differs)."""
+    table: dict[str, int] = {}
+    for name, radix, digits, plain in DEFINE.findall(strip_comments(text)):
+        try:
+            value = int(plain.replace("_", "")) if plain else int(digits.replace("_", ""), 16 if radix in "hH" else 10)
+        except ValueError:
+            continue
+        if name in table and table[name] != value and warnings is not None:
+            warnings.append(f"reg_addr_pl.vh: {name} 重复定义且取值不同（0x{table[name]:X} / 0x{value:X}），使用后者")
+        table[name] = value
+    return table
+
+
+def _literal_width(element: str) -> int | None:
+    """Width of a constant concat element (8'd0 or {24{1'b0}}); None for anything else."""
+    element = element.strip()
+    if element.startswith("{") and element.endswith("}"):
+        element = element[1:-1].strip()
+    replication = REPLICATION.match(element)
+    if replication:
+        return int(replication.group(1)) * int(replication.group(2))
+    sized = SIZED_LITERAL_LINE.match(element)
+    return int(sized.group(1)) if sized else None
+
+
+def _padded_read_width(concat: str) -> int | None:
+    """Read width of {pad, value, pad}: 32 minus constant padding on both ends."""
+    pads = [_literal_width(part) for part in split_top_level(concat.strip()[1:-1])]
+    lead = trail = 0
+    while pads and pads[0] is not None:
+        lead += pads.pop(0)
+    while pads and pads[-1] is not None:
+        trail += pads.pop()
+    width = 32 - lead - trail
+    return width if pads and (lead or trail) and width > 0 else None
 
 
 def _write_widths(body: str) -> dict[str, int | None]:
     """Written bit span per register; None = full-word write (no slice)."""
     spans: dict[str, tuple[int, int] | None] = {}
-    for name, hi, lo in WRITE.findall(body):
+    for name, hi, lo in [*WRITE.findall(body), *WRITE_IF.findall(body)]:
         span = None
         if hi:
             first, second = int(hi), int(lo if lo else hi)
@@ -84,18 +147,29 @@ def _write_widths(body: str) -> dict[str, int | None]:
 
 
 def parse_decode_file(text: str) -> list[dict]:
-    """Registers implemented by one ps_rw_pl_reg module: read case plus write ternaries."""
+    """Registers implemented by one ps_rw_pl_reg module: read case plus write ternaries/ifs.
+
+    A read address compared outside the read mux (e.g. rd_en_d2 && rd_addr_d2 == `X
+    popping a FIFO) marks that register read_side_effect."""
     body = strip_comments(text)
     writes = _write_widths(body)
     case = READ_CASE.search(body)
     reads, widths = set(), {}
     if case:
-        for name, pad in READ_PADDED.findall(case.group(1)):
-            widths[name] = 32 - int(pad)
+        for name, concat in READ_CONCAT.findall(case.group(1)):
+            width = _padded_read_width(concat)
+            if width:
+                widths[name] = width
         reads = set(re.findall(r"`([A-Z]\w*)", case.group(1)))
-    return [{"name": name, "writable": name in writes, "readable": name in reads,
-             "width": writes.get(name) or widths.get(name) or 32}
-            for name in sorted(reads | set(writes))]
+    side_effects = {first or second for first, second in READ_COMPARE.findall(READ_CASE.sub(" ", body))}
+    entries = []
+    for name in sorted(reads | set(writes)):
+        item = {"name": name, "writable": name in writes, "readable": name in reads,
+                "width": writes.get(name) or widths.get(name) or 32}
+        if name in side_effects:
+            item["read_side_effect"] = True
+        entries.append(item)
+    return entries
 
 
 def top_is_plaintext(text: str) -> bool:
@@ -142,9 +216,10 @@ def find_top_file(key: str, decode_path: Path) -> Path | None:
 def harvest_type_notes(top_path: Path) -> dict:
     """Parameter comments, behavior tables and the real signal names behind PARAM registers."""
     text = read_text_resilient(top_path)
-    notes = {name.upper(): note.strip() for name, note in PARAM_NOTE.findall(text) if note.strip()}
+    noted = strip_block_comments(text)   # ^-anchored patterns skip // lines; block comments go
+    notes = {name.upper(): note.strip() for name, note in PARAM_NOTE.findall(noted) if note.strip()}
     behaviors = {}
-    for channel, comment in BHA_NUM.findall(text):
+    for channel, comment in BHA_NUM.findall(noted):
         pairs = [{"name": name, "value": int(value)}
                  for value, name in BEHAVIOR_PAIR.findall(comment or "")]
         if pairs:
@@ -163,7 +238,7 @@ def harvest_type_notes(top_path: Path) -> dict:
         add(number, port)
     # Reg-file hookups like .param64 ({7'd0,i_axis_limf}): the real signals sit in the
     # connection expression itself. For concats keep every wire (with its bit select).
-    for number, expression in PARAM_EXPR.findall(body):
+    for number, expression in port_hookups(body, PARAM_HEAD):
         stripped = expression.strip()
         if stripped.startswith("{"):
             fields = extract_concat_fields(stripped)
@@ -181,23 +256,56 @@ def harvest_type_notes(top_path: Path) -> dict:
             "signals": {f"PARAM{number}": "/".join(names) for number, names in signals.items()}}
 
 
+def iter_declarations(body: str):
+    """(modifiers, packed dims, names) per declaration in comment-free source.
+
+    A name list runs across lines up to ';', the port list's ')' or the next
+    declaration keyword (ANSI ports: input [7:0] a, b, input c)."""
+    position = 0
+    while (head := DECLARATION_HEAD.search(body, position)):
+        following = DECLARATION_KEYWORD.search(body, head.end())
+        limit = following.start() if following else len(body)
+        depth, cursor = 0, head.end()
+        while cursor < limit:
+            character = body[cursor]
+            if character in "([{":
+                depth += 1
+            elif character in ")]}":
+                if not depth:
+                    break
+                depth -= 1
+            elif character == ";" and not depth:
+                break
+            cursor += 1
+        names = []
+        for piece in split_top_level(body[head.end():cursor]):
+            name = re.match(r"\s*([A-Za-z_]\w*)", piece)
+            if name and name.group(1) not in DECLARATION_KEYWORDS:
+                names.append(name.group(1))
+        yield head.group(1).split(), re.findall(r"\[[^\]]*\]", head.group(2)), names
+        position = max(cursor, head.end())
+
+
+def _packed_width(dims: list[str]) -> int | None:
+    """[3:0][7:0] -> 32; no range -> 1 bit; parameterized ranges stay unknown."""
+    width = 1
+    for dim in dims:
+        numbers = re.fullmatch(r"\[\s*(\d+)\s*:\s*(\d+)\s*\]", dim)
+        if not numbers:
+            return None
+        width *= abs(int(numbers.group(1)) - int(numbers.group(2))) + 1
+    return width
+
+
 def harvest_signal_widths(text: str) -> dict[str, int | None]:
     """Declared bit width per signal name in one module source.
 
     None marks a name whose width is not a plain number ([W-1:0]) or that is
     declared with different widths in different scopes."""
     widths: dict[str, int | None] = {}
-    for packed, rest in DECLARATION.findall(strip_comments(text)):
-        if packed:
-            numbers = re.fullmatch(r"\[\s*(\d+)\s*:\s*(\d+)\s*\]", packed)
-            width = abs(int(numbers.group(1)) - int(numbers.group(2))) + 1 if numbers else None
-        else:
-            width = 1
-        for piece in split_top_level(rest):
-            name = re.match(r"\s*([A-Za-z_]\w*)", piece)
-            if not name or name.group(1) in DECLARATION_KEYWORDS:
-                continue
-            key = name.group(1)
+    for _, dims, names in iter_declarations(strip_comments(text)):
+        width = _packed_width(dims)
+        for key in names:
             widths[key] = width if widths.get(key, width) == width else None
     return widths
 
@@ -205,8 +313,8 @@ def harvest_signal_widths(text: str) -> dict[str, int | None]:
 def element_width(element: str, widths: dict | None = None) -> int | None:
     """Width of one concat element: None when it can't be determined.
 
-    Plain identifiers take their declared width; an undeclared one is an
-    implicit 1-bit net, as in Verilog."""
+    Plain identifiers take their declared width from `widths`; one missing
+    there is unknown (None). Without a widths map (names only) it counts 1 bit."""
     if element.startswith("{") and element.endswith("}"):
         element = element[1:-1].strip()   # replication group {N{literal}}
     replication = REPLICATION.match(element)
@@ -221,7 +329,7 @@ def element_width(element: str, widths: dict | None = None) -> int | None:
     if re.match(r"^[A-Za-z_]\w*\s*\[\s*\d+\s*\]$", element):
         return 1
     if re.match(r"^[A-Za-z_]\w*$", element):
-        return (widths or {}).get(element, 1)
+        return 1 if widths is None else widths.get(element)
     return None
 
 
@@ -229,7 +337,7 @@ def extract_concat_fields(expression: str, widths: dict | None = None) -> list[d
     """Bit-field layout of a Verilog concat {a, b, c}: a takes the highest bits.
 
     Sized literals count toward the width (padding) but carry no name; plain
-    identifiers take their declared width from `widths` (1 bit if undeclared),
+    identifiers take their declared width from `widths` (no layout if undeclared),
     indexed selections keep their range."""
     expression = expression.strip()
     if expression.startswith("{") and expression.endswith("}"):
@@ -261,7 +369,7 @@ def extract_concat_fields(expression: str, widths: dict | None = None) -> list[d
 def harvest_debug_snapshots(body: str) -> dict:
     """Registers wired as a concat of several signals are bit snapshots, not state history."""
     notes = {}
-    for number, expression in DEBUG_HOOKUP.findall(body):
+    for number, expression in port_hookups(body, DEBUG_HEAD):
         expression = expression.strip()
         if expression.startswith("{") and expression.endswith("}"):
             expression = expression[1:-1]
@@ -295,9 +403,14 @@ def debug_notes_for(key: str, registers: list[dict], snapshots: dict | None = No
     return notes
 
 
+_LOOKUP = object()
+
+
 def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
-                     rtl_root: Path | None = None) -> tuple[dict, list[str], list[str]]:
-    """One catalog type entry from a decode file; returns (entry, forced_irq, warnings)."""
+                     rtl_root: Path | None = None, top_file=_LOOKUP) -> tuple[dict, list[str], list[str]]:
+    """One catalog type entry from a decode file; returns (entry, forced_irq, warnings).
+
+    top_file: the caller's find_top_file result (None = no top); looked up when omitted."""
     warnings: list[str] = []
     registers = []
     for item in parse_decode_file(read_text_resilient(decode_path)):
@@ -309,6 +422,8 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
                  "readonly": not item["writable"]}
         if item["writable"] and not item["readable"]:
             entry["write_only"] = True
+        if item.get("read_side_effect"):
+            entry["read_side_effect"] = True   # UI/monitor never auto-read it
         registers.append(entry)
     # IRQ_REG1/2 are part of every component's shared header; never ship a table without them.
     present = {item["name"] for item in registers}
@@ -325,7 +440,8 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
         family = decode_path.parent.parent.name
         decode_file = decode_path.name
     entry = {"family": family, "decode_file": decode_file, "registers": registers}
-    top_file = find_top_file(key, decode_path)
+    if top_file is _LOOKUP:
+        top_file = find_top_file(key, decode_path)
     if top_file is None:
         warnings.append(f"{key}: 未找到组件顶层 ec_*.sv，参数注释与行为表未收割")
         return entry, forced, warnings
@@ -343,9 +459,9 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     top_body = strip_comments(top_text)
     widths = harvest_signal_widths(top_text)
     # A hookup that survives comment stripping means the register is wired at all.
-    param_hookups = {number: expression for number, expression in PARAM_EXPR.findall(top_body)}
+    param_hookups = dict(port_hookups(top_body, PARAM_HEAD))
     wired = set(param_hookups)
-    debug_hookups = {number: expression for number, expression in DEBUG_HOOKUP.findall(top_body)}
+    debug_hookups = dict(port_hookups(top_body, DEBUG_HEAD))
     signed_names = harvest_signed_signals(top_file.parent)
     for item in registers:
         signal = signals.get(item["name"])
@@ -374,21 +490,23 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     return entry, forced, warnings
 
 
-SIGNED_PORT = re.compile(r"\b(?:input|output)\s+(?:wire|reg)?\s*signed\s*\[[^\]]*\]\s*([A-Za-z_]\w*)")
 # 脉冲域位置族信号：RTL 内部按有符号处理（如 s_move_tgt = rserv_target_pulse
 # 转 signed），即使端口声明省略 signed 关键字也应按补码显示。
 PULSE_SIGNED_SIGNALS = {"rserv_target_pulse", "rserv_step_pulse"}
 
 
 def harvest_signed_signals(folder: Path) -> set[str]:
-    """Signal names declared signed in any module of the component folder."""
+    """Signal names declared signed (ports or wire/reg/logic, ranged or not) in the folder."""
     folder = Path(folder)
     names = set()
     for path in sorted([*folder.glob("*.sv"), *folder.glob("*.v")]):
         try:
-            names.update(SIGNED_PORT.findall(strip_comments(read_text_resilient(path))))
+            body = strip_comments(read_text_resilient(path))
         except OSError:
             continue
+        for modifiers, _, declared in iter_declarations(body):
+            if "signed" in modifiers:
+                names.update(declared)
     return names
 
 
@@ -414,25 +532,28 @@ def parse_component_folder(folder: Path) -> tuple[dict, dict]:
     if not decode_candidates:
         raise ValueError("文件夹中未找到 ps_rw_pl_reg_*.sv/.v 寄存器解码文件。")
     decode_path = decode_candidates[0]
+    notices = []
+    if len(decode_candidates) > 1:
+        notices.append(f"文件夹内有多个寄存器解码文件（{', '.join(path.name for path in decode_candidates)}），"
+                       f"使用 {decode_path.name}")
     text = read_text_resilient(decode_path)
     if not any(marker in text for marker in PLAINTEXT_MARKERS):
         raise ValueError(f"解码文件不可识别（可能被加密或格式变化）：{decode_path.name}")
     defines_path = find_reg_addr_map(folder)
     if defines_path is None:
         raise ValueError("未在组件文件夹及其上级找到 include_files/reg_addr_pl.vh（寄存器地址表）。")
-    defines = parse_define_table(read_text_resilient(defines_path))
+    defines = parse_define_table(read_text_resilient(defines_path), notices)
     if not defines:
         raise ValueError(f"寄存器地址表为空或不可读：{defines_path}")
     types = folder_module_types(folder)
     key = types[0] if types else folder.name
-    entry, forced, warnings = build_type_entry(key, decode_path, defines)
-    info = {"decode_file": str(decode_path), "defines": str(defines_path),
-            "top_file": "", "forced_irq": forced, "warnings": warnings,
-            "imported_from": str(folder), "types": types}
     top_file = find_top_file(key, decode_path)
-    if top_file is not None:
-        info["top_file"] = str(top_file)
+    entry, forced, warnings = build_type_entry(key, decode_path, defines, top_file=top_file)
+    info = {"decode_file": str(decode_path), "defines": str(defines_path),
+            "top_file": str(top_file) if top_file is not None else "", "forced_irq": forced,
+            "warnings": notices + warnings, "imported_from": str(folder), "types": types}
     entry["imported_from"] = str(folder)
+    entry["imported_at"] = datetime.now().astimezone().isoformat(timespec="seconds")   # survives backup/restore, unlike mtime
     return entry, info
 
 

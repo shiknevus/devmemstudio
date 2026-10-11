@@ -194,7 +194,11 @@ static int run_cli(int argc, wchar_t **argv)
         BitList *list = calloc(1, sizeof *list);
         if (!list) { rc = PACK_FAILED; goto done; }
         list->root = pack_fullpath(L".");
-        if (!list->root || pack_scan(list)) { print_line(list->error); pack_list_free(list); rc = PACK_FAILED; goto done; }
+        if (!list->root) pack_system_error(list->error, PACK_ERROR_CAP, L"[错误] 无法确定当前目录，请用 --input 明确指定源文件", GetLastError());
+        if (!list->root || pack_scan(list)) {
+            print_line(list->error[0] ? list->error : L"[错误] 当前目录扫描失败，请用 --input 明确指定源文件。");
+            pack_list_free(list); rc = PACK_FAILED; goto done;
+        }
         if (list->count != 1 || list->skipped || list->truncated) {
             print_line(L"[错误] 当前目录没有唯一可确认的 .bit 文件，请用 --input 明确指定源文件。");
             pack_list_free(list); rc = PACK_FAILED; goto done;

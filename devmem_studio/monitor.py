@@ -1270,6 +1270,7 @@ class MonitorDialog(ManagedDialog):
         self._selection_key = None
         self._selection_kind = None
         self._epoch = 0
+        self._runs = 0   # bumped only by start(): stop alone must not hide an export's outcome
         self._stop = threading.Event()
         self._workers = set()
         self._dirty = False
@@ -1639,6 +1640,7 @@ class MonitorDialog(ManagedDialog):
             return False
         interval = self.interval_spin.value()
         self._epoch += 1
+        self._runs += 1
         token = self._epoch
         self._stop = stop = threading.Event()
         self.monitored = chosen
@@ -1833,7 +1835,7 @@ class MonitorDialog(ManagedDialog):
         return dict(path=path, times=buffer.times[:],
                     columns=[buffer.column(index, signed)[:] for index in range(len(self.monitored))],
                     failures=[column[:] for column in buffer.failures],
-                    monitored=tuple(self.monitored), count=len(buffer), dropped=buffer.dropped, epoch=self._epoch)
+                    monitored=tuple(self.monitored), count=len(buffer), dropped=buffer.dropped, run=self._runs)
 
     @staticmethod
     def _write_export(request):
@@ -1852,10 +1854,10 @@ class MonitorDialog(ManagedDialog):
                         row_values.append(str(values[index]))
                 writer.writerow(row_values)
         # Queue only completion metadata back to the UI.
-        return {key: request[key] for key in ("path", "count", "dropped", "epoch")}
+        return {key: request[key] for key in ("path", "count", "dropped", "run")}
 
     def _export_finished(self, result):
-        if result["epoch"] != self._epoch:
+        if result["run"] != self._runs:
             return   # a previous run must not replace the new run's status
         note = f"（已丢弃 {result['dropped']:,} 点旧数据）" if result["dropped"] else ""
         self._set_status(f"已导出保留的 {result['count']:,} 点到 {result['path']}{note}",
@@ -1886,14 +1888,14 @@ class MonitorDialog(ManagedDialog):
         self._set_status(f"正在导出 {request['count']:,} 点…")
         worker = Worker(lambda progress: self._write_export(request))
         worker.signals.result.connect(self._export_finished)
-        worker.signals.failed.connect(lambda message: self.bridge.export_failed.emit(request["epoch"], message))
+        worker.signals.failed.connect(lambda message: self.bridge.export_failed.emit(request["run"], message))
         worker.signals.finished.connect(self._export_done)
         worker.signals.finished.connect(lambda: self._workers.discard(worker))
         self._workers.add(worker)
         self.export_pool.start(worker)
 
-    def _export_failed(self, token, message):
-        if token == self._epoch:
+    def _export_failed(self, run, message):
+        if run == self._runs:
             self._set_status(f"导出失败：{message}", "error")
 
     def _export_done(self):

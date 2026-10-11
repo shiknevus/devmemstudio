@@ -22,6 +22,7 @@ class BoardServer(paramiko.ServerInterface):
     def __init__(self, prompt="board# "):
         self.memory = {}
         self.commands = []
+        self.outputs = {}            # extra shell command -> canned output
         self.exec_commands = []
         self.auth_attempts = 0
         # Interactive shells print PS1 before each line; the real device does this
@@ -55,12 +56,17 @@ class BoardServer(paramiko.ServerInterface):
         buffer = b""
         last_exit = 0
         hanging = False
+        interruptible = False   # "slow" hangs until Ctrl+C; "hang" ignores it
         try:
             while not channel.closed:
                 chunk = channel.recv(32768)
                 if not chunk:
                     return
                 buffer += chunk
+                if interruptible and b"\x03" in buffer:
+                    buffer = buffer.rsplit(b"\x03", 1)[1]   # SIGINT flushes the typed-ahead input
+                    hanging = interruptible = False
+                    last_exit = 130
                 while b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     text = line.decode().strip()
@@ -82,8 +88,9 @@ class BoardServer(paramiko.ServerInterface):
                         continue
                     self.commands.append(text)
                     last_exit = 0
-                    if text == "hang":
+                    if text in ("hang", "slow"):
                         hanging = True
+                        interruptible = text == "slow"
                     elif text == "failure":
                         channel.sendall(b"Error 13: Permission denied\r\n")
                         last_exit = 7
@@ -96,6 +103,8 @@ class BoardServer(paramiko.ServerInterface):
                             channel.sendall(f"0x{self.memory.get(address, 0x2A):08X}\r\n".encode())
                     elif text == "pwd":
                         channel.sendall(b"/root\r\n")
+                    elif text in self.outputs:
+                        channel.sendall(self.outputs[text].replace("\n", "\r\n").encode() + b"\r\n")
         except (EOFError, OSError):
             pass
 
@@ -504,7 +513,12 @@ class BitUploadUnitTests(unittest.TestCase):
         class FakeSFTP:
             def stat(self, path):
                 from types import SimpleNamespace
-                return SimpleNamespace(st_size=400)
+                basename = path.rsplit("/", 1)[-1]
+                # The live bit and the chosen backup exist; the aside name stays free
+                # so _free_remote_name (same-second collision avoidance) exits.
+                if basename in ("sunny_fpga.bit", "sunny_fpga.bit_20260916000000"):
+                    return SimpleNamespace(st_size=400)
+                raise FileNotFoundError
 
             def rename(self, src, dst):
                 events["renames"].append((src, dst))
@@ -830,6 +844,25 @@ class SshTests(BoardFixture, unittest.TestCase):
         self.assertFalse(self.session.alive)
         with self.assertRaises(CommandError):
             self.session.read(0xB0102208)
+
+    def test_timeout_interrupts_and_keeps_a_responsive_shell(self):
+        with self.assertRaises(TimeoutError) as raised:
+            self.session.run("slow", timeout=0.15)
+        self.assertIn("Ctrl+C", str(raised.exception))
+        self.assertTrue(self.session.alive)
+        self.assertEqual(self.session.read(0xB0102208), 0x2A)
+
+    def test_cancel_interrupts_the_running_command(self):
+        cancel = threading.Event()
+        threading.Timer(0.1, cancel.set).start()
+        with self.assertRaises(CommandError) as raised:
+            self.session.run("slow", timeout=5, cancel=cancel)
+        self.assertIn("已取消", str(raised.exception))
+        self.assertTrue(self.session.alive)
+
+    def test_output_lines_that_look_like_prompts_are_kept(self):
+        self.server.outputs = {"cat conf": "# comment\n<a>\na > b\nend$"}
+        self.assertEqual(self.session.run("cat conf"), "# comment\n<a>\na > b\nend$")
 
     def test_disconnect_is_detected(self):
         self.transport.close()

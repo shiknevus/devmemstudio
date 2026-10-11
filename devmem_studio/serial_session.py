@@ -116,7 +116,8 @@ class SerialSession:
         """Catch the next autoboot countdown by holding `key` until the U-Boot prompt shows.
 
         Some boards ignore a single key press there and need it held down."""
-        self._uboot = {"key": bytes(key), "until": time.monotonic() + timeout, "tail": "",
+        echo = "".join(ch for ch in bytes(key).decode("latin-1") if ch not in "=>") + " "
+        self._uboot = {"key": bytes(key), "echo": echo, "until": time.monotonic() + timeout, "tail": "",
                        "since": None, "next": 0.0}
 
     def disarm_uboot_stop(self):
@@ -155,8 +156,9 @@ class SerialSession:
                         self._watch_uboot(text, ser)
                 elif self._tail_dirty:
                     self._answer_login(ser)
-                if self._uboot is not None:
-                    self._hold_uboot_key(ser)
+                uboot = self._uboot   # read once: the GUI thread may disarm it meanwhile
+                if uboot is not None:
+                    self._hold_uboot_key(ser, uboot)
                 try:
                     data = outbox.get(timeout=_IDLE)
                 except queue.Empty:
@@ -211,7 +213,7 @@ class SerialSession:
         if state["since"] is None:
             if _AUTOBOOT.search(state["tail"]):
                 state["since"] = time.monotonic()
-        elif _UBOOT_PROMPT.search(state["tail"]):
+        elif _UBOOT_PROMPT.search(state["tail"].rstrip(state["echo"])):   # held keys echo after "=> "
             self._uboot = None
             ser.write(b"\x03")   # drop the held keys echoed onto the U-Boot command line
             self.on_uboot(True)
@@ -219,8 +221,7 @@ class SerialSession:
             self._uboot = None   # too late: stop typing into the booting kernel
             self.on_uboot(False)
 
-    def _hold_uboot_key(self, ser):
-        state = self._uboot
+    def _hold_uboot_key(self, ser, state):
         now = time.monotonic()
         if state["since"] is None:
             if now > state["until"]:

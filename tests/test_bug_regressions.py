@@ -188,15 +188,18 @@ class DownloadRegressions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             board = root / "board"
-            with patch("devmem_studio.core.tempfile.mkdtemp", return_value=str(board)):
-                session = DemoSession()
-            session.alive = True
             local = root / "saved.log"
             local.write_bytes(b"previous download")
+
             def fail_progress(done, total):
                 raise RuntimeError("cancelled transfer")
-            with self.assertRaisesRegex(RuntimeError, "cancelled transfer"):
-                session.download_file("/run/media/sda/sunny.log", local, progress=fail_progress)
+
+            # remote_root is created lazily on the first file operation (inside the patch).
+            with patch("devmem_studio.core.tempfile.mkdtemp", return_value=str(board)):
+                session = DemoSession()
+                session.alive = True
+                with self.assertRaisesRegex(RuntimeError, "cancelled transfer"):
+                    session.download_file("/run/media/sda/sunny.log", local, progress=fail_progress)
             self.assertEqual(local.read_bytes(), b"previous download")
             self.assertEqual(sorted(path.name for path in root.iterdir()), ["board", "saved.log"])
 

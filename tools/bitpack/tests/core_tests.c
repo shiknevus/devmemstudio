@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <wchar.h>
 static int fail_tar;
-static int fail_write, fail_read, fail_rename;
+static int fail_write, fail_read, fail_rename, short_read;
+static unsigned read_calls;
 static BOOL fake_write(HANDLE,LPCVOID,DWORD,LPDWORD,LPOVERLAPPED);
 static BOOL fake_read(HANDLE,LPVOID,DWORD,LPDWORD,LPOVERLAPPED);
 static BOOL fake_move(LPCWSTR,LPCWSTR,DWORD);
@@ -32,6 +33,7 @@ static BOOL fake_write(HANDLE h,LPCVOID data,DWORD size,LPDWORD done,LPOVERLAPPE
 static BOOL fake_read(HANDLE h,LPVOID data,DWORD size,LPDWORD done,LPOVERLAPPED overlap)
 {
     if (fail_read) { if (done) *done = 0; SetLastError(ERROR_CRC); return FALSE; }
+    if (short_read) { DWORD cap = 300 + (++read_calls % 7) * 211; if (size > cap) size = cap; } /* network-share short reads */
     return ReadFile(h,data,size,done,overlap);
 }
 static BOOL fake_move(LPCWSTR source,LPCWSTR target,DWORD flags)
@@ -47,14 +49,15 @@ static int no_pending(const wchar_t *root)
 }
 static int passed, failed;
 #define CHECK(name, test) do { if (test) { ++passed; printf("PASS %s\n", name); } else { ++failed; printf("FAIL %s (line %d)\n", name, __LINE__); } } while (0)
-static void fixture(const wchar_t *path, unsigned char seed)
+static void fixture_size(const wchar_t *path, unsigned char seed, DWORD size)
 {
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { ++failed; return; }
-    unsigned char data[4096]; for (size_t i = 0; i < sizeof data; ++i) data[i] = (unsigned char)(i + seed);
-    DWORD n; if (!WriteFile(h, data, sizeof data, &n, NULL) || n != sizeof data) ++failed;
+    unsigned char data[8192]; for (size_t i = 0; i < sizeof data; ++i) data[i] = (unsigned char)(i + seed);
+    DWORD n; if (size > sizeof data || !WriteFile(h, data, size, &n, NULL) || n != size) ++failed;
     CloseHandle(h);
 }
+static void fixture(const wchar_t *path, unsigned char seed) { fixture_size(path, seed, 4096); }
 static DWORD WINAPI signal_cancel(void *handle) { Sleep(150); SetEvent((HANDLE)handle); return 0; }
 int wmain(int argc, wchar_t **argv)
 {
@@ -153,6 +156,42 @@ int wmain(int argc, wchar_t **argv)
     pack_list_free(list);
     list = calloc(1, sizeof *list); list->root = pack_dup(scanroot); list->cancel = j.cancel; SetEvent(j.cancel);
     CHECK("scan cancellation", pack_scan(list) == PACK_CANCELLED); ResetEvent(j.cancel); pack_list_free(list);
+    /* Short reads of different sizes on each side must still compare by offset. */
+    wchar_t *same_a = pack_join(root, L"same_a.bin"), *same_b = pack_join(root, L"same_b.bin");
+    fixture_size(same_a, 5, 8000); fixture_size(same_b, 5, 8000);
+    j.started = GetTickCount64(); j.timeout_seconds = 30; short_read = 1;
+    CHECK("compare short reads equal", compare_files(&j, same_a, same_b) == PACK_OK);
+    fixture_size(same_b, 6, 8000); CHECK("compare short reads differ", compare_files(&j, same_a, same_b) == PACK_FAILED);
+    fixture_size(same_b, 5, 7000); CHECK("compare shorter copy", compare_files(&j, same_a, same_b) == PACK_FAILED);
+    CHECK("compare longer original", compare_files(&j, same_b, same_a) == PACK_FAILED);
+    short_read = 0;
+    fixture_size(same_b, 5, 8000); CHECK("compare full reads equal", compare_files(&j, same_a, same_b) == PACK_OK);
+    /* The first failing setup call is reported, not ERROR_INSUFFICIENT_BUFFER from a later probe call. */
+    wchar_t *missing_log = pack_join(root, L"missing-dir\\tool.log");
+    CHECK("setup error keeps first cause", run_tool(&j, stub, fail_args, ARRAY_COUNT(fail_args), pack_display(root), missing_log) == PACK_FAILED
+          && wcsstr(j.error, L"系统错误 3）"));
+    /* Every cleanup warning is kept; overflow ends with an ellipsis. */
+    j.warning[0] = 0; add_warning(&j, L"first"); add_warning(&j, L"second");
+    CHECK("warnings appended", !wcscmp(j.warning, L"first\nsecond"));
+    wchar_t long_line[1500]; wmemset(long_line, L'x', 1499); long_line[1499] = 0;
+    add_warning(&j, long_line); add_warning(&j, long_line); add_warning(&j, L"lost");
+    size_t wlen = wcslen(j.warning);
+    CHECK("warning overflow bounded", wlen < PACK_ERROR_CAP && j.warning[wlen - 1] == L'…' && !wcsstr(j.warning, L"lost")
+          && !wcsncmp(j.warning, L"first\nsecond\n", 13));
+    /* A junction beside the .bit must not block the non-recursive auto pick. */
+    wchar_t *pickroot = pack_join(root, L"pick"), *pickbit = pickroot ? pack_join(pickroot, L"only.bit") : NULL;
+    wchar_t *pickdir = pack_join(root, L"pick-target"), command[1024];
+    CreateDirectoryW(pickroot, NULL); CreateDirectoryW(pickdir, NULL); fixture(pickbit, 7);
+    swprintf(command, 1024, L"mklink /J \"%ls\\link\" \"%ls\" >nul", pack_display(pickroot), pack_display(pickdir));
+    int junction = _wsystem(command) == 0;
+    list = calloc(1, sizeof *list); list->root = pack_dup(pickroot);
+    CHECK("non-recursive scan ignores junction", junction && pack_scan(list) == PACK_OK && list->count == 1 && !list->skipped);
+    pack_list_free(list);
+    list = calloc(1, sizeof *list); list->root = pack_dup(pickroot); list->recursive = 1;
+    CHECK("recursive scan skips junction", junction && pack_scan(list) == PACK_OK && list->count == 1 && list->skipped == 1);
+    pack_list_free(list);
+    wchar_t *link = pack_join(pickroot, L"link"); RemoveDirectoryW(link); free(link);
+    free(pickroot); free(pickbit); free(pickdir); free(missing_log); free(same_a); free(same_b);
     CloseHandle(j.cancel); free(alias); free(pending); free(scanroot); free(fakebit); free(input); free(sunny); free(log); free(root); free(stub);
     printf("CORE RESULT: %d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;

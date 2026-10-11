@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from contextlib import contextmanager
 import copy
 import csv
 from datetime import datetime
@@ -119,6 +120,7 @@ class MainWindow(QMainWindow):
         self.type_catalog = top_import.load_type_catalog()
         self.active_component = None
         self._pending_component = None
+        self._poll_holds = 0   # >0 while a modal dialog must not race an auto-read
         self.view = "basic"
         self.rtl_base = None
         self.visible_regs = []
@@ -932,6 +934,25 @@ class MainWindow(QMainWindow):
         folder is scanned recursively. Always list candidates before parsing the selection."""
         if self._closing or self._busy:
             return
+        with self._hold_poll():   # the rebuild below must not race an in-flight read
+            self._import_component()
+
+    @contextmanager
+    def _hold_poll(self):
+        """Keep auto-read from starting a task while a modal dialog is open."""
+        self._poll_holds += 1
+        try:
+            yield
+        finally:
+            self._poll_holds -= 1
+
+    def _confirm_board_task(self, parent, title, text):
+        """Yes/No for a board task; False if the board went busy or away meanwhile."""
+        with self._hold_poll():
+            answer = QMessageBox.question(parent, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes and not (self._closing or self._busy or not self.connected)
+
+    def _import_component(self):
         start = self._import_start_dir("component_import_dir")
         folder = QFileDialog.getExistingDirectory(
             self, "选择组件文件夹，或上级目录（批量导入其下全部组件）", start)
@@ -2015,7 +2036,7 @@ class MainWindow(QMainWindow):
         for control in (self.serial_port, self.serial_baud, self.serial_user, self.serial_password,
                         self.serial_remember):
             control.setEnabled(not self.serial_connected and not self._serial_busy)
-        self.serial_connect_button.setEnabled(not self._serial_busy)
+        self.serial_connect_button.setEnabled(not self._closing)   # doubles as cancel while _serial_busy
         for control in (self.component_tree, self.import_component_button, *self.view_buttons.values()):
             control.setEnabled(not self._busy and not self._closing)
         # Filters only hide rows; keep them (and the value editor) live during polling
@@ -2091,7 +2112,12 @@ class MainWindow(QMainWindow):
             self.ssh_section.set_expanded(True)
             (self.user if self.host.text().strip() else self.host).setFocus()
             return
-        request = (self.host.text().strip(), self.port.value(), self.user.text().strip(),
+        if not self.host.is_complete():
+            self._status(f"IP 地址不完整：{self.host.text()}")
+            self.ssh_section.set_expanded(True)
+            self.host.setFocus()
+            return
+        request =(self.host.text().strip(), self.port.value(), self.user.text().strip(),
                    self.password.text(), CONNECT_TIMEOUT)
         self._connect_device(request)
 
@@ -2497,10 +2523,8 @@ class MainWindow(QMainWindow):
             bit_date = datetime.fromtimestamp(Path(local_path).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except OSError:
             bit_date = "未知"
-        answer = QMessageBox.question(self.bit_dialog, "确认上传bit",
-                                      f"{local_path}\n文件日期：{bit_date}\n上传到：{remote_dir}/sunny_fpga.bit\n\n确定上传？",
-                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not self._confirm_board_task(self.bit_dialog, "确认上传bit",
+                                        f"{local_path}\n文件日期：{bit_date}\n上传到：{remote_dir}/sunny_fpga.bit\n\n确定上传？"):
             return
         self._select_bit_dir(remote_dir, used=True)
         self.bit_dialog.upload_button.setEnabled(False)
@@ -2642,11 +2666,9 @@ class MainWindow(QMainWindow):
         if not dialog:
             return
         remote_dir = dialog.listed_dir() or self.cfg["bit_remote_dir"]   # the folder whose list is shown
-        answer = QMessageBox.question(self, "确认回退",
-                                      f"将把 {remote_dir} 下当前 sunny_fpga.bit 备份为 sunny_fpga.bit_时间戳，"
-                                      f"然后把 {backup_name} 恢复为 sunny_fpga.bit。\n\n是否继续？",
-                                      QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not self._confirm_board_task(self, "确认回退",
+                                        f"将把 {remote_dir} 下当前 sunny_fpga.bit 备份为 sunny_fpga.bit_时间戳，"
+                                        f"然后把 {backup_name} 恢复为 sunny_fpga.bit。\n\n是否继续？"):
             return
         self._select_bit_dir(remote_dir, used=True)
         session = self.session
@@ -2988,7 +3010,8 @@ class MainWindow(QMainWindow):
             self._status("自动读取已开启 · 每次读取完成后等待所选间隔")
 
     def _poll(self):
-        if self.poll_check.isChecked() and not self._closing and self._can_operate() and time.monotonic() >= self._next_poll:
+        if (self.poll_check.isChecked() and not self._closing and not self._poll_holds
+                and self._can_operate() and time.monotonic() >= self._next_poll):
             self._read_many(self.visible_regs, quiet=True)
 
     def _check_session(self):
@@ -3510,6 +3533,9 @@ class MainWindow(QMainWindow):
         self._closing = False
         self.setEnabled(True)
         self._set_connection(False)
-        self.serial_connected = False
+        self.serial_connected = False   # closeEvent already closed the port
+        self._serial_device = None
+        self._reflect_serial(False)
+        self.poll_timer.start()
         self.heartbeat.start()
         QMessageBox.warning(self, "升级未执行", message)

@@ -6,10 +6,10 @@ import base64
 import codecs
 from contextlib import contextmanager
 import copy
+import errno
 import hashlib
 import hmac
 import importlib
-import io
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -79,7 +79,10 @@ MONITOR_MAX_REGISTERS = 32
 REGMON_RESOURCE = "assets/regmon/regmon-aarch64"
 MONITOR_START_TIMEOUT_S = 5.0
 MONITOR_STALE_TIMEOUT_S = 2.0   # silence beyond this (and 3 intervals) shows the run as paused
+MONITOR_DEAD_TIMEOUT_S = 60.0   # silence beyond this (and 3 intervals) ends the run: board or link gone
 MONITOR_SETUP_TIMEOUT_S = 8.0
+MONITOR_SAVED_KEYS = 64         # remembered per-instance selections
+KNOWN_HOSTS_BACKUPS = 5
 
 
 def application_dir() -> Path:
@@ -214,10 +217,11 @@ def monitor_script(addresses, interval_ms) -> str:
         raise ValueError(f"最多同时监视 {MONITOR_MAX_REGISTERS} 个寄存器。")
     if not math.isfinite(float(interval_ms)) or not MONITOR_MIN_INTERVAL_MS <= float(interval_ms) <= 60000:
         raise ValueError(f"采样间隔须为 {MONITOR_MIN_INTERVAL_MS}–60000 ms。")
-    if any(validated_address(hex(address)) % 4 for address in addresses):
+    addresses = [validated_address(hex(address)) for address in addresses]
+    if any(address % 4 for address in addresses):
         raise ValueError("监视地址须按 32 位访问要求对齐。")
     period = max(1, round(float(interval_ms) * 1000))   # µs
-    reads = "; ".join(f"devmem 0x{validated_address(hex(a)):08x} || echo x" for a in addresses)
+    reads = "; ".join(f"devmem 0x{a:08x} || echo x" for a in addresses)
     # SSH exec shells do not source the login profile; embedded boards often keep
     # devmem in /sbin, outside their non-interactive PATH. Preserve custom tools
     # already on PATH and add the board's standard executable directories.
@@ -225,13 +229,15 @@ def monitor_script(addresses, interval_ms) -> str:
             'PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin:/run/media/sda/bin"; export PATH; '
             "command -v devmem >/dev/null 2>&1 || { echo 'devmem: not found' >&2; exit 127; }; "
             "n=0; c=$(date +%s%N); case $c in ''|*[!0-9]*) c=;; esac; "
-            "if command -v usleep >/dev/null 2>&1; then Z=1; else Z=; fi; "
+            # u: usleep, f: fractional sleep, i: whole seconds only (never a busy loop)
+            "if command -v usleep >/dev/null 2>&1; then Z=u; elif sleep 0.001 2>/dev/null; then Z=f; else Z=i; fi; "
             "while :; do "
             'if [ -n "$c" ]; then t=$(date +%s%N); else t=; fi; echo "@$t" || exit; '
             f"{reads}; "
             'if [ -n "$t" ]; then t=$((t / 1000)); n=$((n ? n + P : t + P)); n=$((n < t ? t : n)); d=$((n - t)); else d=$P; fi; '
-            'if [ $d -gt 0 ]; then if [ -n "$Z" ]; then usleep $d; '
-            "else sleep $((d / 1000000)).$(printf %06d $((d % 1000000))); fi; fi; "
+            'if [ $d -gt 0 ]; then if [ $Z = u ]; then usleep $d; '
+            "elif [ $Z = f ]; then sleep $((d / 1000000)).$(printf %06d $((d % 1000000))); "
+            "else sleep $(((d + 999999) / 1000000)); fi; fi; "
             "done")
 
 
@@ -250,9 +256,10 @@ def monitor_command(addresses, interval_ms, sampler=None) -> str:
 class MonitorParser:
     """Assemble the sampler stream into (seconds, values) samples; None marks a failed read."""
 
-    def __init__(self, count, clock=time.time):
+    def __init__(self, count, clock=time.time, interval_s=None):
         self.count = count
         self.clock = clock
+        self.interval_s = interval_s
         self.samples = []
         self.received = 0
         self.note = ""      # last stray line, e.g. a devmem or shell error
@@ -261,14 +268,24 @@ class MonitorParser:
         self._stamp = None
         self._values = []
         self._last_stamp = None
+        self._skew = 0.0    # shell wall clock stepped back: keep the axis monotonic
+
+    def _host_stamp(self):
+        """No board clock (busybox date without %N): space a burst at the nominal interval."""
+        now = self.clock()
+        if self.interval_s and self._last_stamp is not None:
+            return min(now, max(self._last_stamp + self.interval_s, now - 1.0))
+        return now
 
     def feed(self, data):
         *lines, self._buffer = (self._buffer + data).split(b"\n")
         for raw in lines:
             line = raw.decode("utf-8", "replace").strip()
             if line.startswith("@"):
+                if self._stamp is not None and self._values:
+                    self._complete([*self._values, *[None] * (self.count - len(self._values))])   # cut-off point
                 digits = line[1:]
-                self._stamp = int(digits) / 1e9 if digits.isdigit() else self.clock()
+                self._stamp = int(digits) / 1e9 + self._skew if digits.isdigit() else self._host_stamp()
                 self._values = []
             elif line.startswith("#"):
                 kind = (line[1:].split() or [""])[0]
@@ -281,14 +298,21 @@ class MonitorParser:
                     raise ValueError("板端返回的寄存器值超出 32 位范围，监视已停止。")
                 self._values.append(value)
                 if len(self._values) == self.count:
-                    if self._last_stamp is not None and self._stamp < self._last_stamp:
-                        raise ValueError("板端时间倒退，监视已停止，避免绘制错误时间轴。")
-                    self._last_stamp = self._stamp
-                    self.samples.append((self._stamp, tuple(self._values)))
-                    self.received += 1
-                    self._stamp = None
+                    self._complete(self._values)
             elif line:
                 self.note = line
+
+    def _complete(self, values):
+        if self._last_stamp is not None and self._stamp < self._last_stamp:
+            if self.sampler != "shell":
+                raise ValueError("板端时间倒退，监视已停止，避免绘制错误时间轴。")
+            self._skew += self._last_stamp - self._stamp   # `date` is a wall clock (ntp/manual step)
+            self._stamp = self._last_stamp
+        self._last_stamp = self._stamp
+        self.samples.append((self._stamp, tuple(values)))
+        self.received += 1
+        self._stamp = None
+        self._values = []
 
     def take(self):
         samples, self.samples = self.samples, []
@@ -304,7 +328,7 @@ def normalize_monitor_settings(value):
             if isinstance(key, str) and isinstance(addresses, list):
                 result[key] = list(dict.fromkeys(address for address in addresses
                                                  if type(address) is int and 0 <= address <= 0xFFFFFFFF))[:MONITOR_MAX_REGISTERS]
-        return result
+        return dict(list(result.items())[-MONITOR_SAVED_KEYS:])   # most recently used last
     # selections: component instance -> addresses; types: module type -> offsets of the latest pick
     return {"signed": value.get("signed") is True, "selections": lists(value.get("selections")),
             "types": lists(value.get("types"))}
@@ -312,7 +336,7 @@ def normalize_monitor_settings(value):
 
 def default_config() -> dict:
     return {"host": "", "port": 22, "username": "root", "password": "",
-            "base": "0xb0100000", "default_width": 32, "last_category": "axis",
+            "base": "0xb0100000", "last_category": "axis",
             "last_address": "0x0800", "remember_password": False,
             "top_path": "", "top_import_dir": "", "component_import_dir": "",
             "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
@@ -433,8 +457,19 @@ class ConfigStore:
                 os.unlink(temp_name)
 
 
+_ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-~]|[=>78DEHMc])")
+
+
 def strip_ansi(text: str) -> str:
-    return re.sub(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))", "", text).replace("\r", "")
+    return _ANSI.sub("", text).replace("\r", "")
+
+
+def split_ansi_tail(text: str) -> tuple[str, str]:
+    """(complete, held): hold back an escape sequence cut off at the end of a chunk."""
+    start = text.rfind("\x1b")
+    if start == -1 or len(text) - start > 256 or _ANSI.match(text, start):
+        return text, ""
+    return text[:start], text[start:]
 
 
 class CommandError(RuntimeError):
@@ -515,6 +550,29 @@ def _sftp_remove_quietly(sftp, path):
         pass
 
 
+def _prune_regmon(sftp, keep):
+    """Drop other versions' samplers and abandoned half uploads from /tmp (best effort)."""
+    try:
+        for entry in sftp.listdir_attr("/tmp"):
+            path = "/tmp/" + entry.filename
+            if not entry.filename.startswith("devmem-studio-regmon-") or path == keep:
+                continue
+            if ".part-" in entry.filename and abs(time.time() - (entry.st_mtime or 0)) < 600:
+                continue   # another instance may still be uploading it
+            _sftp_remove_quietly(sftp, path)
+    except Exception:
+        pass
+
+
+def _free_remote_name(sftp, folder, name):
+    """`name`, or name_2, name_3 … when a same-second backup already holds it."""
+    candidate, number = name, 1
+    while _sftp_exists(sftp, f"{folder}/{candidate}"):
+        number += 1
+        candidate = f"{name}_{number}"
+    return candidate
+
+
 @contextmanager
 def _atomic_download_target(local_path):
     """Replace the chosen file only after a complete download; remove partials."""
@@ -547,6 +605,7 @@ class SshSession:
         self._stream_thread = None
         self._generation = 0
         self._connect_sock = None   # live during connect(); close() aborts a handshake in flight
+        self._fresh = True          # a close() before the first connect is a cancel
         self._regmon = (None, None)   # (transport, architecture); placement failures are never cached
 
     @property
@@ -580,10 +639,13 @@ class SshSession:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise socket.timeout("timed out")
-                        _, writable, _ = select.select([], [sock], [], min(0.1, remaining))
-                        if not writable:
+                        # Winsock reports a failed connect in exceptfds, never writefds.
+                        _, writable, failed = select.select([], [sock], [sock], min(0.1, remaining))
+                        if not writable and not failed:
                             continue
                         error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                        if error == errno.ECONNREFUSED or (failed and not error):
+                            raise ConnectionRefusedError(errno.ECONNREFUSED, "连接被拒绝（端口未开放或 SSH 服务未启动）")
                         if error:
                             raise OSError(error, os.strerror(error))
                         break
@@ -599,6 +661,9 @@ class SshSession:
         raise last_error or OSError("无法建立 TCP 连接")
 
     def connect(self, host, port, username, password, timeout=8):
+        if self._fresh and self._generation:
+            raise CommandError("连接已取消。")   # closed (cancelled) before the first connect began
+        self._fresh = False
         self.close()
         generation = self._generation
         client = paramiko.SSHClient()
@@ -633,17 +698,17 @@ class SshSession:
             self.log("SYSTEM", f"SSH 协商完成：主机密钥 {transport.host_key_type}{compatibility}；加密 {transport.local_cipher}。")
             channel = client.invoke_shell(width=240, height=40)
             channel.settimeout(timeout)
-            channel.sendall(b"stty -echo\n")
-            # Suppress welcome banners and command echoes before the first operation.
-            deadline = time.monotonic() + 0.35
-            while time.monotonic() < deadline:
-                if channel.recv_ready():
-                    channel.recv(65536)
-                time.sleep(0.02)
+            # No echo and no prompts: command output then needs no prompt guessing.
+            channel.sendall(b"stty -echo\nPS1='' PS2=''\n")
+            # Swallow banners/MOTD up to a sync marker instead of a fixed pause.
+            self._await_marker(channel, min(timeout, 3.0), generation)
             if generation != self._generation:
                 raise CommandError("连接已取消。")
             self.client, self.chan = client, channel
             self._connect_sock = None
+            if generation != self._generation:   # cancelled right before the assignment
+                self.close()
+                raise CommandError("连接已取消。")
         except Exception:
             sock, self._connect_sock = self._connect_sock, None
             if sock is not None:
@@ -693,63 +758,110 @@ class SshSession:
             with backup.open("xb") as handle:
                 handle.write(original)
             os.replace(temp_name, path)
+            # dropbear boards make a new host key on every boot: keep only the latest backups
+            for stale in sorted(path.parent.glob("known_hosts.backup-*"))[:-KNOWN_HOSTS_BACKUPS]:
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
             self.log("SYSTEM", f"已更新 {change.hostname}:{change.port} 的主机密钥：{change.new_fingerprint}；原记录已备份。")
             return backup
         finally:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
 
-    def run(self, command: str, timeout=8, quiet=False):
+    @staticmethod
+    def _marker_command(marker, status='"$?"'):
+        # The echoed command line holds "%s__", only the real output holds "<digits>__".
+        return f"printf '\\n{marker}%s__\\n' {status}\n"
+
+    def _read_to_marker(self, channel, marker, timeout, cancelled=lambda: False):
+        """(exit status, raw text before the marker); status None on timeout or cancel."""
+        end_re = re.compile(rb"(?:^|\n)" + re.escape(marker.encode()) + rb"(\d+)__\s*(?:\n|$)")
+        output = bytearray()
+        scanned = 0
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not cancelled():
+            if channel.recv_ready():
+                chunk = channel.recv(65536)
+                if not chunk:
+                    raise CommandError("SSH 连接已断开。")
+                output.extend(chunk)
+                if len(output) > 4 * 1024 * 1024:
+                    self.close()
+                    raise CommandError("命令输出超过 4 MB，已断开连接；连续日志请使用板端日志。")
+                # Scan only new bytes, backing up enough for a marker split across chunks.
+                match = end_re.search(output, max(0, scanned - len(marker) - 32))
+                scanned = len(output)
+                if match:
+                    return int(match.group(1)), output[:match.start()].decode("utf-8", "replace")
+                continue
+            transport = channel.get_transport()
+            if channel.closed or transport is None or not transport.is_active():
+                raise CommandError("SSH 连接已断开，设备可能正在重启。")
+            time.sleep(0.015)
+        return None, output.decode("utf-8", "replace")
+
+    def _await_marker(self, channel, timeout, generation):
+        """Swallow login banners until the shell answers a sync marker (best effort)."""
+        marker = "__DM_" + uuid.uuid4().hex + "_"
+        channel.sendall(self._marker_command(marker, "0").encode())
+        self._read_to_marker(channel, marker, timeout, lambda: generation != self._generation)
+        time.sleep(0.02)
+        while channel.recv_ready():
+            channel.recv(65536)
+
+    def _interrupt(self, channel):
+        """Ctrl+C the hung command (the PTY also drops the queued marker), then re-sync."""
+        try:
+            channel.sendall(b"\x03")
+            time.sleep(0.1)
+            marker = "__DM_" + uuid.uuid4().hex + "_"
+            channel.sendall(("\n" + self._marker_command(marker, "0")).encode())
+            return self._read_to_marker(channel, marker, 2.0)[0] is not None
+        except Exception:
+            return False
+
+    def run(self, command: str, timeout=8, quiet=False, cancel=None):
+        """Run one command in the persistent shell. A timeout or `cancel` sends Ctrl+C;
+        the session survives when the shell answers again."""
         if not command.strip() or "\x00" in command:
             raise ValueError("命令不能为空或包含空字符。")
         with self._lock:
-            if not self.alive:
-                raise CommandError("SSH 已断开，请重新连接设备。")
             channel = self.chan
+            if not self.alive or channel is None:
+                raise CommandError("SSH 已断开，请重新连接设备。")
             self.last_exit = None
             while channel.recv_ready():
                 channel.recv(65536)
             if not quiet:
                 self.log("CMD", command)
             marker = "__DM_" + uuid.uuid4().hex + "_"
-            end_re = re.compile(r"(?:^|\n)" + re.escape(marker) + r"(\d+)__\s*(?:\n|$)")
-            full = command.rstrip() + "\nprintf '\\n" + marker + "%s__\\n' \"$?\"\n"
-            channel.sendall(full.encode("utf-8"))
-            output = bytearray()
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                if channel.recv_ready():
-                    chunk = channel.recv(65536)
-                    if not chunk:
-                        raise CommandError("SSH 连接已断开。")
-                    output.extend(chunk)
-                    if len(output) > 4 * 1024 * 1024:
-                        self.close()
-                        raise CommandError("命令输出超过 4 MB，已断开连接；连续日志请使用板端日志。")
-                    decoded = strip_ansi(output.decode("utf-8", "replace"))
-                    match = end_re.search(decoded)
-                    if match:
-                        self.last_exit = int(match.group(1))
-                        lines = []
-                        for line in decoded[:match.start()].splitlines():
-                            line = _strip_shell_prompt(line)
-                            if (not line.strip() or marker in line
-                                    or line.strip() == command.strip()
-                                    or re.fullmatch(r"[^\n]*[#$>]\s*", line)):
-                                continue
-                            lines.append(line)
-                        result = "\n".join(lines).strip()
-                        if result and not quiet:
-                            self.log("INFO" if self.last_exit == 0 else "ERROR", result)
-                        if self.last_exit:
-                            raise CommandError(f"命令退出码 {self.last_exit}：{result or command}")
-                        return result
-                if channel.closed or not self.client or not self.client.get_transport().is_active():
-                    raise CommandError("SSH 连接已断开，设备可能正在重启。")
-                time.sleep(0.015)
-            # A shell without a terminator is not safe to reuse for the next register read.
-            self.close()
-            raise TimeoutError(f"命令超过 {timeout:g} 秒未完成，连接已关闭，请重新连接。")
+            channel.sendall((command.rstrip() + "\n" + self._marker_command(marker)).encode("utf-8"))
+            cancelled = cancel.is_set if cancel is not None else (lambda: False)
+            status, output = self._read_to_marker(channel, marker, timeout, cancelled)
+            if status is None:
+                stopped = cancelled()
+                reason = "已取消" if stopped else f"超过 {timeout:g} 秒未完成"
+                if self._interrupt(channel):
+                    raise (CommandError if stopped else TimeoutError)(f"命令{reason}，已发送 Ctrl+C 中断。")
+                # A shell that no longer answers is not safe for the next register read.
+                self.close()
+                raise TimeoutError(f"命令{reason}，Ctrl+C 后设备仍无响应，连接已关闭，请重新连接。")
+            self.last_exit = status
+            # Prompts are off (PS1=''), so every line is real output; only drop a stray echo.
+            lines = [line.rstrip() for line in strip_ansi(output).split("\n")
+                     if line.strip() != command.strip()]
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            while lines and not lines[-1].strip():
+                lines.pop()
+            result = "\n".join(lines)
+            if result and not quiet:
+                self.log("INFO" if self.last_exit == 0 else "ERROR", result)
+            if self.last_exit:
+                raise CommandError(f"命令退出码 {self.last_exit}：{result or command}")
+            return result
 
     def read(self, address: int, quiet=False) -> int:
         output = self.run(read_command(address), quiet=quiet)
@@ -815,14 +927,8 @@ class SshSession:
         file is staged as <dest>.uploading, so a failed or cut-off transfer never touches
         the live sunny_fpga.bit; only then is the old bit renamed to sunny_fpga.bit_<timestamp>.
         Runs on the worker thread; `progress(done, total)` reports byte transfer."""
-        if not self.alive:
-            raise CommandError("请先连接设备。")
         stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
-        transport = self.client.get_transport()
-        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
-        try:
-            if sftp is None:
-                raise CommandError("SSH 通道不可用，无法上传。")
+        with self._sftp("上传") as sftp:
             if remote_dir and remote_dir != ".":
                 parts = [p for p in remote_dir.replace("\\", "/").split("/") if p]
                 current = "/"
@@ -849,7 +955,7 @@ class SshSession:
             except Exception:
                 _sftp_remove_quietly(sftp, staging_path)
                 raise
-            backup_name = f"{dest_name}_{stamp}"
+            backup_name = _free_remote_name(sftp, folder, f"{dest_name}_{stamp}")
             backup_path = f"{folder}/{backup_name}"
             if _sftp_exists(sftp, remote_path):
                 self.log("CMD", f"rename {remote_path} -> {backup_name}")
@@ -875,22 +981,13 @@ class SshSession:
             except IOError:
                 pass
             return backup_name if backup_path else None
-        finally:
-            if sftp is not None:
-                sftp.close()
 
     def list_bit_backups(self, remote_dir="/run/media/sda", bitname="sunny_fpga.bit"):
         """List bit files on the board: the current bit plus timestamped backups.
 
         Returns [{name, timestamp}] with the current bit first (timestamp None),
         then backups newest first. timestamp is the suffix after '{bitname}_'."""
-        if not self.alive:
-            raise CommandError("请先连接设备。")
-        transport = self.client.get_transport()
-        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
-        try:
-            if sftp is None:
-                raise CommandError("SSH 通道不可用，无法读取板端目录。")
+        with self._sftp("读取板端目录") as sftp:
             prefix = bitname + "_"
             try:
                 names = [name for name in sftp.listdir(remote_dir)
@@ -901,28 +998,16 @@ class SshSession:
             backups = sorted(({"name": n, "timestamp": n[len(prefix):]} for n in names
                               if n.startswith(prefix)), key=lambda item: item["timestamp"], reverse=True)
             return entries + backups
-        finally:
-            if sftp is not None:
-                sftp.close()
 
     def list_dirs(self, parent="/run/media"):
         """Sub-directories of `parent` on the board, e.g. the mounts under /run/media."""
-        if not self.alive:
-            raise CommandError("请先连接设备。")
-        transport = self.client.get_transport()
-        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
-        try:
-            if sftp is None:
-                raise CommandError("SSH 通道不可用，无法读取板端目录。")
+        with self._sftp("读取板端目录") as sftp:
             try:
                 entries = sftp.listdir_attr(parent)
             except IOError:
                 return []
             return sorted(f"{parent.rstrip('/')}/{entry.filename}" for entry in entries
                           if (entry.st_mode or 0) & 0o170000 == 0o040000)
-        finally:
-            if sftp is not None:
-                sftp.close()
 
     def rollback_bit(self, backup_name, remote_dir="/run/media/sda",
                      dest_name="sunny_fpga.bit", timestamp=None, progress=None):
@@ -931,14 +1016,8 @@ class SshSession:
         The live sunny_fpga.bit (if present) is renamed to sunny_fpga.bit_<timestamp>,
         then the chosen backup is renamed back to sunny_fpga.bit. Runs on the worker
         thread; `progress(done, total)` reports the step."""
-        if not self.alive:
-            raise CommandError("请先连接设备。")
         stamp = timestamp or time.strftime("%Y%m%d%H%M%S")
-        transport = self.client.get_transport()
-        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
-        try:
-            if sftp is None:
-                raise CommandError("SSH 通道不可用，无法回退。")
+        with self._sftp("回退") as sftp:
             dest = f"{remote_dir.rstrip('/')}/{dest_name}"
             backup = f"{remote_dir.rstrip('/')}/{backup_name}"
             if backup_name == dest_name or not backup_name.startswith(dest_name + "_"):
@@ -947,9 +1026,10 @@ class SshSession:
                 sftp.stat(backup)
             except IOError:
                 raise CommandError(f"备份文件不存在：{backup_name}")
-            aside = f"{remote_dir.rstrip('/')}/{dest_name}_{stamp}"
+            aside_name = _free_remote_name(sftp, remote_dir.rstrip("/"), f"{dest_name}_{stamp}")
+            aside = f"{remote_dir.rstrip('/')}/{aside_name}"
             if _sftp_exists(sftp, dest):
-                self.log("CMD", f"rename {dest_name} -> {dest_name}_{stamp}")
+                self.log("CMD", f"rename {dest_name} -> {aside_name}")
                 sftp.rename(dest, aside)
             else:
                 aside = None  # no current bit to move aside
@@ -968,19 +1048,10 @@ class SshSession:
             if progress:
                 progress(100, 100)
             self.log("INFO", f"回退完成：{backup_name} -> {dest_name}")
-        finally:
-            if sftp is not None:
-                sftp.close()
 
     def download_file(self, remote_path, local_path, progress=None):
         """Download a remote file via SFTP; progress(done, total) reports byte transfer."""
-        if not self.alive:
-            raise CommandError("请先连接设备。")
-        transport = self.client.get_transport()
-        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
-        try:
-            if sftp is None:
-                raise CommandError("SSH 通道不可用，无法下载。")
+        with self._sftp("下载") as sftp:
             attrs = sftp.stat(remote_path)
             total = attrs.st_size
             sent = [0]
@@ -994,9 +1065,28 @@ class SshSession:
             with _atomic_download_target(local_path) as temporary:
                 sftp.get(remote_path, str(temporary), callback=callback)
             self.log("INFO", f"{local_path}: {os.path.getsize(local_path)} 字节")
+
+    def _transport(self):
+        """The live transport, or CommandError (not 'NoneType has no attribute') once closed."""
+        client = self.client   # close() on the GUI thread may clear it at any moment
+        transport = client.get_transport() if client is not None else None
+        if transport is None or not transport.is_active():
+            raise CommandError("SSH 已断开，请重新连接设备。")
+        return transport
+
+    @contextmanager
+    def _sftp(self, action):
+        if not self.alive:
+            raise CommandError("请先连接设备。")
+        client = self.client
+        transport = client.get_transport() if client is not None else None
+        sftp = paramiko.SFTPClient.from_transport(transport) if transport else None
+        if sftp is None:
+            raise CommandError(f"SSH 通道不可用，无法{action}。")
+        try:
+            yield sftp
         finally:
-            if sftp is not None:
-                sftp.close()
+            sftp.close()
 
     def start_stream(self, path: str, output, stopped, cancel_event=None):
         stop = cancel_event if cancel_event is not None else threading.Event()
@@ -1011,7 +1101,7 @@ class SshSession:
         command = "tail -f " + shlex.quote(path)
         if stop.is_set():
             return False
-        channel = self.client.get_transport().open_session(timeout=8)
+        channel = self._transport().open_session(timeout=8)
         self._stream_channel = channel
         try:
             if stop.is_set():
@@ -1030,17 +1120,21 @@ class SshSession:
 
         def reader():
             decoders = [codecs.getincrementaldecoder("utf-8")("replace") for _ in range(2)]
+            held = ["", ""]   # an escape sequence cut at a chunk boundary waits for its tail
             try:
                 while not stop.is_set():
                     for index, (ready, receive) in enumerate(((channel.recv_ready, channel.recv),
                                                                (channel.recv_stderr_ready, channel.recv_stderr))):
                         if ready():
-                            text = decoders[index].decode(receive(32768))
+                            text, held[index] = split_ansi_tail(held[index] + decoders[index].decode(receive(32768)))
                             if text:
                                 output(strip_ansi(text))
                     if (channel.closed or channel.exit_status_ready()) and not channel.recv_ready() and not channel.recv_stderr_ready():
                         break
                     stop.wait(0.08)
+                for rest in held:
+                    if rest and not stop.is_set():
+                        output(strip_ansi(rest))
                 if not stop.is_set() and channel.exit_status_ready():
                     status = channel.recv_exit_status()
                     if status > 0:
@@ -1068,16 +1162,20 @@ class SshSession:
         if stop.is_set():
             raise CommandError("监视启动已取消。")
         deadline = time.monotonic() + timeout
-        channel = self.client.get_transport().open_session(timeout=min(timeout, 2.0))
+        channel = self._transport().open_session(timeout=min(timeout, 2.0))
         channel.settimeout(timeout)
         finished, expired = threading.Event(), threading.Event()
+        lock = threading.Lock()   # the guard never closes a channel whose setup already finished
 
         def guard():
             while not finished.wait(0.05):
                 if stop.is_set() or time.monotonic() >= deadline:
-                    if not stop.is_set():
-                        expired.set()
-                    channel.close()
+                    with lock:
+                        if finished.is_set():
+                            return
+                        if not stop.is_set():
+                            expired.set()
+                        channel.close()
                     return
 
         watcher = threading.Thread(target=guard, daemon=True, name="monitor-setup-guard")
@@ -1085,6 +1183,8 @@ class SshSession:
         completed = False
         try:
             yield channel
+            with lock:
+                finished.set()
             if stop.is_set():
                 raise CommandError("监视启动已取消。")
             if expired.is_set():
@@ -1126,7 +1226,7 @@ class SshSession:
     def monitor_sampler(self, cancel_event=None):
         """Verify cached executable contents; retry transient placement failures on next start."""
         stop = cancel_event if cancel_event is not None else threading.Event()
-        transport = self.client.get_transport()
+        transport = self._transport()
         path = None
         try:
             if stop.is_set():
@@ -1134,10 +1234,13 @@ class SshSession:
             data = resource_path(REGMON_RESOURCE).read_bytes()
             digest = hashlib.sha256(data).hexdigest()
             remote = f"/tmp/devmem-studio-regmon-{digest[:12]}"
-            if self._regmon[0] is not transport:
-                _, output = self._exec_output("uname -m", cancel_event=stop)
-                self._regmon = (transport, output.strip())   # cache architecture only
-            arch = self._regmon[1]
+            if self._regmon[0] is transport:
+                arch = self._regmon[1]
+            else:
+                status, output = self._exec_output("uname -m", cancel_event=stop)
+                arch = output.strip()
+                if status == 0:
+                    self._regmon = (transport, arch)   # cache architecture only, never an error text
             if arch in ("aarch64", "arm64"):
                 with self._monitor_sftp(stop) as sftp:
                     staging = None
@@ -1161,6 +1264,7 @@ class SshSession:
                             raise CommandError("监视启动已取消。")
                         if verified(remote):
                             sftp.chmod(remote, 0o755)
+                            _prune_regmon(sftp, remote)
                             return remote
                         staging = remote + ".part-" + uuid.uuid4().hex
                         with sftp.open(staging, "wb") as handle:
@@ -1179,6 +1283,7 @@ class SshSession:
                             _sftp_remove_quietly(sftp, remote)
                             sftp.rename(staging, remote)
                         staging = None
+                        _prune_regmon(sftp, remote)
                     finally:
                         if staging is not None and not stop.is_set():
                             _sftp_remove_quietly(sftp, staging)
@@ -1219,12 +1324,13 @@ class SshSession:
             raise
         self.log("CMD", f"监视 {len(addresses)} 个寄存器，间隔 {interval_ms:g} ms"
                  f"（{'板端常驻采样' if sampler else 'devmem 循环'}）：" + " ".join(f"0x{a:08x}" for a in addresses))
-        parser = MonitorParser(len(addresses))
+        parser = MonitorParser(len(addresses), interval_s=float(interval_ms) / 1000)
+        dead_after = max(MONITOR_DEAD_TIMEOUT_S, 3 * float(interval_ms) / 1000)
 
         def reader():
             message = ""
             reported = ""
-            flushed = started = time.monotonic()
+            flushed = started = heard = time.monotonic()
             channel.settimeout(0.05)
             try:
                 while not stop.is_set():
@@ -1233,17 +1339,26 @@ class SshSession:
                     except socket.timeout:
                         data = None
                     if data == b"":
+                        channel.status_event.wait(0.5)   # dropbear sends stdout EOF before exit-status
                         status = channel.recv_exit_status() if channel.exit_status_ready() else -1
                         message = ("SSH 已断开，监视停止。" if not self.alive else
                                    "板端采样进程已退出" + (f"（状态码 {status}）" if status > 0 else "")
                                    + (f"：{parser.note}" if parser.note else "。"))
                         break
                     if data:
-                        parser.feed(data)
-                    # Only the first point has a deadline: a later silence (network stall)
-                    # pauses the run and the dialog shows it; the board side resumes on its own.
+                        heard = time.monotonic()
+                        try:
+                            parser.feed(data)
+                        except ValueError as exc:   # a protocol stop, not a broken link: keep what parsed
+                            message = str(exc)
+                            break
+                    # The first point has a short deadline; a later silence first shows as paused,
+                    # and only a long one (half-open TCP, board off) ends the run.
                     if not parser.received and time.monotonic() - started > MONITOR_START_TIMEOUT_S:
                         message = "板端采样首点超时，监视已停止，请检查寄存器地址和板端状态。"
+                        break
+                    if time.monotonic() - heard > dead_after:
+                        message = f"板端超过 {dead_after:.0f} 秒无数据，监视已停止（网络或板子可能已断开）。"
                         break
                     if parser.sampler != reported:
                         reported = parser.sampler
@@ -1262,7 +1377,10 @@ class SshSession:
                 message = f"监视连接中断：{exc}"
             finally:
                 channel.close()
-                stopped("" if stop.is_set() else message)
+                try:
+                    stopped("" if stop.is_set() else message)
+                except RuntimeError:
+                    pass   # the dialog's signal bridge was already destroyed
         threading.Thread(target=reader, daemon=True, name="register-monitor").start()
         return True
 
@@ -1297,16 +1415,22 @@ class DemoSession:
         self.last_exit = 0
         self.memory = {}
         self._stream_stop = threading.Event()
-        # fake remote filesystem root, seeded with a demo sunny.log; removed with the session
-        self.remote_root = Path(tempfile.mkdtemp(prefix="demo-board-"))
-        weakref.finalize(self, shutil.rmtree, str(self.remote_root), True)
-        (self.remote_root / "run" / "media" / "sda").mkdir(parents=True, exist_ok=True)
-        demo_log = self.remote_root / "run" / "media" / "sda" / "sunny.log"
-        if not demo_log.exists():
-            demo_log.write_text("\n".join(
+        self._remote_root = None
+
+    @property
+    def remote_root(self):
+        """Fake remote filesystem with a demo sunny.log, created on first file operation
+        (most sessions never touch it) and removed with the session."""
+        if self._remote_root is None:
+            root = Path(tempfile.mkdtemp(prefix="demo-board-"))
+            weakref.finalize(self, shutil.rmtree, str(root), True)
+            (root / "run" / "media" / "sda").mkdir(parents=True, exist_ok=True)
+            (root / "run" / "media" / "sda" / "sunny.log").write_text("\n".join(
                 f"2026-09-14 20:{minute:02d}:{second:02d} INFO  [DEMO] board boot ok, fpga loaded"
                 .replace("fpga loaded", f"event #{minute * 60 + second}")
                 for minute in range(0, 2) for second in range(0, 60, 7)), encoding="utf-8")
+            self._remote_root = root
+        return self._remote_root
 
     def _to_remote(self, remote_path):
         return self.remote_root / remote_path.lstrip("/")
@@ -1467,7 +1591,7 @@ class DemoSession:
                 self.log("INFO", values)
         return results
 
-    def run(self, command, timeout=8, quiet=False):
+    def run(self, command, timeout=8, quiet=False, cancel=None):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
         parts = command.strip().split()

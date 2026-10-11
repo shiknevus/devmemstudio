@@ -293,6 +293,21 @@ static wchar_t *environment(const wchar_t *name)
     return value;
 }
 
+/* Killing the launcher kills the app; the app's own children (updater, browser) break away silently. */
+static HANDLE app_job(void)
+{
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    ZeroMemory(&limits, sizeof limits);
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                                            | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    if (job && !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits)) {
+        CloseHandle(job);
+        job = NULL;
+    }
+    return job;
+}
+
 static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_code)
 {
     static wchar_t self[PATH_CAP];
@@ -319,9 +334,18 @@ static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_co
         startup.lpReserved = NULL;
         startup.cbReserved2 = 0;
         startup.lpReserved2 = NULL;
+        HANDLE job = app_job();
         started = CreateProcessW(exe, command, NULL, NULL, (startup.dwFlags & STARTF_USESTDHANDLES) != 0,
-                                 0, NULL, NULL, &startup, &process);
+                                 CREATE_SUSPENDED, NULL, NULL, &startup, &process);
         if (started) {
+            if (job && !AssignProcessToJobObject(job, process.hProcess)) {   /* e.g. an outer job forbids nesting */
+                CloseHandle(job);
+                job = NULL;
+            }
+            if (ResumeThread(process.hThread) == (DWORD)-1) {
+                TerminateProcess(process.hProcess, 3);
+                started = 0;
+            }
             AllowSetForegroundWindow(process.dwProcessId);
             CloseHandle(process.hThread);
             WaitForSingleObject(process.hProcess, INFINITE);
@@ -329,6 +353,8 @@ static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_co
                 *exit_code = 1;
             CloseHandle(process.hProcess);
         }
+        if (job)
+            CloseHandle(job);
     }
     free(exe);
     free(command);
@@ -350,6 +376,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     make_tree(base);
     if (!plain_directory(base) || !(root = join(base, RUNTIME_ID)))
         goto done;
+    problem = L"等待其他 DevmemStudio 准备运行库超时（120 秒）。请稍后重试；仍失败时结束残留的 DevmemStudio 进程后再启动。";
     mutex = CreateMutexW(NULL, FALSE, L"Local\\DevmemStudio.Runtime." RUNTIME_ID);
     DWORD wait = mutex ? WaitForSingleObject(mutex, 120000) : WAIT_FAILED;
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)

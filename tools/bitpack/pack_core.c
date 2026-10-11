@@ -166,16 +166,30 @@ static int compare_files(PackJob *j, const wchar_t *a, const wchar_t *b)
     if (x == INVALID_HANDLE_VALUE || y == INVALID_HANDLE_VALUE || !buf) {
         pack_system_error(j->error, PACK_ERROR_CAP, L"无法读取归档校验文件", !buf ? ERROR_NOT_ENOUGH_MEMORY : GetLastError()); goto done;
     }
+    /* Compare by running offset: network shares may return short reads of different sizes. */
+    DWORD na = 0, nb = 0; int ea = 0, eb = 0;
     for (;;) {
         rc = interrupted(j); if (rc) break;
-        DWORD na = 0, nb = 0;
-        if (!ReadFile(x, buf, IO_CHUNK, &na, NULL) || !ReadFile(y, buf + IO_CHUNK, IO_CHUNK, &nb, NULL)) {
-            pack_system_error(j->error, PACK_ERROR_CAP, L"读取归档校验数据失败", GetLastError()); rc = PACK_FAILED; break;
+        DWORD got = 0;
+        if (!ea && na < IO_CHUNK) {
+            if (!ReadFile(x, buf + na, IO_CHUNK - na, &got, NULL)) {
+                pack_system_error(j->error, PACK_ERROR_CAP, L"读取归档校验数据失败", GetLastError()); rc = PACK_FAILED; break;
+            }
+            ea = !got; na += got;
         }
-        if (na != nb || memcmp(buf, buf + IO_CHUNK, na)) {
+        if (!eb && nb < IO_CHUNK) {
+            if (!ReadFile(y, buf + IO_CHUNK + nb, IO_CHUNK - nb, &got, NULL)) {
+                pack_system_error(j->error, PACK_ERROR_CAP, L"读取归档校验数据失败", GetLastError()); rc = PACK_FAILED; break;
+            }
+            eb = !got; nb += got;
+        }
+        DWORD n = na < nb ? na : nb;
+        if (memcmp(buf, buf + IO_CHUNK, n) || (ea && nb > n) || (eb && na > n)) {
             swprintf(j->error, PACK_ERROR_CAP, L"ZIP 解压内容与源文件不一致，未发布输出。"); rc = PACK_FAILED; break;
         }
-        if (!na) { rc = PACK_OK; break; }
+        memmove(buf, buf + n, na - n); na -= n;
+        memmove(buf + IO_CHUNK, buf + IO_CHUNK + n, nb - n); nb -= n;
+        if (ea && eb) { rc = PACK_OK; break; }
     }
 done:
     if (x != INVALID_HANDLE_VALUE) CloseHandle(x);
@@ -261,34 +275,39 @@ static int run_tool(PackJob *j, const wchar_t *exe, const wchar_t **args, size_t
     wchar_t *cmd = command_line(exe, args, count);
     if (!cmd) { pack_system_error(j->error, PACK_ERROR_CAP, L"构造工具参数失败", ERROR_NOT_ENOUGH_MEMORY); return PACK_FAILED; }
     SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    DWORD setup_error = ERROR_SUCCESS; /* first failure; later calls overwrite GetLastError */
     HANDLE output = CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (output == INVALID_HANDLE_VALUE) setup_error = GetLastError();
     HANDLE input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+    if (input == INVALID_HANDLE_VALUE && !setup_error) setup_error = GetLastError();
     HANDLE group = CreateJobObjectW(NULL, NULL);
+    if (!group && !setup_error) setup_error = GetLastError();
     PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof pi);
     STARTUPINFOEXW sx; ZeroMemory(&sx, sizeof sx); sx.StartupInfo.cb = sizeof sx;
     SIZE_T bytes = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &bytes);
     sx.lpAttributeList = malloc(bytes);
+    if (!sx.lpAttributeList && !setup_error) setup_error = ERROR_NOT_ENOUGH_MEMORY;
     int attrs_ready = 0;
-    if (output == INVALID_HANDLE_VALUE || input == INVALID_HANDLE_VALUE || !group || !sx.lpAttributeList) goto setup_failed;
-    if (!InitializeProcThreadAttributeList(sx.lpAttributeList, 1, 0, &bytes)) goto setup_failed;
+    if (setup_error) goto setup_failed;
+    if (!InitializeProcThreadAttributeList(sx.lpAttributeList, 1, 0, &bytes)) { setup_error = GetLastError(); goto setup_failed; }
     attrs_ready = 1;
     HANDLE handles[] = { output, input };
-    if (!UpdateProcThreadAttribute(sx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof handles, NULL, NULL)) goto setup_failed;
+    if (!UpdateProcThreadAttribute(sx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof handles, NULL, NULL)) { setup_error = GetLastError(); goto setup_failed; }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim; ZeroMemory(&lim, sizeof lim);
     lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!SetInformationJobObject(group, JobObjectExtendedLimitInformation, &lim, sizeof lim)) goto setup_failed;
+    if (!SetInformationJobObject(group, JobObjectExtendedLimitInformation, &lim, sizeof lim)) { setup_error = GetLastError(); goto setup_failed; }
     sx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     sx.StartupInfo.hStdInput = input;
     sx.StartupInfo.hStdOutput = sx.StartupInfo.hStdError = output;
     if (!CreateProcessW(exe, cmd, NULL, NULL, TRUE,
                         CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-                        NULL, cwd, &sx.StartupInfo, &pi)) goto setup_failed;
+                        NULL, cwd, &sx.StartupInfo, &pi)) { setup_error = GetLastError(); goto setup_failed; }
     if (!AssignProcessToJobObject(group, pi.hProcess)) {
         DWORD e = GetLastError(); TerminateProcess(pi.hProcess, PACK_FAILED);
         pack_system_error(j->error, PACK_ERROR_CAP, L"无法管理压缩子进程", e); rc = PACK_FAILED; goto finish;
     }
-    if (ResumeThread(pi.hThread) == (DWORD)-1) goto setup_failed;
+    if (ResumeThread(pi.hThread) == (DWORD)-1) { setup_error = GetLastError(); goto setup_failed; }
     for (;;) {
         DWORD w = WaitForSingleObject(pi.hProcess, 50);
         if (w == WAIT_OBJECT_0) {
@@ -304,7 +323,7 @@ static int run_tool(PackJob *j, const wchar_t *exe, const wchar_t **args, size_t
     }
     goto finish;
 setup_failed:
-    pack_system_error(j->error, PACK_ERROR_CAP, L"启动系统压缩工具失败", GetLastError()); rc = PACK_FAILED;
+    pack_system_error(j->error, PACK_ERROR_CAP, L"启动系统压缩工具失败", setup_error); rc = PACK_FAILED;
 finish:
     if (group) { if (rc) TerminateJobObject(group, (UINT)rc); CloseHandle(group); }
     if (pi.hProcess) { WaitForSingleObject(pi.hProcess, 5000); CloseHandle(pi.hProcess); }
@@ -463,13 +482,32 @@ static int same_file(HANDLE a, const wchar_t *b)
               x.dwVolumeSerialNumber == y.dwVolumeSerialNumber && x.nFileIndexHigh == y.nFileIndexHigh && x.nFileIndexLow == y.nFileIndexLow;
     CloseHandle(h); return yes;
 }
+/* Several cleanups may fail in one run: keep every line, ending with "…" once the buffer is full. */
+static void add_warning(PackJob *j, const wchar_t *line)
+{
+    size_t used = wcslen(j->warning), need = wcslen(line) + (used ? 1 : 0);
+    if (used && j->warning[used - 1] == L'…') return;
+    if (used + need < PACK_ERROR_CAP) {
+        if (used) j->warning[used++] = L'\n';
+        wcscpy(j->warning + used, line); return;
+    }
+    if (used + 2 < PACK_ERROR_CAP) {
+        if (used) j->warning[used++] = L'\n';
+        size_t room = PACK_ERROR_CAP - used - 2;
+        wcsncpy(j->warning + used, line, room);
+        wcscpy(j->warning + used + room, L"…");
+    }
+}
 static void cleanup_file(PackJob *j, const wchar_t *p)
 {
     if (!p) return;
     if (!DeleteFileW(p)) {
         DWORD e = GetLastError();
-        if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
-            swprintf(j->warning, PACK_ERROR_CAP, L"临时文件清理失败，可稍后手动清理：%.*ls（错误 %lu）", 1500, pack_display(p), (unsigned long)e);
+        if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) {
+            wchar_t line[PACK_ERROR_CAP];
+            swprintf(line, PACK_ERROR_CAP, L"临时文件清理失败，可稍后手动清理：%.*ls（错误 %lu）", 600, pack_display(p), (unsigned long)e);
+            add_warning(j, line);
+        }
     }
 }
 int pack_run(PackJob *j)
@@ -540,10 +578,12 @@ done:
     if (dst != INVALID_HANDLE_VALUE) CloseHandle(dst);
     if (zip != INVALID_HANDLE_VALUE) CloseHandle(zip);
     cleanup_file(j, pending); cleanup_file(j, verified);
-    if (verify_dir && !RemoveDirectoryW(verify_dir) && GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_FILE_NOT_FOUND)
-        swprintf(j->warning, PACK_ERROR_CAP, L"校验目录未能清理：%.*ls", 1500, pack_display(verify_dir));
+    wchar_t line[PACK_ERROR_CAP];
+    if (verify_dir && !RemoveDirectoryW(verify_dir) && GetLastError() != ERROR_PATH_NOT_FOUND && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        swprintf(line, PACK_ERROR_CAP, L"校验目录未能清理：%.*ls", 600, pack_display(verify_dir)); add_warning(j, line);
+    }
     cleanup_file(j, snapshot); cleanup_file(j, archive); cleanup_file(j, script); cleanup_file(j, log);
-    if (work && !RemoveDirectoryW(work)) swprintf(j->warning, PACK_ERROR_CAP, L"临时目录未能清理：%.*ls", 1500, pack_display(work));
+    if (work && !RemoveDirectoryW(work)) { swprintf(line, PACK_ERROR_CAP, L"临时目录未能清理：%.*ls", 600, pack_display(work)); add_warning(j, line); }
     free(pending); free(verified); free(verify_dir); free(snapshot); free(archive); free(script); free(log); free(work);
     if (rc == PACK_FAILED && !j->error[0]) pack_system_error(j->error, PACK_ERROR_CAP, L"操作失败", ERROR_NOT_ENOUGH_MEMORY);
     j->elapsed_ms = (DWORD)(GetTickCount64() - j->started);
@@ -576,15 +616,16 @@ static void scan_dir(BitList *l, const wchar_t *dir, unsigned depth)
         if (l->status || l->truncated) break;
         if (l->cancel && WaitForSingleObject(l->cancel, 0) == WAIT_OBJECT_0) { l->status = PACK_CANCELLED; break; }
         if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { ++l->skipped; continue; }
+        int link = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!l->recursive) continue;
-            if (depth >= PACK_SCAN_DEPTH) { ++l->skipped; continue; }
+            if (!l->recursive) continue; /* never entered: a junction here is not a skip */
+            if (link || depth >= PACK_SCAN_DEPTH) { ++l->skipped; continue; }
             wchar_t *sub = pack_join(dir, fd.cFileName);
             if (sub) { scan_dir(l, sub, depth + 1); free(sub); } else ++l->skipped;
         } else {
             const wchar_t *dot = wcsrchr(fd.cFileName, L'.');
             if (dot && !_wcsicmp(dot, L".bit")) {
+                if (link) { ++l->skipped; continue; } /* only a .bit link would have been picked */
                 wchar_t *full = pack_join(dir, fd.cFileName);
                 if (full) { list_add(l, full); free(full); } else ++l->skipped;
             }

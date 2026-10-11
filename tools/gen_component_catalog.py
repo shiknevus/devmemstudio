@@ -18,10 +18,12 @@ from devmem_studio.component_parse import (  # noqa: E402,F401
     parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
     strip_comments, top_is_plaintext)
 from devmem_studio.core import user_data_dir  # noqa: E402
-from devmem_studio.top_import import _catalog_timestamp, find_top_files, parse_top  # noqa: E402
+from devmem_studio.top_import import (  # noqa: E402
+    _catalog_timestamp, find_top_files, override_imported_at, parse_top)
 
 
-def type_keys_for(tops: list[Path], report: dict) -> list[str]:
+def type_keys_for(tops: list[Path], report: dict, active: set | None = None) -> list[str]:
+    """Module types instantiated by the tops; `active` collects the enabled ones."""
     keys = []
     for top in tops:
         text = read_text_resilient(top)
@@ -32,6 +34,8 @@ def type_keys_for(tops: list[Path], report: dict) -> list[str]:
         for component in info["components"]:
             if component["module_type"] not in keys:
                 keys.append(component["module_type"])
+            if active is not None and not component["disabled"]:
+                active.add(component["module_type"])
         report["top_warnings"].extend(f"{top.name}: {message}" for message in info["warnings"])
     return keys
 
@@ -50,7 +54,8 @@ def match_decode_files(keys: list[str], decode_files: dict[str, Path]) -> tuple[
                           if stem.startswith(suffix) or suffix.startswith(stem)]
         if len(candidates) > 1:
             ambiguous.append(f"{key} -> {sorted(candidates)}")
-            candidates.sort(key=lambda stem: (-len(stem), stem))
+            # Closest name wins: smallest length gap to the key, then the shorter stem.
+            candidates.sort(key=lambda stem: (abs(len(normalized(stem)) - len(normalized(suffix))), len(stem), stem))
         if not candidates:
             candidates = [stem for stem in decode_files if suffix in stem]
         if not candidates:
@@ -69,7 +74,7 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
     if len(define_maps) > 1:
         report["top_warnings"].append("多个 reg_addr_pl.vh，使用 " + str(defines_path) + "；其余："
                                       + ", ".join(str(path) for path in define_maps[1:]))
-    defines = parse_define_table(read_text_resilient(defines_path))
+    defines = parse_define_table(read_text_resilient(defines_path), report["top_warnings"])
     if not defines:
         raise SystemExit(f"reg_addr map is empty or unreadable: {defines_path}")
 
@@ -82,7 +87,8 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
             report["top_warnings"].append(f"解码文件重名 {stem}：{decode_files[stem]} 与 {path}，使用前者")
             continue
         decode_files[stem] = path
-    keys = type_keys_for(tops, report) if tops else []
+    active = set()   # enabled top types, for the coverage check below
+    keys = type_keys_for(tops, report, active) if tops else []
     declared = {}   # module ec_* in the component folder -> that folder's decode file
     for stem in decode_files:
         directory = decode_files[stem].parent.name
@@ -108,17 +114,15 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
         if not any(marker in text for marker in PLAINTEXT_MARKERS):
             report["unparsed_files"].append({"file": str(path), "reason": "not-plaintext-or-unrecognized-format"})
             continue
-        entry, forced, warnings = build_type_entry(key, path, defines, rtl_root)
+        top_file = find_top_file(key, path)
+        entry, forced, warnings = build_type_entry(key, path, defines, rtl_root, top_file=top_file)
         report["forced_irq_registers"].extend(forced)
         report["top_warnings"].extend(warnings)
         if "debug_notes" not in entry:
             report["unharvested_top_types"].append(key)
         types[key] = entry
-        top_file = find_top_file(key, path)
         if top_file is not None and not top_is_plaintext(read_text_resilient(top_file)):
             report["unparsed_files"].append({"file": str(top_file), "reason": "not-plaintext-or-unrecognized-format"})
-    active = {c["module_type"] for top in tops for c in parse_top(read_text_resilient(top))["components"]
-              if not c["disabled"]} if tops else set()
     report["unmatched_top_types"] = sorted(t for t in active if t not in types)
     report["types"] = len(types)
     report["registers_total"] = sum(len(entry["registers"]) for entry in types.values())
@@ -137,6 +141,14 @@ def carry_removed(catalog: dict, previous: dict) -> list[str]:
         catalog["types"][key] = json.loads(json.dumps(by_decode.get(previous[key].get("decode_file"), previous[key])))
     catalog["types"] = dict(sorted(catalog["types"].items()))
     return kept
+
+
+def _override_time(item: Path) -> float:
+    try:
+        entry = json.loads(item.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        entry = None   # unreadable: fall back to the mtime
+    return override_imported_at(item, entry)
 
 
 def refresh(out: Path, rtl: Path | None, stamp: str) -> int:
@@ -163,7 +175,7 @@ def refresh(out: Path, rtl: Path | None, stamp: str) -> int:
     bundled_at = _catalog_timestamp(previous.get("generated_at"))
     overrides = user_data_dir() / "component_overrides"
     newer = sorted(item.stem for item in overrides.glob("*.json")
-                   if bundled_at is None or item.stat().st_mtime >= bundled_at) if overrides.is_dir() else []
+                   if bundled_at is None or _override_time(item) >= bundled_at) if overrides.is_dir() else []
     changed = sorted(key for key in catalog["types"] if catalog["types"][key] != old_types.get(key))
     if not changed and not newer:
         print(f"up to date: {len(catalog['types'])} types, generated_at {previous.get('generated_at')}")
@@ -185,7 +197,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="exit non-zero on unparsed files or unmatched top types")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    stamp = args.stamp or datetime.now().isoformat(timespec="seconds")
+    stamp = args.stamp or datetime.now().astimezone().isoformat(timespec="seconds")   # with UTC offset
     if args.refresh:
         return refresh(args.out, args.rtl, stamp)
     if args.rtl is None:

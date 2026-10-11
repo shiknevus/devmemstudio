@@ -38,6 +38,10 @@ class NotFound(RuntimeError):
     pass
 
 
+class MissingAsset(ValueError):
+    """Release published before its package/checksum upload finished."""
+
+
 def version_tuple(value):
     match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(value))
     if not match:
@@ -135,8 +139,10 @@ def parse_release(payload, current=__version__):
     name = f"DevmemStudio-{version}-win64.zip"
     assets = payload.get("assets", [])
     matching = [item for item in assets if item.get("name") == name]
-    if len(matching) != 1:
+    if len(matching) > 1:
         raise ValueError(f"发布版本缺少唯一的 Windows 更新包：{name}")
+    if not matching:
+        raise MissingAsset(f"发布版本缺少 Windows 更新包：{name}")
     asset = matching[0]
     size = asset.get("size", 0)
     if type(size) is not int or not 0 < size <= MAX_PACKAGE:
@@ -146,7 +152,7 @@ def parse_release(payload, current=__version__):
     checksum = [item for item in assets if item.get("name") == name + ".sha256"]
     checksum_url = _asset_url(checksum[0]) if len(checksum) == 1 else ""
     if not digest and not checksum_url:
-        raise ValueError("发布版本缺少 SHA-256 校验值，请维护者补充更新包校验文件。")
+        raise MissingAsset("发布版本缺少 SHA-256 校验值，请维护者补充更新包校验文件。")
     return Release(version, str(payload.get("body") or "暂无更新说明。")[:100000], name,
                    _asset_url(asset), size, digest.lower(), checksum_url)
 
@@ -256,7 +262,10 @@ def check_release(cancel=None, current=__version__):
     formal = [payload for payload in payloads if _formal_version(payload) is not None]
     if not formal:
         raise NotFound("未找到正式发布版本；请检查 GitHub Releases 是否已发布。")
-    release = parse_release(max(formal, key=_formal_version), current)
+    try:
+        release = parse_release(max(formal, key=_formal_version), current)
+    except MissingAsset:
+        return None   # assets still uploading: no update yet, never an older fallback
     if release is None:
         return None
     return replace(release, notes=combined_notes(formal, current, release.version)[:100000])
@@ -352,7 +361,7 @@ def download_release(release, cancel=None, progress=lambda value: None, director
         archive.unlink()
         return Download(release.version, executable, file_digest(executable))
     except Exception:
-        shutil.rmtree(work)
+        shutil.rmtree(work, ignore_errors=True)   # never mask the original error
         raise
 
 
@@ -392,7 +401,7 @@ def prepare_install(download, target=None):
         job = {"target": str(target), "staged": str(staged), "sha256": download.digest,
                "backup": str(backup_path(target, identifier)),
                "pids": [os.getpid()], "version": download.version,
-               "result": str(work / "result.json")}
+               "result": str(work / "result.json"), "started": str(work / "started.flag")}
         launcher_pid = os.environ.get("DEVMEMSTUDIO_LAUNCHER_PID", "")
         if launcher_pid.isdigit() and int(launcher_pid) > 0:
             job["pids"].append(int(launcher_pid))
@@ -404,15 +413,123 @@ def prepare_install(download, target=None):
         raise
 
 
-def start_install(job_path):
+def start_install(job_path, timeout=10.0):
+    """Start the helper; return only once it runs in FullLanguage, else raise OSError so the app stays open."""
     job_path = Path(job_path)
+    marker = Path(json.loads(job_path.read_text(encoding="utf-8"))["started"])
+    marker.unlink(missing_ok=True)
     powershell = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("_PYI") and key != "_MEIPASS2" and not key.startswith("DEVMEMSTUDIO_LAUNCHER")}
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    return subprocess.Popen([str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                             "-File", str(job_path.parent / "apply_update.ps1"), "-JobPath", str(job_path)],
-                            env=environment, creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-File", str(job_path.parent / "apply_update.ps1"), "-JobPath", str(job_path)]
+    try:   # must outlive the launcher's kill-on-close job
+        process = subprocess.Popen(command, env=environment, close_fds=True,
+                                   creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_BREAKAWAY_FROM_JOB)
+    except OSError:   # an outer job forbids breakaway; the launcher's own job breaks away silently
+        process = subprocess.Popen(command, env=environment, close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    deadline = time.monotonic() + timeout
+    while not marker.exists():
+        if process.poll() is not None or time.monotonic() >= deadline:
+            if process.poll() is None:
+                process.kill()
+                process.wait(5)
+            raise OSError("升级助手未能启动（PowerShell 可能被组策略 AllSigned 或 AppLocker 限制），已取消升级。"
+                          "可打开发布页手动下载新版本。")
+        time.sleep(0.05)
+    return process
+
+
+LEFTOVER_AGE = 3600   # seconds: a download or swap this fresh may still be in progress
+
+
+def _settled(path, now, min_age):
+    stamps = [path.stat().st_mtime]
+    if path.is_dir():
+        stamps += [item.stat().st_mtime for item in path.iterdir()]
+    return now - max(stamps) >= min_age
+
+
+def cleanup_update_leftovers(target=None, keep=(), min_age=LEFTOVER_AGE, directory=None):
+    """Remove stale download-* folders, staged EXEs and all but the newest backup. Never raises."""
+    now, removed = time.time(), []
+    keep = {os.path.normcase(os.path.abspath(item)) for item in keep}
+    base = Path(directory) if directory is not None else user_data_dir() / "updates"
+    try:
+        works = list(base.glob("download-*"))
+    except OSError:
+        works = []
+    for work in works:
+        try:
+            if (work.is_dir() and not work.is_symlink() and not work.is_junction()
+                    and os.path.normcase(os.path.abspath(work)) not in keep and _settled(work, now, min_age)):
+                shutil.rmtree(work)
+                removed.append(work)
+        except OSError:
+            pass   # in use or vanished: the next start retries
+    if target is None:
+        try:
+            target = launcher_path()
+        except ValueError:
+            return removed
+    target = Path(target)
+    staged = re.compile(r"\.DevmemStudio-update-[0-9a-f]{32}\.exe", re.I)
+    backup = re.compile(rf"{re.escape(target.stem)}-(\d+\.\d+\.\d+)-backup(?:-[0-9a-f]{{8}})?{re.escape(target.suffix)}", re.I)
+    backups = []
+    try:
+        siblings = list(target.parent.iterdir())
+    except OSError:
+        siblings = []
+    for item in siblings:
+        try:
+            if not item.is_file() or item.is_symlink():
+                continue
+            if staged.fullmatch(item.name) and _settled(item, now, min_age):
+                item.unlink()
+                removed.append(item)
+            elif match := backup.fullmatch(item.name):
+                backups.append((version_tuple(match.group(1)), item.stat().st_mtime, item))
+        except OSError:
+            pass
+    for *_, item in sorted(backups, reverse=True)[1:]:   # keep the newest backup only
+        try:
+            item.unlink()
+            removed.append(item)
+        except OSError:
+            pass
+    return removed
+
+
+def take_update_result(directory=None):
+    """Outcome of the last restart-and-upgrade, consumed once; None if absent or unreadable (DLP may encrypt it)."""
+    base = Path(directory) if directory is not None else user_data_dir() / "updates"
+    found = []
+    try:
+        paths = list(base.glob("download-*/result.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            found.append((path.stat().st_mtime, path))
+        except OSError:
+            pass
+    result = None
+    for _, path in sorted(found, reverse=True):
+        if result is None:
+            try:
+                data = json.loads(path.read_bytes().decode("utf-8-sig"))
+                if isinstance(data, dict) and isinstance(data.get("success"), bool):
+                    result = {"success": data["success"], "version": str(data.get("version") or ""),
+                              "error": str(data.get("error") or ""), "restored": data.get("restored") is True,
+                              "backup": str(data.get("backup") or "")}
+            except (OSError, ValueError):
+                pass
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return result
 
 
 def discard_install(job_path):

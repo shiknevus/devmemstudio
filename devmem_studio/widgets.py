@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from PySide6.QtCore import QEvent, Qt, QRectF, Signal, QObject, QRunnable
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIntValidator, QPainter, QPen, QTextCursor
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIntValidator, QKeySequence, QPainter, QPen, QTextCursor
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
                                QFrame, QComboBox, QLineEdit, QPlainTextEdit, QSizePolicy, QStyle,
                                QStyleOptionComboBox, QStylePainter)
@@ -177,6 +177,18 @@ class IpAddressField(QWidget):
             if focused != bool(self.property("focused")):
                 self.setProperty("focused", focused)
                 restyle(self)
+        elif event.type() == QEvent.KeyPress and watched in self.octets:
+            idx = self.octets.index(watched)
+            if event.text() in (".", "。", " "):   # dotted typing: jump to the next octet
+                if watched.text() and idx < 3:
+                    self.octets[idx + 1].setFocus()
+                    self.octets[idx + 1].selectAll()
+                return True
+            if event.matches(QKeySequence.Paste):
+                text = QGuiApplication.clipboard().text().strip()
+                if "." in text:   # a whole address: spread it over the octets
+                    self.setText(text)
+                    return True
         return super().eventFilter(watched, event)
 
     def _on_edited(self, idx, text):
@@ -190,7 +202,11 @@ class IpAddressField(QWidget):
         parts = [edit.text().strip() for edit in self.octets]
         if not any(parts):
             return ""
-        return ".".join(parts)
+        # "010" would resolve as octal 8 in inet_aton; drop leading zeros.
+        return ".".join(str(int(part)) if part.isdigit() else part for part in parts)
+
+    def is_complete(self):
+        return all(edit.text().strip() for edit in self.octets)
 
     def setText(self, value):
         value = value or ""

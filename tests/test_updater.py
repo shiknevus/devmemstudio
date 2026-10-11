@@ -295,6 +295,176 @@ class UpdateTransportTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"old")
             self.assertEqual(list(base.glob(".DevmemStudio-update-*")), [])
 
+    def test_latest_release_still_uploading_means_no_update_yet(self):
+        uploading = release_payload()
+        uploading["assets"] = []
+        older = release_payload()
+        older["tag_name"] = "v98.0.0"
+        with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps([uploading, older]).encode())):
+            self.assertIsNone(updater.check_release(current="97.0.0"))
+        foreign = release_payload()
+        foreign["assets"][0]["browser_download_url"] = "https://github.com/other/repo/releases/download/v99.0.0/x.zip"
+        with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps([foreign]).encode())), \
+                self.assertRaises(ValueError):
+            updater.check_release(current="97.0.0")
+
+    def test_cleanup_failure_never_masks_download_error(self):
+        data = package_bytes()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(updater, "_open", return_value=io.BytesIO(data[:-1])), \
+                patch.object(updater.shutil, "rmtree") as rmtree, self.assertRaises(ValueError):
+            updater.download_release(updater.parse_release(release_payload(data)), directory=directory)
+        self.assertEqual(rmtree.call_args.kwargs, {"ignore_errors": True})
+
+    def test_leftovers_are_cleaned_except_recent_kept_and_newest_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            updates, app = base / "updates", base / "app"
+            app.mkdir()
+            old = time.time() - 2 * updater.LEFTOVER_AGE
+            for name in ("download-old", "download-fresh", "download-kept"):
+                (updates / name).mkdir(parents=True)
+                (updates / name / "DevmemStudio.exe").write_bytes(b"MZ")
+                if name != "download-fresh":
+                    os.utime(updates / name / "DevmemStudio.exe", (old, old))
+                    os.utime(updates / name, (old, old))
+            target = app / "Tool.exe"
+            names = ["Tool.exe", f".DevmemStudio-update-{'a' * 32}.exe", f".DevmemStudio-update-{'b' * 32}.exe",
+                     "Tool-5.9.0-backup.exe", "Tool-5.10.0-backup.exe", "Tool-5.10.0-backup-abcdef01.exe",
+                     "Other-1.0.0-backup.exe", "notes.txt"]
+            for index, name in enumerate(names):
+                (app / name).write_bytes(b"MZ")
+                if name != f".DevmemStudio-update-{'b' * 32}.exe":
+                    os.utime(app / name, (old + index, old + index))
+            removed = updater.cleanup_update_leftovers(target, keep=[updates / "download-kept"], directory=updates)
+            self.assertEqual(sorted(item.name for item in updates.iterdir()), ["download-fresh", "download-kept"])
+            self.assertEqual(sorted(item.name for item in app.iterdir()),
+                             sorted(["Tool.exe", f".DevmemStudio-update-{'b' * 32}.exe",
+                                     "Tool-5.10.0-backup-abcdef01.exe", "Other-1.0.0-backup.exe", "notes.txt"]))
+            self.assertEqual(len(removed), 4)
+            self.assertEqual(updater.cleanup_update_leftovers(target, directory=base / "missing"), [])
+
+    def test_last_update_result_is_read_once_and_tolerates_unreadable_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            updates = Path(directory)
+            self.assertIsNone(updater.take_update_result(updates))
+            for name, payload, stamp in (("download-a", "﻿" + json.dumps({"success": False, "error": "x"}), 1),
+                                         ("download-b", "﻿" + json.dumps({"success": True, "version": "99.0.0"}), 2)):
+                (updates / name).mkdir()
+                (updates / name / "result.json").write_text(payload, encoding="utf-8")
+                os.utime(updates / name / "result.json", (1_000_000 + stamp, 1_000_000 + stamp))
+            result = updater.take_update_result(updates)
+            self.assertEqual((result["success"], result["version"], result["restored"]), (True, "99.0.0", False))
+            self.assertEqual(list(updates.glob("*/result.json")), [])
+            self.assertIsNone(updater.take_update_result(updates))
+            (updates / "download-a" / "result.json").write_bytes(b"\x93\x00encrypted\xff")
+            self.assertIsNone(updater.take_update_result(updates))
+            self.assertFalse((updates / "download-a" / "result.json").exists())
+
+    def start_with(self, script, timeout=5.0, refuse_breakaway=False):
+        directory = Path(tempfile.mkdtemp(prefix="devmem-start-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        marker = directory / "started.flag"
+        job_path = directory / "install.json"
+        job_path.write_text(json.dumps({"started": str(marker)}), encoding="utf-8")
+        real, calls = subprocess.Popen, []
+
+        def popen(command, **options):
+            calls.append(options["creationflags"])
+            if refuse_breakaway and options["creationflags"] & subprocess.CREATE_BREAKAWAY_FROM_JOB:
+                raise PermissionError(5, "Access is denied")
+            return real([sys.executable, "-c", script.replace("MARKER", repr(str(marker)))], **options)
+
+        with patch.object(updater.subprocess, "Popen", side_effect=popen):
+            started = time.monotonic()
+            try:
+                return updater.start_install(job_path, timeout=timeout), time.monotonic() - started, calls
+            except OSError as exc:
+                return exc, time.monotonic() - started, calls
+
+    def test_start_install_returns_once_helper_marks_started(self):
+        process, seconds, calls = self.start_with("import time; open(MARKER, 'w').close(); time.sleep(0.5)")
+        self.assertNotIsInstance(process, OSError)
+        process.wait(10)
+        self.assertTrue(calls[0] & subprocess.CREATE_BREAKAWAY_FROM_JOB)
+        process, seconds, calls = self.start_with("open(MARKER, 'w').close()", refuse_breakaway=True)
+        self.assertNotIsInstance(process, OSError)
+        process.wait(10)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(calls[1] & subprocess.CREATE_BREAKAWAY_FROM_JOB)
+
+    def test_blocked_helper_raises_so_the_app_stays_open(self):
+        error, seconds, _ = self.start_with("raise SystemExit(1)")   # AllSigned: script refused at once
+        self.assertIsInstance(error, OSError)
+        self.assertLess(seconds, 4)
+        error, seconds, _ = self.start_with("import time; time.sleep(30)", timeout=1)   # hung helper is killed
+        self.assertIsInstance(error, OSError)
+        self.assertLess(seconds, 6)
+
+
+@unittest.skipUnless(sys.platform == "win32" and shutil.which("gcc") and shutil.which("windres"), "MinGW required")
+class ReleaseVersionTests(unittest.TestCase):
+    def test_release_refuses_executable_of_another_version(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            import make_release
+        finally:
+            sys.path.remove(str(ROOT / "tools"))
+        with tempfile.TemporaryDirectory(prefix="devmem-release-") as directory:
+            base = Path(directory)
+            (base / "main.c").write_text("int main(void){return 0;}\n")
+            (base / "version.rc").write_text('1 VERSIONINFO\nFILEVERSION 5,2,7,0\nPRODUCTVERSION 5,2,7,0\nBEGIN\nEND\n')
+            subprocess.run([shutil.which("windres"), "version.rc", "-O", "coff", "-o", "version.res"],
+                           cwd=base, check=True, capture_output=True, timeout=30)
+            exe = base / "dist" / "DevmemStudio.exe"
+            exe.parent.mkdir()
+            subprocess.run([shutil.which("gcc"), "main.c", "version.res", "-o", str(exe)],
+                           cwd=base, check=True, capture_output=True, timeout=30)
+            self.assertEqual(make_release.exe_version(exe), "5.2.7")
+            with self.assertRaises(SystemExit):
+                make_release.build_release(exe, "5.2.8")
+            self.assertEqual(sorted(item.name for item in exe.parent.iterdir()), ["DevmemStudio.exe"])
+            report = make_release.build_release(exe, "5.2.7")
+            with zipfile.ZipFile(report["archive"]) as package:
+                self.assertEqual(package.namelist(), ["DevmemStudio/DevmemStudio.exe"])
+            (base / "plain.c").write_text("int main(void){return 0;}\n")
+            subprocess.run([shutil.which("gcc"), "plain.c", "-o", "plain.exe"], cwd=base, check=True,
+                           capture_output=True, timeout=30)
+            with self.assertRaises(SystemExit):
+                make_release.build_release(base / "plain.exe", "5.2.7")
+
+
+# ok/fail exit at once; window = launcher error box; stuck = no app ever; parent = launcher running its app.
+PROBE_SOURCE = r"""#include <windows.h>
+#include <string.h>
+#ifndef EXIT_CODE
+#define EXIT_CODE 0
+#endif
+int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
+{
+#if defined(WINDOW)
+    CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"probe error", WS_POPUP | WS_VISIBLE, -32000, -32000, 1, 1, 0, 0, a, 0);
+    Sleep(30000);
+#elif defined(STUCK)
+    Sleep(30000);
+#elif defined(PARENT)
+    if (strstr(c, "child")) { Sleep(30000); return 0; }
+    wchar_t self[MAX_PATH], line[MAX_PATH + 16];
+    GetModuleFileNameW(0, self, MAX_PATH);
+    wsprintfW(line, L"\"%s\" child", self);
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(self, line, 0, 0, 0, 0, 0, 0, &si, &pi)) return 9;
+    Sleep(30000);
+#endif
+    return EXIT_CODE;
+}
+"""
+
+
+def kill_tree(pid):
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
 
 @unittest.skipUnless(sys.platform == "win32" and shutil.which("gcc"), "Windows and GCC required")
 class WindowsReplacementTests(unittest.TestCase):
@@ -305,39 +475,52 @@ class WindowsReplacementTests(unittest.TestCase):
         cls.scratch = tempfile.TemporaryDirectory(prefix="devmem-update-compile-")
         cls.base = Path(cls.scratch.name)
         source = cls.base / "probe.c"
-        source.write_text("#include <windows.h>\nint WINAPI WinMain(HINSTANCE a,HINSTANCE b,LPSTR c,int d){return EXIT_CODE;}\n")
-        for name, code in (("ok", 0), ("fail", 7)):
-            subprocess.run([shutil.which("gcc"), str(source), "-mwindows", f"-DEXIT_CODE={code}",
+        source.write_text(PROBE_SOURCE)
+        for name, flags in (("ok", ["-DEXIT_CODE=0"]), ("fail", ["-DEXIT_CODE=7"]), ("window", ["-DWINDOW"]),
+                            ("stuck", ["-DSTUCK"]), ("parent", ["-DPARENT"])):
+            subprocess.run([shutil.which("gcc"), str(source), "-mwindows", *flags,
                             "-o", str(cls.base / f"{name}.exe")], check=True, capture_output=True, timeout=30)
 
     @classmethod
     def tearDownClass(cls):
         cls.scratch.cleanup()
 
-    def apply(self, directory, new="ok", digest=None, pids=None):
+    def apply(self, directory, new="ok", digest=None, pids=None, **extra):
         base = Path(directory)
         target, staged, backup = (base / name for name in ("app.exe", "staged.exe", "app-1.0.0-backup.exe"))
-        shutil.copyfile(self.base / "ok.exe", target)
+        if not target.exists():
+            shutil.copyfile(self.base / "ok.exe", target)
         shutil.copyfile(self.base / f"{new}.exe", staged)
         (base / "registers.json").write_bytes(b"keep-settings")
         job = dict(target=str(target), staged=str(staged), backup=str(backup),
                    sha256=digest or updater.file_digest(staged), pids=pids or [], version="99.0.0")
+        job.update(extra)
         job_path = base / "job.json"
         job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
         helper = ROOT / "assets/updater/apply_update.ps1"
         command = f". '{helper}'; $job = Get-Content -LiteralPath '{job_path}' -Raw -Encoding UTF8 | ConvertFrom-Json; Invoke-DevmemUpdate $job | ConvertTo-Json -Compress"
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40,
-                                creationflags=subprocess.CREATE_NO_WINDOW)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # Files, not pipes: a still-running new program inherits them and would hold a pipe open.
+        with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            code = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                  stdout=stdout, stderr=stderr, timeout=40, creationflags=subprocess.CREATE_NO_WINDOW).returncode
+            stdout.seek(0)
+            stderr.seek(0)
+            output, errors = (item.read().decode("utf-8", "replace") for item in (stdout, stderr))
+        self.assertEqual(code, 0, errors)
         self.assertEqual((base / "registers.json").read_bytes(), b"keep-settings")
-        return json.loads(result.stdout), target, staged, backup
+        return json.loads(output), target, staged, backup
 
     def test_atomic_replacement_keeps_backup(self):
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
             result, target, staged, backup = self.apply(directory)
             self.assertTrue(result["success"], result)
             self.assertEqual(backup.read_bytes(), (self.base / "ok.exe").read_bytes())
+            self.assertFalse(staged.exists())
+
+    def test_bracketed_install_path_starts_new_program(self):
+        with tempfile.TemporaryDirectory(prefix="工具[新] ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory)
+            self.assertTrue(result["success"], result)
             self.assertFalse(staged.exists())
 
     def test_bad_checksum_preserves_old_program(self):
@@ -355,6 +538,90 @@ class WindowsReplacementTests(unittest.TestCase):
             self.assertTrue(result["restored"], result)
             self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
             self.assertEqual(staged.read_bytes(), (self.base / "fail.exe").read_bytes())
+
+    def test_new_launcher_error_box_rolls_back(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory, new="window")
+            self.assertFalse(result["success"], result)
+            self.assertIn("showed an error", result["error"])
+            self.assertTrue(result["restored"], result)
+            self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
+            self.assertEqual(staged.read_bytes(), (self.base / "window.exe").read_bytes())
+
+    def test_new_launcher_that_never_starts_app_rolls_back(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory, new="stuck", start_timeout=4)
+            self.assertFalse(result["success"], result)
+            self.assertIn("did not start", result["error"])
+            self.assertTrue(result["restored"], result)
+            self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
+
+    def test_running_app_child_counts_as_started(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory, new="parent", start_timeout=20)
+            try:
+                self.assertTrue(result["success"], result)
+                self.assertEqual(target.read_bytes(), (self.base / "parent.exe").read_bytes())
+            finally:
+                kill_tree(result.get("pid", 0))
+                time.sleep(0.5)   # image lock released before the directory is removed
+
+    def test_access_denied_replace_is_retried(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            target = Path(directory) / "app.exe"
+            shutil.copyfile(self.base / "ok.exe", target)
+            os.chmod(target, 0o444)   # ReplaceFile: ERROR_ACCESS_DENIED until writable again
+            timer = threading.Timer(1.5, os.chmod, (target, 0o666))
+            timer.start()
+            try:
+                started = time.monotonic()
+                result, target, staged, backup = self.apply(directory)
+            finally:
+                timer.join()
+            self.assertTrue(result["success"], result)
+            self.assertGreaterEqual(time.monotonic() - started, 1.4)
+
+    def test_malformed_job_reports_failure_and_removes_owned_stage(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            base = Path(directory)
+            staged = base / f".DevmemStudio-update-{'a' * 32}.exe"
+            shutil.copyfile(self.base / "ok.exe", staged)
+            job_path = base / "job.json"
+            job_path.write_text(json.dumps({"staged": str(staged), "pids": []}), encoding="utf-8")
+            helper = ROOT / "assets/updater/apply_update.ps1"
+            command = (f". '{helper}'; $job = Get-Content -LiteralPath '{job_path}' -Raw -Encoding UTF8 | ConvertFrom-Json; "
+                       "Invoke-DevmemUpdate $job | ConvertTo-Json -Compress")
+            result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=40,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(json.loads(result.stdout)["success"])
+            self.assertFalse(staged.exists())
+
+    def test_start_install_waits_for_helper_and_reports_result(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            base = Path(directory)
+            target = base / "DevmemStudio.exe"
+            shutil.copyfile(self.base / "ok.exe", target)
+            updates = base / "updates"
+            work = updates / "download-test"
+            work.mkdir(parents=True)
+            new = work / "DevmemStudio.exe"
+            shutil.copyfile(self.base / "ok.exe", new)
+            job_path = updater.prepare_install(updater.Download("99.0.0", new, updater.file_digest(new)), target)
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["pids"] = []   # this test process stays alive
+            job_path.write_text(json.dumps(job), encoding="utf-8")
+            process = updater.start_install(job_path, timeout=30)
+            self.assertTrue(Path(job["started"]).exists())
+            self.assertEqual(process.wait(60), 0)
+            outcome = updater.take_update_result(updates)
+            if outcome is not None:   # office DLP may encrypt PowerShell-written JSON
+                self.assertTrue(outcome["success"], outcome)
+                self.assertEqual(outcome["version"], "99.0.0")
+            self.assertEqual(list(updates.glob("*/result.json")), [])
+            self.assertTrue(Path(job["backup"]).exists())
+            self.assertFalse(Path(job["staged"]).exists())
 
     def test_waits_for_existing_process(self):
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"], creationflags=subprocess.CREATE_NO_WINDOW)

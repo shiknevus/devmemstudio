@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,17 +44,30 @@ def icon_current():
     return icon.is_file() and all(icon.stat().st_mtime >= source.stat().st_mtime for source in sources)
 
 
+ABORT = threading.Event()   # set by the first failing step; parallel steps stop early
+
+
 def run(name, *args, env=None):
     """Run one step with its output in build/logs/<name>.log; raise on failure."""
+    if ABORT.is_set():
+        raise StepCancelled(name)
     log = LOGS / f"{name}.log"
     env = dict(os.environ, PYTHONIOENCODING="utf-8", **(env or {}))
     started = time.perf_counter()
     with log.open("w", encoding="utf-8", errors="replace") as handle:
-        code = subprocess.run([PY, *map(str, args)], cwd=ROOT, env=env, stdout=handle,
-                              stderr=subprocess.STDOUT).returncode
+        process = subprocess.Popen([PY, *map(str, args)], cwd=ROOT, env=env, stdout=handle, stderr=subprocess.STDOUT)
+        while process.poll() is None:
+            if ABORT.wait(0.5) and process.poll() is None:
+                # The whole tree: tests and PyInstaller run their own children.
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True)
+                process.wait()
+                print(f"  stop {name:<12} {time.perf_counter() - started:6.1f} s (another step failed)", flush=True)
+                raise StepCancelled(name)
+        code = process.returncode
     seconds = time.perf_counter() - started
     print(f"  {'ok  ' if code == 0 else 'FAIL'} {name:<12} {seconds:6.1f} s", flush=True)
     if code:
+        ABORT.set()
         raise StepFailed(name, log)
 
 
@@ -61,6 +75,11 @@ class StepFailed(Exception):
     def __init__(self, name, log):
         super().__init__(name)
         self.name, self.log = name, log
+        self.steps = [self]
+
+
+class StepCancelled(Exception):
+    pass
 
 
 def checks():
@@ -97,11 +116,17 @@ def main():
             print("  skip catalog      (--no-catalog)")
         else:
             run("catalog", "tools/gen_component_catalog.py", "--refresh")   # before packaging: EXE ships the fresh table
-            print("        " + (LOGS / "catalog.log").read_text(encoding="utf-8").strip().splitlines()[-1][:150])
+            lines = (LOGS / "catalog.log").read_text(encoding="utf-8").strip().splitlines()
+            print("        " + (lines[-1][:150] if lines else "(catalog.log is empty)"))
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [pool.submit(step) for step in (package, checks, smoke)]
-            failures = [future.exception() for future in futures if future.exception()]
+            errors = [future.exception() for future in futures if future.exception()]
+        failures = [error for error in errors if isinstance(error, StepFailed)]
+        for error in errors:
+            if not isinstance(error, (StepFailed, StepCancelled)):
+                raise error
         if failures:
+            failures[0].steps = failures   # report every failed log, not just the first
             raise failures[0]
         if no_dist:
             print(f"\nAccepted in {time.perf_counter() - started:.0f} s: {CANDIDATE} (dist/ untouched)")
@@ -116,9 +141,10 @@ def main():
             return 1
         run("release", "tools/make_release.py")
     except StepFailed as failure:
-        lines = failure.log.read_text(encoding="utf-8", errors="replace").splitlines()
-        print(f"\n--- last lines of {failure.log} ---")
-        print("\n".join(lines[-60:]))
+        for step in failure.steps:
+            lines = step.log.read_text(encoding="utf-8", errors="replace").splitlines()
+            print(f"\n--- last lines of {step.log} ---")
+            print("\n".join(lines[-60:]))
         return 1
     print(f"\nBuild complete in {time.perf_counter() - started:.0f} s: {ROOT / 'dist' / 'DevmemStudio.exe'}")
     return 0

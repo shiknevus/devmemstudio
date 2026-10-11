@@ -278,7 +278,7 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(info["types"], ["ec_s_lock"])
             self.assertTrue(info["top_file"].endswith("ec_lock_top.sv"))
             self.assertEqual(entry, {**catalog["types"]["ec_s_lock"], "imported_from": str(folder),
-                                     "decode_file": entry["decode_file"]})
+                                     "decode_file": entry["decode_file"], "imported_at": entry["imported_at"]})
 
     def test_refresh_keeps_removed_types_and_skips_when_unchanged(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -419,6 +419,7 @@ class ComponentFolderTests(unittest.TestCase):
                 " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
             (component / "ec_uut.sv").write_text(
                 "module t;\n"
+                " wire b_reset; wire o_rst, i_error,\n o_fwd;\n"
                 " ,.param52 ({30'd0,b_reset,param16[0]}) //out cmd [2]rst [1]son [0]dir\n"
                 " ,.debug_reg3 ({{24{1'b0}},o_rst,i_error,o_fwd})\n"
                 "endmodule\n", encoding="utf-8")
@@ -444,8 +445,23 @@ class ComponentFolderTests(unittest.TestCase):
         self.assertEqual(gen.extract_concat_fields("{16'd0,adc_dat_o}", widths),
                          [{"name": "adc_dat_o", "low": 0, "width": 16}])
         self.assertEqual(gen.extract_concat_fields("{16'd0,pw}", widths), [])   # unknown width: no layout
-        self.assertEqual(gen.extract_concat_fields("{31'd0,undeclared}", widths),
-                         [{"name": "undeclared", "low": 0, "width": 1}])        # implicit 1-bit net
+        self.assertEqual(gen.extract_concat_fields("{31'd0,undeclared}", widths), [])   # unknown width: no layout
+        self.assertEqual(gen.extract_concat_fields("{31'd0,undeclared}"),
+                         [{"name": "undeclared", "low": 0, "width": 1}])        # names-only use (no widths map)
+
+    def test_declarations_span_lines_and_multi_dim_packed(self):
+        widths = gen.harvest_signal_widths(
+            "module t(input [8:0] a_addr,\n  b_addr, input c);\n"
+            "wire [15:0] a,\n     b;\n"
+            "logic [3:0][7:0] x; reg [W:0][7:0] y;\n"
+            "reg [7:0] mem [0:3];\nwire z = (a == b);\nendmodule\n")
+        self.assertEqual((widths["a_addr"], widths["b_addr"], widths["c"]), (9, 9, 1))
+        self.assertEqual((widths["a"], widths["b"], widths["x"], widths["mem"], widths["z"]), (16, 16, 32, 8, 1))
+        self.assertIsNone(widths["y"])
+        # b used to lose its width (1 bit by default) and shift the whole layout.
+        self.assertEqual(gen.extract_concat_fields("{b, a}", widths), [
+            {"name": "b", "low": 16, "width": 16}, {"name": "a", "low": 0, "width": 16}])
+        self.assertEqual(gen.extract_concat_fields("x", widths), [{"name": "x", "low": 0, "width": 32}])
 
 
 class ParserEdgeTests(unittest.TestCase):
@@ -472,6 +488,190 @@ class ParserEdgeTests(unittest.TestCase):
         self.assertEqual(entries["P3"]["width"], 1)
         self.assertEqual(entries["P4"]["width"], 32)        # union of [15:0] and [31:16]
         self.assertTrue(entries["P4"]["writable"])
+
+
+def write_component(root: Path, decode: str, top: str, defines: str = DEFINE_TEXT) -> Path:
+    (root / "include_files").mkdir(parents=True, exist_ok=True)
+    (root / "include_files/reg_addr_pl.vh").write_text(defines, encoding="utf-8")
+    component = root / "emcc_ctrl" / "pl_exe_io" / "ec_uut"
+    component.mkdir(parents=True, exist_ok=True)
+    (component / "ps_rw_pl_reg_uut.sv").write_text(decode, encoding="utf-8")
+    (component / "ec_uut.sv").write_text(top, encoding="utf-8")
+    return component
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Parser defects found in review; probe inputs kept as fixtures."""
+
+    def test_define_table_ignores_comments_and_warns_on_conflicts(self):
+        warnings = []
+        table = gen.parse_define_table(
+            "`define REG_X 12'h100\n"
+            "/* `define REG_X 12'h200 */\n"
+            "// `define REG_Y 12'h300\n"
+            "`define REG_D 12'd16\n"
+            "`define REG_P 436 // plain\n"
+            "`define REG_E 12 + 4\n"
+            "`ifdef ALT\n`define REG_Z 9'h010\n`else\n`define REG_Z 9'h020\n`endif\n"
+            "`define REG_S 9'h0F0\n`define REG_S 9'h0F0\n", warnings)
+        self.assertEqual(table, {"REG_X": 0x100, "REG_D": 16, "REG_P": 436, "REG_Z": 0x020, "REG_S": 0x0F0})
+        self.assertEqual(len(warnings), 1)                 # same value twice is not a conflict
+        self.assertIn("REG_Z", warnings[0])
+
+    def test_build_reports_define_conflicts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_component(Path(directory), DECODE_TEXT, HARVEST_TOP, DEFINE_TEXT + "`define EC_ID 9'h010\n")
+            catalog, report = gen.build(Path(directory), [], stamp="fixed")
+        self.assertTrue(any("EC_ID" in item for item in report["top_warnings"]))
+        registers = {item["name"]: item for item in catalog["types"]["ec_uut"]["registers"]}
+        self.assertEqual(registers["EC_ID"]["offset"], "0x010")
+
+    def test_commented_bha_num_is_not_a_behavior_table(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ec_uut.sv"
+            path.write_text("module ec_uut();\n"
+                            "// localparam A_BHA_NUM = 200; // 1home 2jog\n"
+                            "/*\nlocalparam B_BHA_NUM = 105; // 5stale\n*/\n"
+                            "localparam C_BHA_NUM = 150; // 7run\n"
+                            "endmodule\n", encoding="utf-8")
+            behaviors = gen.harvest_type_notes(path)["behaviors"]
+        self.assertEqual(behaviors, {"C": [{"name": "run", "value": 7}]})
+
+    def test_write_detection_if_form_and_padded_concat(self):
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "always @(posedge clk_i) begin\n"
+            "  if (wr_task_vld && wr_task_addr == `P1) p1 <= i_st_wr_data[7:0];\n"
+            "  if (wr_task_addr == `P2) begin\n    p2 <= i_st_wr_data;\n  end\n"
+            "  if (wr_task_addr == `P3) cnt <= cnt + 1;\n"
+            "  p4 <= (wr_task_vld && wr_task_addr == `P4) ? {16'd0, i_st_wr_data[15:0]} : p4;\n"
+            "end\n"
+            "always @(*) case (rd_addr_d2) `P1: o = p1; `P2: o = p2; `P3: o = cnt; `P4: o = p4; endcase\n")}
+        self.assertEqual((entries["P1"]["writable"], entries["P1"]["width"]), (True, 8))
+        self.assertEqual((entries["P2"]["writable"], entries["P2"]["width"]), (True, 32))
+        self.assertFalse(entries["P3"]["writable"])        # not a register write
+        self.assertEqual((entries["P4"]["writable"], entries["P4"]["width"]), (True, 16))
+
+    def test_read_width_subtracts_padding_on_both_ends(self):
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "case (rd_addr_d2)\n"
+            "  `A: o_st_rd_data <= {8'd0, a[7:0], 16'd0};\n"
+            "  `B: o_st_rd_data <= {b, 8'h0};\n"
+            "  `C: o_st_rd_data <= {{24{1'b0}}, c};\n"
+            "  `D: o_st_rd_data <= {d_hi, d_lo};\n"
+            "endcase\n")}
+        self.assertEqual([entries[name]["width"] for name in "ABCD"], [8, 24, 8, 32])
+
+    def test_param_hookups_nested_multiline_and_trailing_comma_notes(self):
+        top = ("module ec_uut();\n"
+               "    ps_rw_pl_reg_uut u_reg(\n"
+               "        .param5 (param5),  // 加速度\n"
+               "        .param7 ((a_sig&b_sig)),  // 两路与\n"
+               "        .param8 ({7'd0,\n                 x_sig}),\n"
+               "        .param16 (param16)\n"
+               "    );\n"
+               "    wire x_sig;\n"
+               "endmodule\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ec_uut.sv"
+            path.write_text(top, encoding="utf-8")
+            result = gen.harvest_type_notes(path)
+        self.assertEqual(result["notes"], {"PARAM5": "加速度", "PARAM7": "两路与"})
+        self.assertEqual(result["signals"]["PARAM7"], "a_sig/b_sig")
+        self.assertEqual(result["signals"]["PARAM8"], "x_sig")
+        decode = DECODE_TEXT.replace("reg [7:0] param66;", "reg [7:0] param66; reg param5; reg param7; reg param8;")
+        defines = DEFINE_TEXT + "`define PARAM5 9'h0E8\n`define PARAM7 9'h0F0\n`define PARAM8 9'h0F4\n"
+        decode = decode.replace("            default:", "            `PARAM5 : o_st_rd_data <= param5;\n"
+                                "            `PARAM7 : o_st_rd_data <= param7;\n"
+                                "            `PARAM8 : o_st_rd_data <= {31'd0, param8};\n            default:")
+        with tempfile.TemporaryDirectory() as directory:
+            component = write_component(Path(directory), decode, top, defines)
+            entry, _ = gen.parse_component_folder(component)
+        registers = {item["name"]: item for item in entry["registers"]}
+        for name in ("PARAM5", "PARAM7", "PARAM8"):
+            self.assertNotIn("unwired", registers[name], name)
+        self.assertEqual(registers["PARAM8"]["fields"], [{"name": "x_sig", "low": 0, "width": 1}])
+
+    def test_signed_wire_and_unranged_signed_port(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "ec_uut.sv").write_text(
+                "module ec_uut(input signed i_one, input wire signed [31:0] i_a, i_b,\n"
+                "  output reg signed [15:0] o_c, input [7:0] plain);\n"
+                "wire signed [31:0] w_pos; reg signed r_bit; logic signed [7:0] l_v;\n"
+                "// wire signed [31:0] w_commented;\nendmodule\n", encoding="utf-8")
+            from devmem_studio.component_parse import harvest_signed_signals
+            names = harvest_signed_signals(folder)
+        self.assertEqual(names, {"i_one", "i_a", "i_b", "o_c", "w_pos", "r_bit", "l_v"})
+
+    def test_multiple_decode_files_warn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            component = write_component(Path(directory), DECODE_TEXT, HARVEST_TOP)
+            (component / "ps_rw_pl_reg_uut_old.sv").write_text(DECODE_TEXT, encoding="utf-8")
+            _, info = gen.parse_component_folder(component)
+        self.assertTrue(any("ps_rw_pl_reg_uut_old.sv" in item and "ps_rw_pl_reg_uut.sv" in item
+                            for item in info["warnings"]))
+
+    def test_ambiguous_prefix_picks_closest_stem(self):
+        files = {"siemens": Path("a.sv"), "siemens_cnc_v2_extra": Path("b.sv"), "siemens_cnc_v2": Path("c.sv")}
+        matched, ambiguous = gen.match_decode_files(["ec_siemens_cnc"], files)
+        self.assertEqual(matched["ec_siemens_cnc"], files["siemens_cnc_v2"])
+        self.assertEqual(len(ambiguous), 1)
+
+    def test_read_side_effect_flagged_outside_read_mux(self):
+        decode = DECODE_TEXT.replace(
+            "    always @(*) begin",
+            "    always @(posedge clk_i) fifo_rd <= rd_en_d2 && rd_addr_d2 == `PARAM67;\n"
+            "    always @(posedge clk_i) if (rd_en_d1 && `PARAM16 == rd_addr_d1[8:0]) cnt <= 0;\n"
+            "    always @(*) begin", 1)
+        entries = {item["name"]: item for item in gen.parse_decode_file(decode)}
+        self.assertTrue(entries["PARAM67"]["read_side_effect"])
+        self.assertTrue(entries["PARAM16"]["read_side_effect"])
+        self.assertNotIn("read_side_effect", entries["EC_ID"])          # plain mux arm
+        self.assertFalse(any("read_side_effect" in item for item in gen.parse_decode_file(DECODE_TEXT)))
+        with tempfile.TemporaryDirectory() as directory:
+            component = write_component(Path(directory), decode, HARVEST_TOP)
+            entry, _ = gen.parse_component_folder(component)
+        flagged = sorted(item["name"] for item in entry["registers"] if item.get("read_side_effect"))
+        self.assertEqual(flagged, ["PARAM16", "PARAM67"])
+
+    def test_shipped_catalog_has_no_read_side_effects(self):
+        path = ROOT / "devmem_studio/data/component_catalog.json"
+        if not path.exists():
+            self.skipTest("catalog not generated yet")
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+        self.assertFalse([entry for entry in catalog["types"].values()
+                          for item in entry["registers"] if item.get("read_side_effect")])
+
+    def test_top_lookup_and_top_parse_run_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            component = write_component(Path(directory), DECODE_TEXT, HARVEST_TOP)
+            from devmem_studio import component_parse
+            with patch.object(component_parse, "find_top_file", wraps=component_parse.find_top_file) as lookup:
+                gen.parse_component_folder(component)
+            self.assertEqual(lookup.call_count, 1)
+            root = Path(directory)
+            (root / "top").mkdir()
+            top = root / "top" / "emcc_mix_top.sv"
+            top.write_text("ec_uut #( .REG_SPACE_BIAS(20'h800) ) ec_uut_1 ( );\n", encoding="utf-8")
+            with patch.object(gen, "parse_top", wraps=gen.parse_top) as parse:
+                _, report = gen.build(root, [top], stamp="fixed")
+            self.assertEqual(parse.call_count, 1)
+            self.assertEqual(report["unmatched_top_types"], [])
+
+    def test_refresh_uses_recorded_import_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_component(root, DECODE_TEXT, HARVEST_TOP)
+            out = root / "catalog.json"
+            catalog, _ = gen.build(root, [], stamp="2026-01-01T00:00:00+08:00")
+            out.write_text(json.dumps(catalog), encoding="utf-8")
+            overrides = root / "user" / "component_overrides"
+            overrides.mkdir(parents=True)
+            restored = overrides / "ec_uut.json"   # restored backup: file mtime is new, import was old
+            restored.write_text(json.dumps({"imported_at": "2025-12-31T00:00:00+08:00"}), encoding="utf-8")
+            with patch.object(gen, "user_data_dir", return_value=root / "user"):
+                self.assertEqual(gen.refresh(out, None, "2099-01-01T00:00:00"), 0)
+            self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["generated_at"], "2026-01-01T00:00:00+08:00")
 
 
 if __name__ == "__main__":

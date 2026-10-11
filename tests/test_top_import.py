@@ -384,6 +384,32 @@ ec_b_2
         self.assertEqual(comp["bias"], 56320)
         self.assertEqual(info["warnings"], [])
 
+    def test_code_after_block_comment_close_stays_live(self):
+        text = "ec_a\n#( /* note\n old */ .REG_SPACE_BIAS(20'h800) )\nec_a_1 ( );\n"
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["module_type"], c["instance"], c["bias"]) for c in info["components"]],
+                         [("ec_a", "ec_a_1", 0x800)])
+        headed = ("// --- flow_comp_1 --A0001_x---\nec_a\n#(\n /* old bias\n 20'hA00 */ .REG_SPACE_BIAS(20'h800)\n)\n"
+                  "ec_a_1\n(\n);\n// --- flow_comp_2 --blk---\n/*\nec_y\n#( .REG_SPACE_BIAS (20'hA00) )\nec_y_2 ( ); */\n")
+        info = top_import.parse_top(headed)
+        self.assertEqual([(c["instance"], c["bias"], c["disabled"]) for c in info["components"]],
+                         [("ec_a_1", 0x800, False), ("ec_y_2", 0xA00, True)])
+        self.assertEqual(info["warnings"], [])
+
+    def test_one_line_instance_beside_commented_template_has_no_ghost(self):
+        text = ("// --- flow_comp_5 --A0005_x---\n"
+                "//    ec_old_ref\n//    #(\n//         .REG_SPACE_BIAS     (20'd54272)\n//    )\n"
+                "//    ec_old_ref_5\n//    (\n//    );\n"
+                "ec_x #( .REG_SPACE_BIAS (20'h1000) ) ec_x_5 (\n    .clk_i ( clk )\n);\n"
+                "// --- flow_comp_6 --A0006_y---\n"
+                "ec_y #( .REG_SPACE_BIAS (20'h1200) ) ec_y_6 ( );\n")
+        info = top_import.parse_top(text)
+        found = [(c["seq"], c["label"], c["code"], c["module_type"], c["instance"], c["bias"], c["disabled"])
+                 for c in info["components"]]
+        self.assertEqual(found, [(5, "A0005_x", "A0005", "ec_x", "ec_x_5", 0x1000, False),
+                                 (6, "A0006_y", "A0006", "ec_y", "ec_y_6", 0x1200, False)])
+        self.assertEqual(info["warnings"], [])
+
 
 class ComponentsParamTests(unittest.TestCase):
     def test_locates_param_file_and_base_address(self):
@@ -481,6 +507,33 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("EC_ID", names["ec_old"])
         self.assertNotIn("IMPORTED", names["ec_old"])
         self.assertIn("IMPORTED", names["ec_new"])
+
+    def test_override_recorded_import_time_beats_file_mtime(self):
+        """A backup-restored override keeps its import time; mtime no longer decides."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundled = root / "catalog.json"
+            bundled.write_text(json.dumps({"generated_at": "2026-10-10T12:00:00+08:00", "types": {
+                name: {"registers": [{"offset": "0x00C", "name": "EC_ID", "width": 32}]}
+                for name in ("ec_restored", "ec_stale")}}), encoding="utf-8")
+            overrides = root / "component_overrides"
+            overrides.mkdir()
+            for name, imported, mtime in (("ec_restored", "2026-10-10T13:00:00+08:00", "2026-01-01T00:00:00"),
+                                          ("ec_stale", "2026-10-10T11:00:00+08:00", "2099-01-01T00:00:00")):
+                item = overrides / f"{name}.json"
+                item.write_text(json.dumps({"imported_at": imported, "registers": [
+                    {"offset": "0x010", "name": "IMPORTED", "width": 32}]}), encoding="utf-8")
+                moment = top_import._catalog_timestamp(mtime)
+                os.utime(item, (moment, moment))
+            with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
+                    patch("devmem_studio.top_import.resource_path", return_value=bundled), \
+                    patch("devmem_studio.top_import.user_data_dir", return_value=root):
+                catalog = top_import.load_type_catalog()
+        names = {key: [reg["name"] for reg in top_import.registers_for(catalog, key)[0]]
+                 for key in ("ec_restored", "ec_stale")}
+        self.assertIn("IMPORTED", names["ec_restored"])
+        self.assertNotIn("IMPORTED", names["ec_stale"])
 
     def test_registers_for_skips_malformed_override_offsets(self):
         """User-edited override JSON with a broken offset must not crash the table rebuild."""

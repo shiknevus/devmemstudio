@@ -139,14 +139,21 @@ def _bias_value(found) -> int:
 
 def _block_comments_as_line_comments(text: str) -> str:
     """Rewrite /* ... */ as // lines (same line count), so the comment-depth
-    logic treats a block-commented instance as disabled, not active."""
+    logic treats a block-commented instance as disabled, not active.
+
+    Code after the closing */ stays live: that last comment piece is blanked
+    with spaces instead of turning the whole line into a comment."""
     def convert(match):
         comment = match.group(0)
         if comment.startswith("//"):
             return comment
         if "\n" not in comment:
             return " " * len(comment)   # inline /* note */: code around it stays live
-        return "\n".join("//" + line for line in comment[2:-2].split("\n"))
+        lines = comment[2:-2].split("\n")
+        line_end = text.find("\n", match.end())
+        tail = text[match.end():line_end if line_end != -1 else len(text)].strip()
+        last = ("//" + lines[-1]) if not tail or tail.startswith("//") else " " * (len(lines[-1]) + 2)
+        return "\n".join(["//" + line for line in lines[:-1]] + [last])
     return re.sub(r"//[^\n]*|/\*.*?\*/", convert, text, flags=re.S)
 
 
@@ -213,12 +220,19 @@ def parse_top(text: str) -> dict:
                 source = by_depth[depth]
                 disabled = depth > 0
                 break
+        active_line_scan = source is not None and not disabled
         if source is None:
             source = nonempty  # block without any ec_* declaration: report as-is
             disabled = 0 not in by_depth   # nothing but comments: not an active component
         module_type = instance = None
         bias = None
         invalid_bias = False
+        if not active_line_scan and 0 in by_depth:
+            # A one-line active instance (ec_x #(...) ec_x_1 () beats a commented template.
+            active = _parse_unheaded(block, finalize=False)["components"]
+            if active:
+                module_type, instance, bias = (active[0][key] for key in ("module_type", "instance", "bias"))
+                disabled, source = False, []
         # Remove only the selected comment layer, then trailing notes. Disabled
         # components stay discoverable, but stale literals in notes do not count.
         source = [re.sub(r"^\s*(?://\s*)*", "", line).split("//", 1)[0] for line in source]
@@ -405,9 +419,9 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
         if overrides.is_dir():
             for item in sorted(overrides.glob("*.json")):
                 try:
-                    if bundled_at is not None and item.stat().st_mtime < bundled_at:
-                        continue   # imported before this build's catalog: bundled table is newer
                     entry = json.loads(item.read_text(encoding="utf-8"))
+                    if bundled_at is not None and override_imported_at(item, entry) < bundled_at:
+                        continue   # imported before this build's catalog: bundled table is newer
                 except (OSError, ValueError):
                     continue
                 normalized = _normalize_catalog_entry(entry)
@@ -417,11 +431,17 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
 
 
 def _catalog_timestamp(value) -> float | None:
-    """generated_at (local ISO time) as epoch seconds; None when absent or malformed."""
+    """ISO time (with offset, or naive = local) as epoch seconds; None when absent or malformed."""
     try:
         return datetime.fromisoformat(str(value)).timestamp()
     except (TypeError, ValueError, OverflowError, OSError):
         return None
+
+
+def override_imported_at(item: Path, entry=None) -> float:
+    """Import time of an override file: its recorded imported_at, else (older files) the mtime."""
+    recorded = _catalog_timestamp(entry.get("imported_at")) if isinstance(entry, dict) else None
+    return recorded if recorded is not None else Path(item).stat().st_mtime
 
 
 def _parse_offset(item) -> int | None:

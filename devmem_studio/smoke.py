@@ -53,6 +53,8 @@ def run_smoke(app, directory: Path):
     os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"   # acceptance runs against bundled data only
     directory = directory.resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    crash = directory / "crash.log"   # written by the entry point's excepthook
+    crash.unlink(missing_ok=True)
     checks = []
     window = None
     report = {"frozen": bool(getattr(sys, "frozen", False)), "executable": sys.executable,
@@ -551,5 +553,8 @@ def run_smoke(app, directory: Path):
                 window.close()
             except Exception:
                 pass
+    if report["passed"] and crash.exists():   # a slot exception never reaches the try above
+        report["passed"] = False
+        report["error"] = crash.read_text(encoding="utf-8")
     (directory / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return 0 if report["passed"] else 1
