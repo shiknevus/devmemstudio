@@ -507,7 +507,9 @@ class CatalogTests(unittest.TestCase):
         self.assertIsNotNone(catalog)
         self.assertEqual(catalog["schema"], 8)
         self.assertIn("位快照（低位→高位）：\no_fwd\n", catalog["types"]["ec_dv300_do"]["debug_notes"]["DEBUG_REG3"])
-        self.assertIn("irq_negedge_cnt", catalog["types"]["ec_2di_2do"]["debug_notes"]["DEBUG_REG2"])
+        self.assertNotIn("irq_negedge_cnt", catalog["types"]["ec_2di_2do"]["debug_notes"]["DEBUG_REG2"])   # RTL 已断开 debug_reg2
+        for key in ("ec_sg_rfid", "ec_sp_rfid", "ec_osm41_485_laser_distance", "ec_sygole_485_modbus_rtu"):
+            self.assertIn(key, catalog["types"])   # 新增 + 保留的旧类型
         spindle = {item["name"]: item for item in catalog["types"]["ec_slv_pul_axis"]["registers"]}
         self.assertEqual(spindle["EC_ID"]["width"], 14)
         self.assertFalse(spindle["EC_ID"]["readonly"])

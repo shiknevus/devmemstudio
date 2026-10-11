@@ -922,6 +922,31 @@ class TopImportUiTests(UiTestBase):
         self.assertTrue((saved / 'ec_1do.json').is_file())
         self.assertFalse((saved / 'ec_1di.json').exists())
 
+    def test_component_update_writes_module_name_and_catalog_aliases(self):
+        root = Path(self.temp.name) / 'alias-parent'
+        include = root / 'include_files'
+        include.mkdir(parents=True)
+        (include / 'reg_addr_pl.vh').write_text("`define EC_ID 9'h00C\n", encoding='utf-8')
+        folder = root / 'ec_9x9y'
+        folder.mkdir()
+        (folder / 'ps_rw_pl_reg_9x9y.sv').write_text(
+            "module d(input [8:0] rd_addr_d2, output reg [31:0] o_st_rd_data);\n"
+            "always @(*) case (rd_addr_d2) `EC_ID: o_st_rd_data = 32'd1;"
+            " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding='utf-8')
+        (folder / 'ec_9x_9y.sv').write_text('module ec_9x_9y(); endmodule\n', encoding='utf-8')
+        self.window.type_catalog['types']['ec_9x9y'] = {
+            'decode_file': 'emcc_ctrl/pl_exe_io/ec_9x9y/ps_rw_pl_reg_9x9y.sv', 'registers': []}
+        self.assertEqual(self.window._type_keys(folder), ['ec_9x_9y', 'ec_9x9y'])
+        with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(folder)), \
+                patch.object(FileChoiceDialog, 'exec', return_value=QDialog.Accepted), \
+                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
+                patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
+            self.window.import_component()
+        saved = Path(self.temp.name) / 'component_overrides'
+        self.assertTrue((saved / 'ec_9x_9y.json').is_file())   # the name a top instantiates
+        self.assertTrue((saved / 'ec_9x9y.json').is_file())
+        self.assertIn('EC_ID', [item['name'] for item in self.window.type_catalog['types']['ec_9x_9y']['registers']])
+
     def test_import_pickers_remember_separate_folders_across_restart_and_cancel(self):
         self.window.disconnect()
         self.settle(lambda: not self.window._busy)

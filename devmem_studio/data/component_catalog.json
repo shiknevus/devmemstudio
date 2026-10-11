@@ -1,6 +1,6 @@
 {
   "schema": 8,
-  "generated_at": "2026-10-10T23:08:28",
+  "generated_at": "2026-10-11T11:34:23",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -458,24 +458,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1avi": {
@@ -740,24 +728,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1avi_1avo": {
@@ -1022,24 +998,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1avo": {
@@ -1297,24 +1261,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1di": {
@@ -1572,24 +1524,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1di1do": {
@@ -1854,24 +1794,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1di2do": {
@@ -2143,24 +2071,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1di_1do": {
@@ -2425,24 +2341,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1di_2do": {
@@ -2714,24 +2618,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_1do": {
@@ -2989,24 +2881,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di": {
@@ -3278,24 +3158,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di1do": {
@@ -3567,24 +3435,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di2do": {
@@ -3863,24 +3719,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di_1do": {
@@ -4152,24 +3996,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di_2do": {
@@ -4448,24 +4280,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2di_3do": {
@@ -4751,24 +4571,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_2do": {
@@ -5033,24 +4841,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di1do": {
@@ -5329,24 +5125,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di2do": {
@@ -5632,24 +5416,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di2do_3pos": {
@@ -5935,24 +5707,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di_1do": {
@@ -6231,24 +5991,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di_2do": {
@@ -6534,24 +6282,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3di_2do_3pos": {
@@ -6837,24 +6573,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 1,
-              "width": 1
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 1
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_3led_buzzer": {
@@ -7447,24 +7171,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_4di_2do": {
@@ -7764,24 +7476,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_5di": {
@@ -8074,24 +7774,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_8do": {
@@ -8433,24 +8121,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_can_servo": {
@@ -12293,24 +11969,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_lanj_washer": {
@@ -13157,6 +12821,283 @@
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
         "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
         "DEBUG_REG3": "C 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
+      }
+    },
+    "ec_osm41_485_laser_distance": {
+      "family": "pl_exe_bus",
+      "decode_file": "emcc_ctrl/pl_exe_bus/ec_osm41_485_laser_distance/ps_rw_pl_reg_osm41_485_laser_distance.sv",
+      "registers": [
+        {
+          "offset": "0x000",
+          "name": "IRQ_REG1",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x004",
+          "name": "IRQ_REG2",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x008",
+          "name": "RST_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x00C",
+          "name": "EC_ID",
+          "width": 14,
+          "readonly": false
+        },
+        {
+          "offset": "0x010",
+          "name": "SC_ID",
+          "width": 10,
+          "readonly": false
+        },
+        {
+          "offset": "0x014",
+          "name": "BHV_PRIORITY",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x018",
+          "name": "UNIT_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x01C",
+          "name": "UNIT_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x020",
+          "name": "UNIT_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x024",
+          "name": "M_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x028",
+          "name": "M_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x02C",
+          "name": "M_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x030",
+          "name": "M_WK_MOD",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x038",
+          "name": "M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x03C",
+          "name": "LINK_M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x054",
+          "name": "A_TASK_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x058",
+          "name": "A_TASK_BHV_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x05C",
+          "name": "A_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x060",
+          "name": "EC_CHA_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x064",
+          "name": "A_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x068",
+          "name": "A_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x06C",
+          "name": "A_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x070",
+          "name": "A_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x074",
+          "name": "A_BHV_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x084",
+          "name": "B_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x088",
+          "name": "EC_CHB_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x08C",
+          "name": "B_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x090",
+          "name": "B_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x094",
+          "name": "B_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x098",
+          "name": "B_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x09C",
+          "name": "B_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0AC",
+          "name": "C_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B0",
+          "name": "EC_CHC_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x0B4",
+          "name": "C_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B8",
+          "name": "C_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x0BC",
+          "name": "C_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C0",
+          "name": "C_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C4",
+          "name": "C_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C8",
+          "name": "C_GAP_CRL",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0EC",
+          "name": "PARAM6",
+          "width": 20,
+          "readonly": false,
+          "signal": "distance_min"
+        },
+        {
+          "offset": "0x0F0",
+          "name": "PARAM7",
+          "width": 20,
+          "readonly": false,
+          "signal": "distance_max"
+        },
+        {
+          "offset": "0x114",
+          "name": "PARAM16",
+          "width": 8,
+          "readonly": false,
+          "write_only": true,
+          "signal": "i_485_addr"
+        },
+        {
+          "offset": "0x178",
+          "name": "PARAM51",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x1EC",
+          "name": "DEBUG_REG1",
+          "width": 32,
+          "readonly": true
+        }
+      ],
+      "debug_notes": {
+        "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_pul_axis": {
@@ -14095,24 +14036,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_s7_plc": {
@@ -14700,6 +14629,306 @@
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
         "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
+      }
+    },
+    "ec_sg_rfid": {
+      "family": "pl_exe_bus",
+      "decode_file": "emcc_ctrl/pl_exe_bus/ec_sg_rfid/ps_rw_pl_reg_sg_rfid.sv",
+      "registers": [
+        {
+          "offset": "0x000",
+          "name": "IRQ_REG1",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x004",
+          "name": "IRQ_REG2",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x008",
+          "name": "RST_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x00C",
+          "name": "EC_ID",
+          "width": 14,
+          "readonly": false
+        },
+        {
+          "offset": "0x010",
+          "name": "SC_ID",
+          "width": 10,
+          "readonly": false
+        },
+        {
+          "offset": "0x014",
+          "name": "BHV_PRIORITY",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x018",
+          "name": "UNIT_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x01C",
+          "name": "UNIT_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x020",
+          "name": "UNIT_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x024",
+          "name": "M_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x028",
+          "name": "M_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x02C",
+          "name": "M_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x030",
+          "name": "M_WK_MOD",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x038",
+          "name": "M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x03C",
+          "name": "LINK_M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x054",
+          "name": "A_TASK_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x058",
+          "name": "A_TASK_BHV_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x05C",
+          "name": "A_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x060",
+          "name": "EC_CHA_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x064",
+          "name": "A_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x068",
+          "name": "A_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x06C",
+          "name": "A_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x070",
+          "name": "A_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x074",
+          "name": "A_BHV_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x084",
+          "name": "B_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x088",
+          "name": "EC_CHB_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x08C",
+          "name": "B_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x090",
+          "name": "B_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x094",
+          "name": "B_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x098",
+          "name": "B_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x09C",
+          "name": "B_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0AC",
+          "name": "C_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B0",
+          "name": "EC_CHC_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x0B4",
+          "name": "C_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B8",
+          "name": "C_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x0BC",
+          "name": "C_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C0",
+          "name": "C_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C4",
+          "name": "C_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C8",
+          "name": "C_GAP_CRL",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0D8",
+          "name": "PARAM1",
+          "width": 32,
+          "readonly": false,
+          "signal": "i_rfid_wdata"
+        },
+        {
+          "offset": "0x0DC",
+          "name": "PARAM2",
+          "width": 32,
+          "readonly": false,
+          "signal": "i_comp_da"
+        },
+        {
+          "offset": "0x114",
+          "name": "PARAM16",
+          "width": 8,
+          "readonly": false,
+          "signal": "i_slave_addr"
+        },
+        {
+          "offset": "0x13C",
+          "name": "PARAM26",
+          "width": 1,
+          "readonly": false,
+          "signal": "i_slaver_en"
+        },
+        {
+          "offset": "0x178",
+          "name": "PARAM51",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x17C",
+          "name": "PARAM52",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x180",
+          "name": "PARAM53",
+          "width": 32,
+          "readonly": true,
+          "signal": "o_rfid_rdata"
+        },
+        {
+          "offset": "0x1EC",
+          "name": "DEBUG_REG1",
+          "width": 32,
+          "readonly": true
+        }
+      ],
+      "notes": {
+        "PARAM1": "rfid wr da",
+        "PARAM2": "rfid compare da"
+      },
+      "debug_notes": {
+        "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_siemens_cnc": {
@@ -15786,6 +16015,306 @@
         "DEBUG_REG3": "C 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
+    "ec_sp_rfid": {
+      "family": "pl_exe_bus",
+      "decode_file": "emcc_ctrl/pl_exe_bus/ec_sp_rfid/ps_rw_pl_reg_sp_rfid.sv",
+      "registers": [
+        {
+          "offset": "0x000",
+          "name": "IRQ_REG1",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x004",
+          "name": "IRQ_REG2",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x008",
+          "name": "RST_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x00C",
+          "name": "EC_ID",
+          "width": 14,
+          "readonly": false
+        },
+        {
+          "offset": "0x010",
+          "name": "SC_ID",
+          "width": 10,
+          "readonly": false
+        },
+        {
+          "offset": "0x014",
+          "name": "BHV_PRIORITY",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x018",
+          "name": "UNIT_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x01C",
+          "name": "UNIT_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x020",
+          "name": "UNIT_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x024",
+          "name": "M_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x028",
+          "name": "M_ECTRL",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x02C",
+          "name": "M_ST",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x030",
+          "name": "M_WK_MOD",
+          "width": 4,
+          "readonly": false
+        },
+        {
+          "offset": "0x038",
+          "name": "M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x03C",
+          "name": "LINK_M_SAF_ST",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x054",
+          "name": "A_TASK_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x058",
+          "name": "A_TASK_BHV_ID",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x05C",
+          "name": "A_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x060",
+          "name": "EC_CHA_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x064",
+          "name": "A_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x068",
+          "name": "A_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x06C",
+          "name": "A_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x070",
+          "name": "A_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x074",
+          "name": "A_BHV_ID",
+          "width": 8,
+          "readonly": false
+        },
+        {
+          "offset": "0x084",
+          "name": "B_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x088",
+          "name": "EC_CHB_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x08C",
+          "name": "B_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x090",
+          "name": "B_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x094",
+          "name": "B_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x098",
+          "name": "B_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x09C",
+          "name": "B_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0AC",
+          "name": "C_EN",
+          "width": 1,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B0",
+          "name": "EC_CHC_ST",
+          "width": 1,
+          "readonly": true
+        },
+        {
+          "offset": "0x0B4",
+          "name": "C_TX_OT",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0B8",
+          "name": "C_TX_RSULT_RPT",
+          "width": 32,
+          "readonly": false
+        },
+        {
+          "offset": "0x0BC",
+          "name": "C_ALM_NUM",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C0",
+          "name": "C_TX_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C4",
+          "name": "C_BHV_ID",
+          "width": 8,
+          "readonly": true
+        },
+        {
+          "offset": "0x0C8",
+          "name": "C_GAP_CRL",
+          "width": 20,
+          "readonly": false
+        },
+        {
+          "offset": "0x0D8",
+          "name": "PARAM1",
+          "width": 32,
+          "readonly": false,
+          "signal": "i_rfid_wdata"
+        },
+        {
+          "offset": "0x0DC",
+          "name": "PARAM2",
+          "width": 32,
+          "readonly": false,
+          "signal": "i_comp_da"
+        },
+        {
+          "offset": "0x114",
+          "name": "PARAM16",
+          "width": 8,
+          "readonly": false,
+          "signal": "i_slave_addr"
+        },
+        {
+          "offset": "0x13C",
+          "name": "PARAM26",
+          "width": 1,
+          "readonly": false,
+          "signal": "i_slaver_en"
+        },
+        {
+          "offset": "0x178",
+          "name": "PARAM51",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x17C",
+          "name": "PARAM52",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x180",
+          "name": "PARAM53",
+          "width": 32,
+          "readonly": true,
+          "signal": "o_rfid_rdata"
+        },
+        {
+          "offset": "0x1EC",
+          "name": "DEBUG_REG1",
+          "width": 32,
+          "readonly": true
+        }
+      ],
+      "notes": {
+        "PARAM1": "rfid wr da",
+        "PARAM2": "rfid compare da"
+      },
+      "debug_notes": {
+        "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
+      }
+    },
     "ec_stacker_cage_check": {
       "family": "pl_exe_io",
       "decode_file": "emcc_ctrl/pl_exe_io/ec_stacker_cage_check/ps_rw_pl_reg_stacker_cage_check.sv",
@@ -16041,24 +16570,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_superisys_485_modbus_rtu": {
@@ -16784,24 +17301,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_trayclaw": {
@@ -17115,24 +17620,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     },
     "ec_wxjc": {
@@ -17390,24 +17883,12 @@
           "offset": "0x1F0",
           "name": "DEBUG_REG2",
           "width": 32,
-          "readonly": true,
-          "fields": [
-            {
-              "name": "irq_posedge_cnt",
-              "low": 8,
-              "width": 8
-            },
-            {
-              "name": "irq_negedge_cnt",
-              "low": 0,
-              "width": 8
-            }
-          ]
+          "readonly": true
         }
       ],
       "debug_notes": {
         "DEBUG_REG1": "A 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束",
-        "DEBUG_REG2": "位快照（低位→高位）：\nirq_negedge_cnt\nirq_posedge_cnt\n其余 16 位为常数"
+        "DEBUG_REG2": "B 通道行为状态机历史：每字节一个状态（前第3拍/前第2拍/前第1拍/当前）。状态：0空闲 1预检 2发IRQ10 3等10应答 4发20 5执行中 7后检 8发30 9等30应答 10发40 11等40应答 12/13结束"
       }
     }
   }

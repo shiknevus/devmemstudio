@@ -343,7 +343,7 @@ class MainWindow(QMainWindow):
         self.import_button = button("导入 top", lambda: self.import_top_folder(), "demo", "import")
         self.import_button.setToolTip("选择文件夹，自动查找其中（含子目录）的 emcc mix top，先列出再选择（只有一个也列出），"
                                       "按 REG_SPACE_BIAS 加载组件目录。连接设备后禁用，请先断开再导入。")
-        self.import_component_button = button("导入组件", self.import_component, "demo", "refresh")
+        self.import_component_button = button("更新控件", self.import_component, "demo", "refresh")
         self.import_component_button.setToolTip("RTL 组件修改后重新解析寄存器定义（免重新打包）：选组件文件夹或上级目录，"
                                                 "先列出组件（只有一个也列出），默认全选，也可只选择部分组件导入。")
         layout.addLayout(row(label("组件目录", "sideCaption"), 1, self.import_component_button, self.import_button))
@@ -945,10 +945,10 @@ class MainWindow(QMainWindow):
         else:
             targets = component_parse.find_component_folders(folder)
             if not targets:
-                QMessageBox.warning(self, "导入组件失败",
+                QMessageBox.warning(self, "更新控件失败",
                                     "所选目录及其子目录中未找到组件（需含 ps_rw_pl_reg_*.sv/.v）。")
                 return
-        rows = [(target, [self._canonical_type_key(target),
+        rows = [(target, [", ".join(self._type_keys(target)),
                           ", ".join(sorted(path.name for pattern in ("ps_rw_pl_reg_*.sv", "ps_rw_pl_reg_*.v")
                                           for path in target.glob(pattern)))]) for target in targets]
         chooser = FileChoiceDialog(
@@ -969,16 +969,16 @@ class MainWindow(QMainWindow):
             except (ValueError, OSError) as exc:
                 failures.append((target.name, str(exc)))
         if not results:
-            QMessageBox.warning(self, "导入组件失败", "\n".join(f"{name}：{reason}" for name, reason in failures))
-            self.append_log("ERROR", f"导入组件失败：{failures}")
+            QMessageBox.warning(self, "更新控件失败", "\n".join(f"{name}：{reason}" for name, reason in failures))
+            self.append_log("ERROR", f"更新控件失败：{failures}")
             return
         summary = f"解析成功 {len(results)} 个组件，失败 {len(failures)} 个。"
         if failures:
             summary += "\n失败项：\n" + "\n".join(f"{name}：{reason}" for name, reason in failures[:8])
         if len(results) == 1:
             target, entry, _ = results[0]
-            summary = f"类型 {self._canonical_type_key(target)}：解析到 {len(entry['registers'])} 个寄存器。"
-        answer = QMessageBox.question(self, "确认导入组件",
+            summary = f"类型 {', '.join(self._type_keys(target))}：解析到 {len(entry['registers'])} 个寄存器。"
+        answer = QMessageBox.question(self, "确认更新控件",
                                       f"{summary}\n来源：{folder}\n\n确认导入？",
                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
@@ -993,16 +993,22 @@ class MainWindow(QMainWindow):
             overrides = None
             self.append_log("ERROR", f"组件定义保存目录不可用（本次会话内仍生效）：{exc}")
         for target, entry, info in results:
-            key = self._canonical_type_key(target)
-            self.type_catalog["types"][key] = entry
-            updated_keys.add(key)
-            if overrides is not None:
-                try:
-                    (overrides / f"{key}.json").write_text(
-                        json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
-                except OSError as exc:
-                    self.append_log("ERROR", f"组件定义保存失败（{key}，本次会话内仍生效）：{exc}")
-            self.append_log("SYSTEM", f"已导入组件类型 {key}：{len(entry['registers'])} 项寄存器（{target}）。")
+            keys = []
+            for key in self._type_keys(target):
+                if key in updated_keys:
+                    self.append_log("SYSTEM", f"组件：类型 {key} 已由本次其他目录更新，跳过 {target}")
+                    continue
+                keys.append(key)
+                self.type_catalog["types"][key] = entry
+                updated_keys.add(key)
+                if overrides is not None:
+                    try:
+                        (overrides / f"{key}.json").write_text(
+                            json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+                    except OSError as exc:
+                        self.append_log("ERROR", f"组件定义保存失败（{key}，本次会话内仍生效）：{exc}")
+            if keys:
+                self.append_log("SYSTEM", f"已更新控件类型 {', '.join(keys)}：{len(entry['registers'])} 项寄存器（{target}）。")
             for message in info["warnings"]:
                 self.append_log("SYSTEM", f"组件：{message}")
         self._rebuild_component_tree()
@@ -1016,15 +1022,16 @@ class MainWindow(QMainWindow):
         present, otherwise the instance name (never blank)."""
         return str(comp.get("label") or comp.get("instance") or comp.get("module_type") or "")
 
-    def _canonical_type_key(self, folder: Path) -> str:
-        """Map an imported folder onto the catalog's type key (decode folders may rename types)."""
+    def _type_keys(self, folder: Path) -> list[str]:
+        """Every type key a folder backs: its `module ec_*` names plus catalog aliases on the same
+        decode folder (ec_1di1do/ -> ec_1di_1do and ec_1di1do); the folder name as a last resort."""
+        keys = component_parse.folder_module_types(folder)
         if self.type_catalog:
             marker = f"/{folder.name}/"
-            for key, entry in self.type_catalog["types"].items():
-                if marker in f"/{entry.get('decode_file', '')}/" or \
-                        str(entry.get("imported_from", "")) == str(folder):
-                    return key
-        return folder.name
+            keys += [key for key, entry in self.type_catalog["types"].items()
+                     if key not in keys and (marker in f"/{entry.get('decode_file', '')}/"
+                                             or str(entry.get("imported_from", "")) == str(folder))]
+        return keys or [folder.name]
 
     def load_top(self, path, quiet=False):
         """Parse a mix top file and rebuild the sidebar component catalog."""
@@ -1751,7 +1758,7 @@ class MainWindow(QMainWindow):
         self._set_register_count(getattr(self, "_full_register_count", ""))
         self._fit_title_row()
         sidebar_narrow = self.sidebar_scroll.viewport().width() < 320
-        for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "导入组件")):
+        for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "更新控件")):
             control.setText("" if sidebar_narrow else text)
             control.setIconSize(QSize(16, 16))
             control.setFixedWidth(control.sizeHint().width())

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Shared RTL register parsing: used by the offline catalog generator and by the
-EXE's 导入组件 feature (runtime re-parse of a single component folder)."""
+EXE's 更新控件 feature (runtime re-parse of a single component folder)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -102,15 +102,40 @@ def top_is_plaintext(text: str) -> bool:
     return re.search(r"\bmodule\b", text) is not None
 
 
+def _component_tops(folder: Path) -> list[Path]:
+    candidates = sorted([*Path(folder).glob("ec_*.sv"), *Path(folder).glob("ec_*.v")])
+    return [candidate for candidate in candidates
+            if not candidate.stem.startswith(("ps_rw_pl_reg_", "pre_post_", "proactive_", "status_", "tim_"))]
+
+
+MODULE_DECL = re.compile(r"^\s*module\s+(ec_\w+)", re.M)
+
+
+def folder_module_types(folder: Path) -> list[str]:
+    """Type keys a top instantiates: the `module ec_*` declared in the folder (ec_1di1do/ -> ec_1di_1do)."""
+    names = []
+    for path in _component_tops(folder):
+        try:
+            text = strip_comments(read_text_resilient(path))
+        except OSError:
+            continue
+        names.extend(name for name in MODULE_DECL.findall(text) if name not in names)
+    return names
+
+
 def find_top_file(key: str, decode_path: Path) -> Path | None:
     """The component top ec_<type>.sv/.v sits next to its ps_rw_pl_reg module."""
     wanted = key.replace("_", "").lower()
-    candidates = sorted([*decode_path.parent.glob("ec_*.sv"), *decode_path.parent.glob("ec_*.v")])
+    candidates = _component_tops(decode_path.parent)
     for candidate in candidates:
-        if candidate.stem.startswith(("ps_rw_pl_reg_", "pre_post_", "proactive_", "status_", "tim_")):
-            continue
         if candidate.stem.replace("_", "").lower() == wanted:
             return candidate
+    for candidate in candidates:   # file named differently from its module
+        try:
+            if key in MODULE_DECL.findall(strip_comments(read_text_resilient(candidate))):
+                return candidate
+        except OSError:
+            continue
     return None
 
 
@@ -381,7 +406,7 @@ def find_reg_addr_map(folder: Path) -> Path | None:
 
 
 def parse_component_folder(folder: Path) -> tuple[dict, dict]:
-    """Runtime 导入组件: re-parse one component folder into a catalog type entry."""
+    """Runtime 更新控件: re-parse one component folder into a catalog type entry."""
     folder = Path(folder)
     if not folder.is_dir():
         raise ValueError(f"文件夹不存在：{folder}")
@@ -398,11 +423,13 @@ def parse_component_folder(folder: Path) -> tuple[dict, dict]:
     defines = parse_define_table(read_text_resilient(defines_path))
     if not defines:
         raise ValueError(f"寄存器地址表为空或不可读：{defines_path}")
-    entry, forced, warnings = build_type_entry(folder.name, decode_path, defines)
+    types = folder_module_types(folder)
+    key = types[0] if types else folder.name
+    entry, forced, warnings = build_type_entry(key, decode_path, defines)
     info = {"decode_file": str(decode_path), "defines": str(defines_path),
             "top_file": "", "forced_irq": forced, "warnings": warnings,
-            "imported_from": str(folder)}
-    top_file = find_top_file(folder.name, decode_path)
+            "imported_from": str(folder), "types": types}
+    top_file = find_top_file(key, decode_path)
     if top_file is not None:
         info["top_file"] = str(top_file)
     entry["imported_from"] = str(folder)
@@ -410,7 +437,7 @@ def parse_component_folder(folder: Path) -> tuple[dict, dict]:
 
 
 def find_component_folders(root: Path) -> list[Path]:
-    """Every folder under root that carries its own ps_rw_pl_reg module (batch 导入组件)."""
+    """Every folder under root that carries its own ps_rw_pl_reg module (batch 更新控件)."""
     root = Path(root)
     folders = {path.parent for path in root.rglob("ps_rw_pl_reg_*")
                if path.suffix.lower() in (".sv", ".v")}

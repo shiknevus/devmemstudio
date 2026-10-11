@@ -1,4 +1,4 @@
-# 寄存器调试工作台 5.3.7
+# 寄存器调试工作台 5.3.8
 
 Auth：szzhang / cgliu / bxli
 
@@ -10,7 +10,7 @@ Auth：szzhang / cgliu / bxli
 
 </div>
 
-当前发布包：**`DevmemStudio-5.3.7-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.3.7**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.3.7 验收记录](docs/VALIDATION_5.3.7.md)。
+当前发布包：**`DevmemStudio-5.3.8-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.3.8**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.3.8 验收记录](docs/VALIDATION_5.3.8.md)。
 
 <div align="center">
 
@@ -18,12 +18,19 @@ Auth：szzhang / cgliu / bxli
 | --- | --- |
 | 下载后的运行与升级 | [直接运行 EXE](#直接运行-exe) |
 | 连接板卡、导入 top、调试寄存器 | [使用流程](#使用流程) |
-| 查看本次变化 | [5.3.7 发布](#537-发布2026-10-10) |
+| 查看本次变化 | [5.3.8 发布](#538-发布2026-10-11) |
 | 找配置、缓存或日志 | [配置与日志](#配置与日志) |
 | 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
 | 排查启动、监视或构建问题 | [常见问题](#常见问题) |
 
 </div>
+
+## 5.3.8 发布（2026-10-11）
+
+- 界面术语调整：原「导入组件」改名为「更新控件」（按钮、提示、帮助文本、README 统一），含义不变。
+- 重新打包发布时自动从 RTL 重新生成组件寄存器表（`tools/build.py` 打包前运行 `gen_component_catalog.py --refresh`）：按表内记录的 RTL 根目录（或环境变量 `DEVMEMSTUDIO_RTL`）重新生成，top 自动取 `<RTL>/top` 下全部含 `ec_` 控件的文件，RTL 已删除的旧类型保留（老 bit 仍在使用）；内容无变化且本机没有更新的「更新控件」结果时不改写文件，RTL 目录不存在时跳过并沿用现有表，存在未解析文件或 top 类型无法匹配时构建失败；`--no-catalog` 可跳过此步。
+- 组件寄存器表随 RTL 更新：`ec_2di_2do` 等类型的 `DEBUG_REG2` 位快照字段（`irq_posedge_cnt` / `irq_negedge_cnt`）已随 RTL 断开，行为表注释相应更新；新增 `ec_sg_rfid`、`ec_sp_rfid`、`ec_osm41_485_laser_distance` 组件类型。
+- 新增「构建刷新寄存器表」行为测试（保留旧类型、无变化不改写、本机更新结果优先等）。
 
 ## 5.3.7 发布（2026-10-10）
 
@@ -190,15 +197,17 @@ ZIP 解压后的 CSV 与普通 CSV 导出逐字节一致，保留全部导出行
 ### top 组件解析与精确寄存器表
 
 - 导入 top 按 `ec_` 实例解析全部控件（设备名/类型/地址/禁用态）。有 `flow_comp` 头时用头上的名称和编号；没有头、或同一个头下面还有别的 `ec_` 实例，也会收进来。重启自动重载；类型无精确表时回退通用表并标 `≈`。
-- 寄存器表由 `tools/gen_component_catalog.py` 从 `reg_addr_pl.vh` + 各 `ps_rw_pl_reg_*.sv` 生成（含 PARAM 注释与行为表收割），打包于 `devmem_studio/data/component_catalog.json`；RTL 变更后重跑脚本刷新。
+- 寄存器表由 `tools/gen_component_catalog.py` 从 `reg_addr_pl.vh` + 各 `ps_rw_pl_reg_*.sv` 生成（含 PARAM 注释与行为表收割），打包于 `devmem_studio/data/component_catalog.json`；`build_exe.bat` 打包前自动从表内记录的 RTL 根目录重新生成（见[重新打包](#重新打包)）。
 
-### 运行时导入组件（RTL 改动后免重新打包）
+### 运行时更新控件（RTL 改动后免重新打包）
 
-某个组件**内部**修改后，在发布版 EXE 里点「导入组件」，选择该组件的文件夹（如 `...\pl_exe_io\ec_dv300_do\`，需含 `ps_rw_pl_reg_*.sv`，可选同级 `ec_*.sv`；寄存器地址表从上级 `include_files/reg_addr_pl.vh` 向上查找）：
+某个组件**内部**修改后，在发布版 EXE 里点「更新控件」，选择该组件的文件夹（如 `...\pl_exe_io\ec_dv300_do\`，需含 `ps_rw_pl_reg_*.sv`，可选同级 `ec_*.sv`；寄存器地址表从上级 `include_files/reg_addr_pl.vh` 向上查找）：
 
 - 解析出的寄存器表/信号名/行为表/DEBUG 语义**立即覆盖**内置定义并作用于该类型组件（正在查看的组件自动刷新）
 - 定义持久化到 `%LOCALAPPDATA%\DevmemStudio\component_overrides\<类型>.json`，重启自动加载；删除该文件即恢复内置定义
 - 本地定义与内置表按新旧取舍：在线升级后，若新版内置表的生成时间晚于该文件，以内置表为准；之后再导入的定义仍优先
+- 类型名取目录里 `ec_*.sv` 的 `module` 声明，并同时更新内置表中同一解码目录的别名（如 `ec_1di1do\` 同时更新 `ec_1di_1do` 与 `ec_1di1do`）
+- 只对本机生效；要让没有 RTL 源码的电脑也更新，需重新打包发布（打包时自动重新生成内置表）
 - 与生成器同源（`devmem_studio/component_parse.py`），两端解析结果一致
 
 ## 5.0.0 更新（2026-10-08）
@@ -666,9 +675,9 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 3. 用「基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部」页签切换视图。选中寄存器后右侧显示完整地址、HEX / DEC、位状态及字段解析，并沿用上次的「写入设置 / 解析与位状态」（只读寄存器仍显示解析页）。在「写入设置」编辑数值或选预设，点击「写入并回读」。「批量写入」先预览再执行。点筛选栏「监视」打开寄存器监视窗口，勾选最多 32 个寄存器后点「开始监视」，在板端连续采样并绘制曲线，可放置 A/B 标记测量时间差、导出 CSV（需已连接 SSH）。
 4. 本地发布包：点「打包bit」，选择或拖入 `.bit`，填写项目号并确认输出目录，点「开始打包」；无需连接设备，源文件保留。「上传bit」选择文件、选择文件夹（自动查找其下 `.bit`，多个时列表选择）或拖入 `*.bit`（严格校验后缀，非 bit 文件提示「选中文件不是bit文件」），在「板端目录」下拉选择上传目录（默认 `/run/media/sda`，自动列出板端 `/run/media` 下的挂载目录，也可直接输入；记住上次使用的目录），上传前确认文件路径、日期与目标位置，确认后先传为 `sunny_fpga.bit.uploading`，传完再把旧文件备份为 `sunny_fpga.bit_时间戳` 并换入为 `sunny_fpga.bit`（传输失败时板端原 bit 不受影响）；「回退bit」列出所选板端目录下的时间戳备份，选择后当前 bit 先备份、所选版本恢复为 `sunny_fpga.bit`；「下载log」把板端 `sunny.log` 保存到本地。
 5. 会话终端：来源选 `ssh` 时在终端底部 `❯` 提示行输入 shell 命令，`←`/`→` 在行内移动光标，Tab 补全命令或板端路径，`↑`/`↓` 翻历史，回车执行。来源选 `serial` 时终端就是串口控制台：板卡自发的打印实时显示，按键逐个直发板卡（Tab 补全、历史由板端 shell 处理），无选中文字时 Ctrl+C 发送中断、Ctrl+V 粘贴发送；进 U-Boot 时在倒计时期间按住 Shift+7，或先勾选工具栏「U-Boot」再重启/上电。来源为 `tail log` 时查看板端 `sunny.log` 实时流（SSH 连上后自动后台打印），`system` 查看软件自身运行日志。点击「查找日志」随输随查，Ctrl+F 填充选中文字。点击「导出」保存当前终端内容。
-6. RTL 组件内部修改后点「导入组件」，选择该组件文件夹（或上级目录批量导入），先列出组件目录、类型和寄存器定义文件，只有一个结果也列出。默认全选，可点击行取消不需要的组件；点击「选择」后仅解析所选组件，再确认导入。重新解析的寄存器定义立即生效并持久化到本机；取消列表不会解析或导入组件。
+6. RTL 组件内部修改后点「更新控件」，选择该组件文件夹（或上级目录批量导入），先列出组件目录、类型和寄存器定义文件，只有一个结果也列出。默认全选，可点击行取消不需要的组件；点击「选择」后仅解析所选组件，再确认导入。重新解析的寄存器定义立即生效并持久化到本机；取消列表不会解析或导入组件。
 
-「导入 top」与「导入组件」分别记住上次选择的文件夹，重启后仍保留。选择文件夹后即更新记忆，不依赖扫描或导入成功；取消文件夹选择不会覆盖记忆。记住的目录已不存在时，回退到已导入 top 所在目录；该目录也不存在时使用系统默认位置。
+「导入 top」与「更新控件」分别记住上次选择的文件夹，重启后仍保留。选择文件夹后即更新记忆，不依赖扫描或导入成功；取消文件夹选择不会覆盖记忆。记住的目录已不存在时，回退到已导入 top 所在目录；该目录也不存在时使用系统默认位置。
 
 板卡重启后若提示主机密钥变化，核对弹窗中的设备地址和新指纹，再点击「信任新密钥并重连」。取消会停止连接并保留原主机密钥记录。
 
@@ -746,7 +755,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 .\venv\Scripts\python.exe tools\build.py
 ```
 
-构建脚本先核对 `requirements-lock.txt` 的固定依赖版本和图标更新时间，再并行执行三个任务：
+构建脚本先核对 `requirements-lock.txt` 的固定依赖版本和图标更新时间，再刷新组件寄存器表：按 `component_catalog.json` 记录的 `source.rtl_root`（或环境变量 `DEVMEMSTUDIO_RTL`）重新生成。控件类型名取各组件目录里 `ec_*.sv` 的 `module` 声明（如 `ec_1di1do\` 目录对应 `ec_1di_1do`），不依赖 top；`<RTL>/top` 存在时其下含 `ec_` 控件的文件只用于补充别名并检查每个控件都有定义。RTL 已删除的旧类型保留；内容无变化且本机没有更新的「更新控件」结果时不改写文件。RTL 目录不存在时跳过并沿用现有表，存在未解析文件或 top 类型无法匹配时构建失败；`--no-catalog` 跳过此步。之后并行执行三个任务：
 
 - 全量回归：`tools/run_tests.py --full`，包含正式发布所需的慢速检查。
 - 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
@@ -760,6 +769,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 | --- | --- |
 | 安装固定依赖（需要时） | `build/logs/pip.log` |
 | 生成图标（需要时） | `build/logs/icon.log` |
+| 刷新组件寄存器表 | `build/logs/catalog.log` |
 | 全量测试 | `build/logs/tests.log` |
 | 源码离线验收 | `build/logs/smoke.log` |
 | PyInstaller 运行库打包 | `build/logs/pyinstaller.log` |
@@ -868,7 +878,7 @@ Copy-Item -LiteralPath build\DevmemStudio.exe -Destination dist\DevmemStudio.exe
 | 寄存器不能勾选监视 | 检查是否只写、读清零或读取有副作用，这些寄存器不能持续采样。 |
 | 状态栏显示使用 `devmem` 循环 | 常驻采样程序可能无法上传或执行，例如 `/tmp` 挂载为 `noexec`；查看状态提示。程序会使用回退方式，实际采样周期以状态栏为准。 |
 | 曲线数据暂停 | 查看 SSH 连接和底部状态。短时网络停顿后可继续接收；寄存器访问故障或 `/dev/mem` 打不开时会停止并提示原因。 |
-| RTL 已修改但寄存器定义仍是旧版 | 使用「导入组件」重新解析组件文件夹；只调整 RTL 定义无需重新构建 EXE。要恢复内置定义，删除对应的组件覆盖 JSON 并重启。 |
+| RTL 已修改但寄存器定义仍是旧版 | 使用「更新控件」重新解析组件文件夹，本机无需重新构建 EXE；其他电脑需重新打包发布。要恢复内置定义，删除对应的组件覆盖 JSON 并重启。 |
 
 </div>
 
@@ -880,7 +890,7 @@ Copy-Item -LiteralPath build\DevmemStudio.exe -Destination dist\DevmemStudio.exe
 devmem_debug.py             启动入口
 devmem_studio/
   catalog.py               字段解析与寄存器分组（含 RTL 宏名视图）
-  component_parse.py       RTL 组件寄存器解析（生成器与「导入组件」共用）
+  component_parse.py       RTL 组件寄存器解析（生成器与「更新控件」共用）
   top_import.py            mix top 组件解析、视图集合与类型元数据
   data/component_catalog.json  生成的各组件类型精确寄存器表（含参数注释与行为表）
   core.py                  配置、数据解析、SSH 与离线模拟
@@ -910,4 +920,6 @@ DevmemStudio.spec           运行库打包配置（单文件由 tools/build_sin
 
 ```powershell
 .\venv\Scripts\python.exe tools\gen_component_catalog.py --rtl <RTL根目录> --out devmem_studio\data\component_catalog.json --check
+# 与打包时相同：类型名取组件目录的 module 声明、top 可选、保留旧类型、无变化不改写
+.\venv\Scripts\python.exe tools\gen_component_catalog.py --refresh
 ```

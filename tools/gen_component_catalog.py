@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -12,11 +13,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from devmem_studio.component_parse import (  # noqa: E402,F401
     ALIASES, CATALOG_SCHEMA, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry,
-    debug_notes_for, extract_concat_fields, find_component_folders, find_top_file,
+    debug_notes_for, extract_concat_fields, find_component_folders, find_top_file, folder_module_types,
     harvest_debug_snapshots, harvest_signal_widths, harvest_type_notes, parse_component_folder,
     parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
     strip_comments, top_is_plaintext)
-from devmem_studio.top_import import parse_top  # noqa: E402
+from devmem_studio.core import user_data_dir  # noqa: E402
+from devmem_studio.top_import import _catalog_timestamp, find_top_files, parse_top  # noqa: E402
 
 
 def type_keys_for(tops: list[Path], report: dict) -> list[str]:
@@ -81,11 +83,18 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
             continue
         decode_files[stem] = path
     keys = type_keys_for(tops, report) if tops else []
+    declared = {}   # module ec_* in the component folder -> that folder's decode file
     for stem in decode_files:
         directory = decode_files[stem].parent.name
         if directory not in keys:
             keys.append(directory)
-    matched, ambiguous = match_decode_files(keys, decode_files)
+        for name in folder_module_types(decode_files[stem].parent):
+            if name in declared:
+                report["top_warnings"].append(f"模块 {name} 在多个组件目录声明，使用 {declared[name]}")
+                continue
+            declared[name] = decode_files[stem]
+    matched, ambiguous = match_decode_files([key for key in keys if key not in declared], decode_files)
+    matched.update(declared)
     report["ambiguous"] = ambiguous
 
     types = {}
@@ -120,17 +129,69 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
     return catalog, report
 
 
+def carry_removed(catalog: dict, previous: dict) -> list[str]:
+    """Keep types the RTL no longer has (old bits still use them); same decode file -> fresh entry."""
+    by_decode = {entry.get("decode_file"): entry for entry in catalog["types"].values()}
+    kept = sorted(key for key in previous if key not in catalog["types"])
+    for key in kept:
+        catalog["types"][key] = json.loads(json.dumps(by_decode.get(previous[key].get("decode_file"), previous[key])))
+    catalog["types"] = dict(sorted(catalog["types"].items()))
+    return kept
+
+
+def refresh(out: Path, rtl: Path | None, stamp: str) -> int:
+    """Build step: regenerate from the recorded RTL root; rewrite only when something changed."""
+    try:
+        previous = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    recorded = str(rtl or os.environ.get("DEVMEMSTUDIO_RTL") or previous.get("source", {}).get("rtl_root", ""))
+    if not recorded or not Path(recorded).is_dir():
+        print(f"skip: RTL root not found ({recorded or '未记录'}); bundled catalog unchanged")
+        return 0
+    root = Path(recorded).resolve()
+    # Type keys come from each folder's module declaration; tops only add aliases and the coverage check.
+    tops = sorted(Path(item["path"]) for item in find_top_files(root / "top")[0]) if (root / "top").is_dir() else []
+    catalog, report = build(root, tops, stamp)
+    print("tops:", ", ".join(str(top) for top in tops) or "(none)")
+    print(json.dumps(report, ensure_ascii=False))
+    if report["unparsed_files"] or report["unmatched_top_types"]:
+        print("FAIL: unparsed files or unmatched top types (see report above)")
+        return 1
+    old_types = previous.get("types", {})
+    kept = carry_removed(catalog, old_types)
+    bundled_at = _catalog_timestamp(previous.get("generated_at"))
+    overrides = user_data_dir() / "component_overrides"
+    newer = sorted(item.stem for item in overrides.glob("*.json")
+                   if bundled_at is None or item.stat().st_mtime >= bundled_at) if overrides.is_dir() else []
+    changed = sorted(key for key in catalog["types"] if catalog["types"][key] != old_types.get(key))
+    if not changed and not newer:
+        print(f"up to date: {len(catalog['types'])} types, generated_at {previous.get('generated_at')}")
+        return 0
+    out.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"updated: {len(catalog['types'])} types; changed {changed}; kept removed {kept}; "
+          f"newer local imports {newer}")   # a newer stamp lets the bundled table win over them
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rtl", required=True, type=Path, help="RTL root containing reg_addr_pl.vh and decode modules")
+    parser.add_argument("--rtl", type=Path, help="RTL root containing reg_addr_pl.vh and decode modules")
+    parser.add_argument("--refresh", action="store_true",
+                        help="build step: optional tops from <rtl>/top, keep removed types, skip when unchanged")
     parser.add_argument("--out", type=Path, default=ROOT / "devmem_studio/data/component_catalog.json")
-    parser.add_argument("--tops", default="", help="comma-separated top files used to collect type keys")
+    parser.add_argument("--tops", default="", help="optional comma-separated top files: extra type aliases + coverage check")
     parser.add_argument("--stamp", default=None, help="override generated_at for reproducible output")
     parser.add_argument("--check", action="store_true", help="exit non-zero on unparsed files or unmatched top types")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    tops = [Path(item) for item in args.tops.split(",") if item.strip()]
-    catalog, report = build(args.rtl.resolve(), tops, args.stamp or datetime.now().isoformat(timespec="seconds"))
+    stamp = args.stamp or datetime.now().isoformat(timespec="seconds")
+    if args.refresh:
+        return refresh(args.out, args.rtl, stamp)
+    if args.rtl is None:
+        parser.error("--rtl is required unless --refresh is given")
+    tops =[Path(item) for item in args.tops.split(",") if item.strip()]
+    catalog, report = build(args.rtl.resolve(), tops, stamp)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2 if args.verbose else None))

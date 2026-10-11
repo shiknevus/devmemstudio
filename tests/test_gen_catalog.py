@@ -258,6 +258,71 @@ class BuildTests(unittest.TestCase):
             with patch("sys.argv", arguments):
                 self.assertEqual(gen.main(), 1)
 
+    def test_type_key_from_folder_module_without_top(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "include_files").mkdir()
+            (root / "include_files/reg_addr_pl.vh").write_text(DEFINE_TEXT, encoding="utf-8")
+            folder = root / "emcc_ctrl" / "pl_exe_io" / "ec_safety_lock"   # folder != module name
+            folder.mkdir(parents=True)
+            (folder / "ps_rw_pl_reg_uut.sv").write_text(DECODE_TEXT, encoding="utf-8")
+            (folder / "ec_lock_top.sv").write_text(
+                "// module ec_commented();\n" + HARVEST_TOP.replace("module ec_uut", "module ec_s_lock"),
+                encoding="utf-8")
+            self.assertEqual(gen.folder_module_types(folder), ["ec_s_lock"])
+            catalog, _ = gen.build(root, [], stamp="fixed")
+            self.assertIn("ec_s_lock", catalog["types"])
+            self.assertEqual(catalog["types"]["ec_s_lock"]["registers"][0]["name"], "IRQ_REG1")
+            self.assertIn("behaviors", catalog["types"]["ec_s_lock"])   # top found via module, not file name
+            entry, info = gen.parse_component_folder(folder)
+            self.assertEqual(info["types"], ["ec_s_lock"])
+            self.assertTrue(info["top_file"].endswith("ec_lock_top.sv"))
+            self.assertEqual(entry, {**catalog["types"]["ec_s_lock"], "imported_from": str(folder),
+                                     "decode_file": entry["decode_file"]})
+
+    def test_refresh_keeps_removed_types_and_skips_when_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _ = self.build_fixture_tree(directory)
+            out = root / "catalog.json"
+            fresh, _ = gen.build(root, [], stamp="fixed")
+            decode = fresh["types"]["ec_uut"]["decode_file"]
+            out.write_text(json.dumps({"generated_at": "2026-01-01T00:00:00", "source": {"rtl_root": str(root)},
+                                       "types": {"ec_gone": {"decode_file": "x/ps_rw_pl_reg_gone.sv", "registers": []},
+                                                 "ec_u_ut": {"decode_file": decode, "registers": []}}}),
+                           encoding="utf-8")
+            with patch.object(gen, "user_data_dir", return_value=root / "no_user_data"):
+                self.assertEqual(gen.refresh(out, None, "2026-10-11T12:00:00"), 0)
+                written = json.loads(out.read_text(encoding="utf-8"))
+                self.assertEqual(written["generated_at"], "2026-10-11T12:00:00")
+                self.assertEqual(written["types"]["ec_gone"]["registers"], [])      # removed from RTL: kept
+                self.assertEqual(written["types"]["ec_u_ut"], written["types"]["ec_uut"])   # alias refreshed
+                before = out.read_bytes()
+                self.assertEqual(gen.refresh(out, None, "2026-10-12T12:00:00"), 0)
+                self.assertEqual(out.read_bytes(), before)                          # unchanged: stamp kept
+
+    def test_refresh_restamps_when_local_import_is_newer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _ = self.build_fixture_tree(directory)
+            out = root / "catalog.json"
+            catalog, _ = gen.build(root, [root / "top" / "emcc_mix_top.sv"], stamp="2026-01-01T00:00:00")
+            out.write_text(json.dumps(catalog), encoding="utf-8")
+            overrides = root / "user" / "component_overrides"
+            overrides.mkdir(parents=True)
+            (overrides / "ec_uut.json").write_text("{}", encoding="utf-8")   # mtime now > stamp
+            with patch.object(gen, "user_data_dir", return_value=root / "user"):
+                self.assertEqual(gen.refresh(out, None, "2099-01-01T00:00:00"), 0)
+            self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["generated_at"], "2099-01-01T00:00:00")
+
+    def test_refresh_without_rtl_root_leaves_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "catalog.json"
+            out.write_text(json.dumps({"source": {"rtl_root": str(Path(directory) / "missing")}, "types": {}}),
+                           encoding="utf-8")
+            before = out.read_bytes()
+            with patch.dict("os.environ", {"DEVMEMSTUDIO_RTL": ""}):
+                self.assertEqual(gen.refresh(out, None, "fixed"), 0)
+            self.assertEqual(out.read_bytes(), before)
+
     def test_missing_define_map_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:
             empty = Path(directory)

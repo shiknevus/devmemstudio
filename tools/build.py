@@ -4,7 +4,8 @@
 Tests and the source smoke run beside the packaging chain
 (PyInstaller -> single-file EXE -> isolated EXE acceptance). The EXE is built and
 accepted under build/ and only copied to dist/ once every check has passed.
-Each step logs to build/logs/<step>.log.
+Each step logs to build/logs/<step>.log. The component catalog is first regenerated
+from the RTL root it records (tools/gen_component_catalog.py --refresh; --no-catalog skips).
 """
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import PackageNotFoundError, version
@@ -92,6 +93,11 @@ def main():
             print("  skip icon         (assets/devmem.ico is up to date)")
         else:
             run("icon", "tools/make_icon.py")
+        if "--no-catalog" in sys.argv[1:]:
+            print("  skip catalog      (--no-catalog)")
+        else:
+            run("catalog", "tools/gen_component_catalog.py", "--refresh")   # before packaging: EXE ships the fresh table
+            print("        " + (LOGS / "catalog.log").read_text(encoding="utf-8").strip().splitlines()[-1][:150])
         with ThreadPoolExecutor(max_workers=3) as pool:
             futures = [pool.submit(step) for step in (package, checks, smoke)]
             failures = [future.exception() for future in futures if future.exception()]
