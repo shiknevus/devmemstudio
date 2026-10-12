@@ -525,6 +525,27 @@ class DialogTests(unittest.TestCase):
             self.assertFalse(Path(path).exists())
         self.assertIn('选区内没有可导出的采样数据', self.dialog.status.text())
 
+    def test_export_uses_range_after_both_edges_are_resized(self):
+        self.dialog.monitored = [('R0', 0x1000)]
+        buffer = MonitorBuffer(1)
+        buffer.extend([(float(i), (None if i == 6 else 100 + i,)) for i in range(9)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.resize(900, 320)
+        plot.set_series(buffer, ['R0'], [0x1000])
+        plot.export_range = (2.0, 6.0)
+        for first, last in ((2, 3), (6, 7)):
+            QTest.mousePress(plot, Qt.LeftButton, pos=PlotTests.mark_position(plot, first))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=PlotTests.mark_position(plot, last))
+        self.assertEqual(plot.export_range, (3.0, 7.0))
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'monitor.csv')
+            with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=(path, '')):
+                self.assertEqual(self.dialog.export_csv(), path)
+            rows = Path(path).read_text(encoding='utf-8-sig').splitlines()
+        self.assertEqual(rows[1:], ['3.000000,103', '4.000000,104', '5.000000,105',
+                                    '6.000000,', '7.000000,107'])
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -1781,6 +1802,66 @@ class PlotTests(unittest.TestCase):
             # Right-click clears the selected range.
             QTest.mouseClick(plot, Qt.RightButton, pos=last)
             self.assertIsNone(plot.export_range)
+        finally:
+            plot.close()
+
+    def test_released_range_can_resize_both_edges_without_changing_markers(self):
+        plot = self.marker_plot()
+        try:
+            QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, 2))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=self.mark_position(plot, 6))
+            self.assertEqual(plot.export_range, (2.0, 6.0))
+            plot.markers = [2.0, 9.0]   # a selection edge takes priority over a marker line
+            for first, last, lane, expected in ((2, 3, 0, (3.0, 6.0)), (6, 8, 1, (3.0, 8.0))):
+                origin = self.mark_position(plot, first, lane)
+                target = self.mark_position(plot, last, lane)
+                QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(origin), QPointF(origin),
+                                                         Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+                self.assertEqual(plot.cursor().shape(), Qt.SizeHorCursor)
+                QTest.mousePress(plot, Qt.LeftButton, pos=origin)
+                QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(target), QPointF(target),
+                                                         Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+                plot.grab()
+                self.assertEqual(plot.export_range, expected)
+                self.assertTrue(plot._interaction_frozen())
+                QTest.mouseRelease(plot, Qt.LeftButton, pos=target)
+                self.assertEqual(plot.export_range, expected)
+                self.assertFalse(plot._interaction_frozen())
+                self.assertEqual(plot.markers, [2.0, 9.0])
+        finally:
+            plot.close()
+
+    def test_dragging_inside_keeps_range_and_dragging_outside_replaces_it(self):
+        plot = self.marker_plot()
+        try:
+            plot.export_range = (2.0, 6.0)
+            QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, 4))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=self.mark_position(plot, 5))
+            self.assertEqual(plot.export_range, (2.0, 6.0))
+            for first, last, expected in ((8, 9, (8.0, 9.0)), (3, 1, (1.0, 3.0))):
+                QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, first))
+                QTest.mouseRelease(plot, Qt.LeftButton, pos=self.mark_position(plot, last))
+                self.assertEqual(plot.export_range, expected)
+        finally:
+            plot.close()
+
+    def test_range_resize_can_cross_opposite_edge_and_clamps_outside_plot(self):
+        plot = self.marker_plot()
+        try:
+            plot.export_range = (2.0, 6.0)
+            QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, 2))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=self.mark_position(plot, 8))
+            self.assertEqual(plot.export_range, (6.0, 8.0))
+            lane = plot.lanes()[0]
+            for first, x, expected in ((8, lane.right() + 50, (6.0, 10.0)),
+                                       (6, lane.left() - 50, (0.0, 10.0))):
+                QTest.mousePress(plot, Qt.LeftButton, pos=self.mark_position(plot, first))
+                QTest.mouseRelease(plot, Qt.LeftButton, pos=QPoint(round(x), round(lane.center().y())))
+                self.assertEqual(plot.export_range, expected)
+            QTest.mouseClick(plot, Qt.RightButton, pos=self.mark_position(plot, 5))
+            self.assertIsNone(plot.export_range)
+            self.assertIsNone(plot._range_resize)
+            self.assertFalse(plot._interaction_frozen())
         finally:
             plot.close()
 

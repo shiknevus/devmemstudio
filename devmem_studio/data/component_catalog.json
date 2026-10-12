@@ -1,6 +1,6 @@
 {
   "schema": 8,
-  "generated_at": "2026-10-12T18:26:46+08:00",
+  "generated_at": "2026-10-12T22:49:45+08:00",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -15910,6 +15910,34 @@
           "signal": "dbg_s2m_w0_o"
         },
         {
+          "offset": "0x18C",
+          "name": "PARAM56",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_s2m_w12_o"
+        },
+        {
+          "offset": "0x190",
+          "name": "PARAM57",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_s2m_w13_o"
+        },
+        {
+          "offset": "0x194",
+          "name": "PARAM58",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_s2m_w14_o"
+        },
+        {
+          "offset": "0x198",
+          "name": "PARAM59",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_s2m_w15_o"
+        },
+        {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
@@ -16001,6 +16029,10 @@
         "PARAM52": "out cmd [2]rst [1]son [0]dir",
         "PARAM54": "m2s word0 sent",
         "PARAM55": "slave echo of word0",
+        "PARAM56": "slave debug word 12",
+        "PARAM57": "slave debug word 13",
+        "PARAM58": "slave debug word 14",
+        "PARAM59": "slave debug word 15",
         "PARAM64": "fwd limit (hw|soft)",
         "PARAM65": "servo ready",
         "PARAM66": "servo done",

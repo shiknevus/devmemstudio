@@ -167,6 +167,7 @@ class MonitorPlot(QWidget):
         self.export_range = None
         self._range_press = None
         self._range_dragging = False
+        self._range_resize = None
         self._trace_cache = {}
         self._cache_key = None
         self._scene_cache = None
@@ -208,6 +209,7 @@ class MonitorPlot(QWidget):
         self.setMinimumSize(420, 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAccessibleDescription("单击图表放置 A/B 标记，同一位置再次单击取消该标记，拖动标记调整位置，右键清除标记。"
+                                      "左键拖选导出时间段，拖动选区左右边缘调整范围，在选区外拖动重新选择，右键清除选区。"
                                       "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴。")
 
     def set_series(self, buffer, names, offsets=(), columns=None):
@@ -215,6 +217,7 @@ class MonitorPlot(QWidget):
         self.export_range = None
         self._range_press = None
         self._range_dragging = False
+        self._range_resize = None
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
         self._hover = None
@@ -593,13 +596,32 @@ class MonitorPlot(QWidget):
                 return marker, False
         return None, False
 
+    def _range_edge_at(self, position, slop=6):
+        if self.export_range is None or not self._in_plot(position):
+            return None
+        begin, end = self._display_time_range()
+        if end <= begin:
+            return None
+        lane = self.lanes()[0]
+        hit, best = None, slop
+        for edge, stamp in enumerate(self.export_range):
+            if not begin <= stamp <= end:
+                continue
+            x = lane.left() + (stamp - begin) / (end - begin) * lane.width()
+            distance = abs(position.x() - x)
+            if distance <= best:
+                hit, best = edge, distance
+        return hit
+
     def mousePressEvent(self, event):
         position = event.position()
         if event.button() == Qt.RightButton and self._in_plot(position):
             self.export_range = None
             self._range_press = None
             self._range_dragging = False
+            self._range_resize = None
             self.clear_markers()
+            self.unsetCursor()
             self._request_paint()
             event.accept()
             return
@@ -609,10 +631,19 @@ class MonitorPlot(QWidget):
                 self.lane_clicked.emit(lane)
                 event.accept()
                 return
+            edge = self._range_edge_at(position)
+            if edge is not None:
+                self._range_press = None
+                self._range_resize = self.export_range[1 - edge]
+                self._hold_display = True
+                self.setCursor(Qt.SizeHorCursor)
+                event.accept()
+                return
             hit, on_line = self._marker_hit(position)
             stamp = self._sample_time_at(position)
             self._range_press = None
-            if hit is None and stamp is not None:
+            if (hit is None and stamp is not None
+                    and (self.export_range is None or not self.export_range[0] <= stamp <= self.export_range[1])):
                 self._range_press = (QPointF(position), stamp, tuple(self.markers), self._next_marker)
                 self._range_dragging = False
             self._toggle_marker = None
@@ -654,6 +685,13 @@ class MonitorPlot(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._range_resize is not None:
+            self.export_range = tuple(sorted((self._range_resize, self._range_time_at(event.position()))))
+            self._range_resize = None
+            self._hold_display = False
+            self._request_paint()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._range_press is not None:
             self._update_export_range(event.position())
             self._range_press = None
@@ -694,12 +732,19 @@ class MonitorPlot(QWidget):
     def mouseMoveEvent(self, event):
         self._hover = event.position().x()
         self._mouse_repaint = True
+        if self._range_resize is not None and event.buttons() & Qt.LeftButton:
+            self.export_range = tuple(sorted((self._range_resize, self._range_time_at(event.position()))))
+            self._request_paint()
+            event.accept()
+            return
         if self._range_press is not None and event.buttons() & Qt.LeftButton:
             self._update_export_range(event.position())
             if self._range_dragging:
                 self._request_paint()
                 return
-        if self._gutter_lane_at(event.position()) is None:
+        if self._range_edge_at(event.position()) is not None:
+            self.setCursor(Qt.SizeHorCursor)
+        elif self._gutter_lane_at(event.position()) is None:
             self.unsetCursor()
         else:
             self.setCursor(Qt.PointingHandCursor)
@@ -724,12 +769,17 @@ class MonitorPlot(QWidget):
         self._next_marker = next_marker
         self.markers_changed.emit(tuple(self.markers))
         self._hold_display = True
+        self.export_range = tuple(sorted((stamp, self._range_time_at(position))))
+
+    def _range_time_at(self, position):
+        stamp = self._sample_time_at(position)
+        if stamp is not None:
+            return stamp
         lane = self.lanes()[0]
         begin, end = self._display_time_range()
         x = max(lane.left(), min(position.x(), lane.right()))
         last = begin + (x - lane.left()) / lane.width() * (end - begin)
-        last = max(self.buffer.times[0], min(last, self.buffer.times[-1]))
-        self.export_range = tuple(sorted((stamp, last)))
+        return max(self.buffer.times[0], min(last, self.buffer.times[-1]))
 
     def leaveEvent(self, event):
         self._hover = None
@@ -903,10 +953,18 @@ class MonitorPlot(QWidget):
             right = min(end, last)
             if left <= right:
                 for lane in lanes:
+                    if lane.bottom() < exposed.top() or lane.top() > exposed.bottom():
+                        continue
                     x = lane.left() + (left - start) / span * lane.width()
                     width = (right - left) / span * lane.width()
                     painter.fillRect(QRectF(x, lane.top(), max(1., width), lane.height()),
                                      QColor(36, 99, 220, 45))
+                    for stamp in (first, last):
+                        if start <= stamp <= end:
+                            edge_x = lane.left() + (stamp - start) / span * lane.width()
+                            painter.setPen(QPen(QColor("#2463DC"), 1.4))
+                            painter.drawLine(QPointF(edge_x, lane.top()), QPointF(edge_x, lane.bottom()))
+                            painter.fillRect(QRectF(edge_x - 2, lane.center().y() - 6, 4, 12), QColor("#2463DC"))
         hover = self._hover_index()
         indices = (hover, *(self._index_at(stamp) for stamp in self.markers))
         pointer = self._hover is not None and lanes[0].left() <= self._hover <= lanes[0].right()
@@ -1006,7 +1064,8 @@ class MonitorPlot(QWidget):
         self._prepare_timer.start(0)
 
     def _interaction_frozen(self):
-        return self._scrolling or self._drag_marker is not None or self._range_dragging or self._hold_display
+        return (self._scrolling or self._drag_marker is not None or self._range_dragging
+                or self._range_resize is not None or self._hold_display)
 
     def _prepare_one_lane(self):
         frame = self._prepared_frame
@@ -1136,7 +1195,7 @@ class MonitorPlot(QWidget):
 
     def _finish_paint_flags(self, freeze):
         self._mouse_repaint = False
-        if self._drag_marker is None and not self._range_dragging:
+        if self._drag_marker is None and not self._range_dragging and self._range_resize is None:
             self._hold_display = False
         if not freeze:
             self._data_refresh_requested = False
@@ -1417,7 +1476,7 @@ class MonitorDialog(ManagedDialog):
         self.clear_button = button("清空数据", self.clear, "flat", "clear")
         self.clear_button.setToolTip("清空当前采样数据与标记")
         self.export_button = button("导出数据", self.export_data, "flat", "export")
-        self.export_button.setToolTip("左键拖选曲线时间段后仅导出选区，未选则导出全部保留数据；右键清除选区。支持 ZIP 或 CSV")
+        self.export_button.setToolTip("左键拖选曲线时间段，拖动选区左右边缘调整范围，在选区外拖动重新选择；仅导出选区，未选则导出全部保留数据，右键清除选区。支持 ZIP 或 CSV")
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
