@@ -1059,7 +1059,8 @@ class TopImportUiTests(UiTestBase):
             "irq": lambda names: names == ["IRQ_REG1", "IRQ_REG2", "A_TX_RSULT_RPT",
                                            "B_TX_RSULT_RPT", "C_TX_RSULT_RPT"],
             "param": lambda names: names and all(name.startswith("PARAM") for name in names),
-            "debug": lambda names: names == ["DEBUG_REG1", "DEBUG_REG2", "DEBUG_REG3"],
+            "debug": lambda names: names == ["DEBUG_REG1", "DEBUG_REG2", "DEBUG_REG3",
+                                             "DEBUG_REG4", "DEBUG_REG5"],
         }
         for view in top_import.VIEW_ORDER:
             with self.subTest(view=view):

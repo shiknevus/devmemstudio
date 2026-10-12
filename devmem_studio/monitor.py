@@ -164,6 +164,9 @@ class MonitorPlot(QWidget):
         self.markers = [None, None]
         self._next_marker = 0
         self._drag_marker = None
+        self.export_range = None
+        self._range_press = None
+        self._range_dragging = False
         self._trace_cache = {}
         self._cache_key = None
         self._scene_cache = None
@@ -209,6 +212,9 @@ class MonitorPlot(QWidget):
 
     def set_series(self, buffer, names, offsets=(), columns=None):
         self.clear_markers()
+        self.export_range = None
+        self._range_press = None
+        self._range_dragging = False
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
         self._hover = None
@@ -590,7 +596,11 @@ class MonitorPlot(QWidget):
     def mousePressEvent(self, event):
         position = event.position()
         if event.button() == Qt.RightButton and self._in_plot(position):
+            self.export_range = None
+            self._range_press = None
+            self._range_dragging = False
             self.clear_markers()
+            self._request_paint()
             event.accept()
             return
         if event.button() == Qt.LeftButton:
@@ -601,6 +611,10 @@ class MonitorPlot(QWidget):
                 return
             hit, on_line = self._marker_hit(position)
             stamp = self._sample_time_at(position)
+            self._range_press = None
+            if hit is None and stamp is not None:
+                self._range_press = (QPointF(position), stamp, tuple(self.markers), self._next_marker)
+                self._range_dragging = False
             self._toggle_marker = None
             self._toggle_stamp = None
             self._marker_press_pos = None
@@ -640,6 +654,15 @@ class MonitorPlot(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._range_press is not None:
+            self._update_export_range(event.position())
+            self._range_press = None
+            if self._range_dragging:
+                self._range_dragging = False
+                self._hold_display = False
+                self._request_paint()
+                event.accept()
+                return
         if event.button() == Qt.LeftButton and self._drag_marker is not None:
             marker = self._drag_marker
             moved = self._drag_moved
@@ -671,6 +694,11 @@ class MonitorPlot(QWidget):
     def mouseMoveEvent(self, event):
         self._hover = event.position().x()
         self._mouse_repaint = True
+        if self._range_press is not None and event.buttons() & Qt.LeftButton:
+            self._update_export_range(event.position())
+            if self._range_dragging:
+                self._request_paint()
+                return
         if self._gutter_lane_at(event.position()) is None:
             self.unsetCursor()
         else:
@@ -685,6 +713,23 @@ class MonitorPlot(QWidget):
                 self._drag_moved = True
                 self._set_marker(self._drag_marker, stamp)
         self._request_paint()
+
+    def _update_export_range(self, position):
+        origin, stamp, markers, next_marker = self._range_press
+        if not self._range_dragging and abs(position.x() - origin.x()) < 3:
+            return
+        self._range_dragging = True
+        self._drag_marker = None
+        self.markers = list(markers)
+        self._next_marker = next_marker
+        self.markers_changed.emit(tuple(self.markers))
+        self._hold_display = True
+        lane = self.lanes()[0]
+        begin, end = self._display_time_range()
+        x = max(lane.left(), min(position.x(), lane.right()))
+        last = begin + (x - lane.left()) / lane.width() * (end - begin)
+        last = max(self.buffer.times[0], min(last, self.buffer.times[-1]))
+        self.export_range = tuple(sorted((stamp, last)))
 
     def leaveEvent(self, event):
         self._hover = None
@@ -852,6 +897,16 @@ class MonitorPlot(QWidget):
     def _paint_readouts(self, painter, exposed, start, end):
         lanes = self.lanes()
         span = end - start
+        if self.export_range is not None and span > 0:
+            first, last = self.export_range
+            left = max(start, first)
+            right = min(end, last)
+            if left <= right:
+                for lane in lanes:
+                    x = lane.left() + (left - start) / span * lane.width()
+                    width = (right - left) / span * lane.width()
+                    painter.fillRect(QRectF(x, lane.top(), max(1., width), lane.height()),
+                                     QColor(36, 99, 220, 45))
         hover = self._hover_index()
         indices = (hover, *(self._index_at(stamp) for stamp in self.markers))
         pointer = self._hover is not None and lanes[0].left() <= self._hover <= lanes[0].right()
@@ -951,7 +1006,7 @@ class MonitorPlot(QWidget):
         self._prepare_timer.start(0)
 
     def _interaction_frozen(self):
-        return self._scrolling or self._drag_marker is not None or self._hold_display
+        return self._scrolling or self._drag_marker is not None or self._range_dragging or self._hold_display
 
     def _prepare_one_lane(self):
         frame = self._prepared_frame
@@ -1081,7 +1136,7 @@ class MonitorPlot(QWidget):
 
     def _finish_paint_flags(self, freeze):
         self._mouse_repaint = False
-        if self._drag_marker is None:
+        if self._drag_marker is None and not self._range_dragging:
             self._hold_display = False
         if not freeze:
             self._data_refresh_requested = False
@@ -1362,7 +1417,7 @@ class MonitorDialog(ManagedDialog):
         self.clear_button = button("清空数据", self.clear, "flat", "clear")
         self.clear_button.setToolTip("清空当前采样数据与标记")
         self.export_button = button("导出数据", self.export_data, "flat", "export")
-        self.export_button.setToolTip("导出全部保留的采样数据：ZIP 无损压缩（解压后为 CSV）或普通 CSV")
+        self.export_button.setToolTip("左键拖选曲线时间段后仅导出选区，未选则导出全部保留数据；右键清除选区。支持 ZIP 或 CSV")
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
@@ -1832,10 +1887,18 @@ class MonitorDialog(ManagedDialog):
             self._set_status("还没有可导出的数据。", "warn")
             return None
         signed = self.signed_check.isChecked()
-        return dict(path=path, times=buffer.times[:],
-                    columns=[buffer.column(index, signed)[:] for index in range(len(self.monitored))],
-                    failures=[column[:] for column in buffer.failures],
-                    monitored=tuple(self.monitored), count=len(buffer), dropped=buffer.dropped, run=self._runs)
+        begin, end = 0, len(buffer)
+        if self.plot.export_range is not None:
+            first, last = self.plot.export_range
+            begin, end = bisect_left(buffer.times, first), bisect_right(buffer.times, last)
+        if begin >= end:
+            self._set_status("选区内没有可导出的采样数据。", "warn")
+            return None
+        return dict(path=path, times=buffer.times[begin:end],
+                    columns=[buffer.column(index, signed)[begin:end] for index in range(len(self.monitored))],
+                    failures=[array("I", (i - begin for i in column[bisect_left(column, begin):bisect_left(column, end)]))
+                              for column in buffer.failures],
+                    monitored=tuple(self.monitored), count=end - begin, dropped=buffer.dropped, run=self._runs)
 
     @staticmethod
     def _write_export(request):

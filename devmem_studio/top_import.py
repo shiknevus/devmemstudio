@@ -90,7 +90,8 @@ VIEW_SETS = {
     "task_c": _channel_set("C"),
     # Report/ack registers belong to the interrupt handshake, not the channel trigger view.
     "irq": frozenset({"IRQ_REG1", "IRQ_REG2", "A_TX_RSULT_RPT", "B_TX_RSULT_RPT", "C_TX_RSULT_RPT"}),
-    "debug": frozenset({"DEBUG_REG1", "DEBUG_REG2", "DEBUG_REG3"}),
+    # DEBUG_REG1..5: RTL 调试寄存器（1..3 行为状态机历史，4/5 帧计数/控制标志等）。
+    "debug": frozenset("DEBUG_REG%d" % index for index in range(1, 6)),
 }
 
 

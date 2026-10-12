@@ -68,7 +68,7 @@ VIEW_TOOLTIPS = {"all": "该组件类型的全部实现寄存器",
                  "task_c": "C 通道：周期心跳行为与 C_GAP_CRL 周期",
                  "irq": "中断寄存器与 A/B/C 上报应答（PS 写 TX_RSULT_RPT 应答 0x51/0x52）",
                  "param": "该类型实现(PARAM)寄存器，名称含实际信号名，含义见悬停注释",
-                 "debug": "行为状态机历史(DEBUG_REG，每字节一个状态)"}
+                 "debug": "调试寄存器(DEBUG_REG1..5：状态机历史、帧计数/控制标志等)"}
 
 
 class _SidebarRail(QWidget):

@@ -1,4 +1,5 @@
 """Register monitor: board sampler script, stream parser, sample buffer and plot."""
+from array import array
 import os
 import inspect
 import random
@@ -486,6 +487,44 @@ class DialogTests(unittest.TestCase):
                 self.assertEqual(self.dialog.export_csv(), path)
             self.assertIn('已丢弃 3 点', self.dialog.status.text())
             self.assertEqual(len(Path(path).read_text(encoding='utf-8-sig').splitlines()), 7)
+
+    def test_export_with_selected_range_slices_times_columns_and_failures(self):
+        self.dialog.monitored = [('R0', 0x1000), ('R1', 0x1004)]
+        buffer = MonitorBuffer(2)
+        buffer.extend([(float(i), (100 + i, 200 + i)) for i in range(9)])
+        self.dialog.buffer = buffer
+        self.dialog.plot.set_series(buffer, ['R0', 'R1'], [0x1000, 0x1004])
+        # A failed read at absolute sample 5 must stay a blank row inside the slice.
+        buffer.failures[0] = array('I', [5])
+        self.dialog.plot.export_range = (2.0, 6.0)
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'monitor.csv')
+            with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=(path, '')):
+                self.assertEqual(self.dialog.export_csv(), path)
+            rows = Path(path).read_text(encoding='utf-8-sig').splitlines()
+        self.assertEqual(len(rows), 6)   # header + samples 2..6 (5 rows)
+        self.assertEqual(rows[0], 'time_s,R0 (0x00001000),R1 (0x00001004)')
+        self.assertEqual(rows[1], '2.000000,102,202')
+        self.assertEqual(rows[2], '3.000000,103,203')
+        self.assertEqual(rows[3], '4.000000,104,204')
+        self.assertEqual(rows[4], '5.000000,,205')   # R0 failed at sample 5
+        self.assertEqual(rows[5], '6.000000,106,206')
+        self.assertIn('已导出保留的 5 点', self.dialog.status.text())
+
+    def test_export_with_selected_range_outside_data_warns_and_skips(self):
+        self.dialog.monitored = [('R0', 0x1000)]
+        buffer = MonitorBuffer(1)
+        buffer.extend([(float(i), (i,)) for i in range(9)])
+        self.dialog.buffer = buffer
+        self.dialog.plot.set_series(buffer, ['R0'], [0x1000])
+        self.dialog.plot.export_range = (50.0, 60.0)
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / 'monitor.csv')
+            with patch('devmem_studio.monitor.QFileDialog.getSaveFileName', return_value=(path, '')):
+                self.assertIsNone(self.dialog.export_csv())
+            self.assertFalse(Path(path).exists())
+        self.assertIn('选区内没有可导出的采样数据', self.dialog.status.text())
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -1716,6 +1755,48 @@ class PlotTests(unittest.TestCase):
             self.assertEqual(plot.markers, [None, None])
             QTest.mouseClick(plot, Qt.LeftButton, pos=self.mark_position(plot, 8))
             self.assertEqual(plot.markers, [8.0, None])
+        finally:
+            plot.close()
+
+    def test_left_drag_selects_export_range_and_restores_markers(self):
+        plot = self.marker_plot()
+        try:
+            # A simple click keeps placing markers and never opens a range.
+            QTest.mouseClick(plot, Qt.LeftButton, pos=self.mark_position(plot, 3))
+            self.assertEqual(plot.markers, [3.0, None])
+            self.assertIsNone(plot.export_range)
+            # A drag across the chart selects an export range instead of a marker.
+            first = self.mark_position(plot, 2)
+            last = self.mark_position(plot, 6)
+            QTest.mousePress(plot, Qt.LeftButton, pos=first)
+            QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(last), QPointF(last),
+                                                     Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=last)
+            self.assertEqual(plot.markers, [3.0, None])   # markers from before the drag survive
+            self.assertIsNotNone(plot.export_range)
+            begin, end = plot.export_range
+            self.assertLessEqual(begin, 2.0)
+            self.assertGreaterEqual(end, 6.0)
+            self.assertFalse(plot._hold_display)   # released drag no longer freezes the chart
+            # Right-click clears the selected range.
+            QTest.mouseClick(plot, Qt.RightButton, pos=last)
+            self.assertIsNone(plot.export_range)
+        finally:
+            plot.close()
+
+    def test_drag_outside_data_clamps_export_range_to_retained_samples(self):
+        plot = self.marker_plot()
+        try:
+            first = self.mark_position(plot, 2)
+            outside = plot.lanes()[0].right() + 50
+            QTest.mousePress(plot, Qt.LeftButton, pos=first)
+            QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(outside, plot.lanes()[0].center().y()),
+                                                     QPointF(outside, plot.lanes()[0].center().y()),
+                                                     Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            QTest.mouseRelease(plot, Qt.LeftButton, pos=QPoint(round(outside), round(plot.lanes()[0].center().y())))
+            self.assertIsNotNone(plot.export_range)
+            self.assertEqual(plot.export_range[1], 10.0)   # last retained sample
+            self.assertEqual(plot.export_range[0], 2.0)
         finally:
             plot.close()
 

@@ -1,6 +1,6 @@
 {
   "schema": 8,
-  "generated_at": "2026-10-11T11:34:23",
+  "generated_at": "2026-10-12T18:26:46+08:00",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -15896,6 +15896,20 @@
           ]
         },
         {
+          "offset": "0x184",
+          "name": "PARAM54",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_m2s_w0_o"
+        },
+        {
+          "offset": "0x188",
+          "name": "PARAM55",
+          "width": 32,
+          "readonly": true,
+          "signal": "dbg_s2m_w0_o"
+        },
+        {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
@@ -15968,11 +15982,25 @@
           "name": "DEBUG_REG3",
           "width": 32,
           "readonly": true
+        },
+        {
+          "offset": "0x1F8",
+          "name": "DEBUG_REG4",
+          "width": 32,
+          "readonly": true
+        },
+        {
+          "offset": "0x1FC",
+          "name": "DEBUG_REG5",
+          "width": 32,
+          "readonly": true
         }
       ],
       "notes": {
         "PARAM4": "home touch speed",
         "PARAM52": "out cmd [2]rst [1]son [0]dir",
+        "PARAM54": "m2s word0 sent",
+        "PARAM55": "slave echo of word0",
         "PARAM64": "fwd limit (hw|soft)",
         "PARAM65": "servo ready",
         "PARAM66": "servo done",

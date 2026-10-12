@@ -1,4 +1,4 @@
-# 寄存器调试工作台 5.3.9
+# 寄存器调试工作台 5.4.0
 
 Auth：szzhang / cgliu / bxli
 
@@ -10,7 +10,7 @@ Auth：szzhang / cgliu / bxli
 
 </div>
 
-当前发布包：**`DevmemStudio-5.3.9-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.3.9**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.3.9 验收记录](docs/VALIDATION_5.3.9.md)。
+当前发布包：**`DevmemStudio-5.4.0-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.4.0**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.4.0 验收记录](docs/VALIDATION_5.4.0.md)。
 
 <div align="center">
 
@@ -18,12 +18,18 @@ Auth：szzhang / cgliu / bxli
 | --- | --- |
 | 下载后的运行与升级 | [直接运行 EXE](#直接运行-exe) |
 | 连接板卡、导入 top、调试寄存器 | [使用流程](#使用流程) |
-| 查看本次变化 | [5.3.9 发布](#539-发布2026-10-11) |
+| 查看本次变化 | [5.4.0 发布](#540-发布2026-10-12) |
 | 找配置、缓存或日志 | [配置与日志](#配置与日志) |
 | 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
 | 排查启动、监视或构建问题 | [常见问题](#常见问题) |
 
 </div>
+
+## 5.4.0 发布（2026-10-12）
+
+- 调试页签补全 `DEBUG_REG4/5`：`ec_slv_pul_axis` 等控件新启用的调试寄存器（帧计数/控制标志）不再只出现在「全部」页签，更新控件后「调试」页签一并显示；悬停说明同步更新。
+- 寄存器监视支持按时间段导出：在曲线图上按住左键拖选时间范围（蓝色高亮选区），点「导出数据」只导出该范围内的采样点；未选择时仍导出全部保留数据，右键清除选区。选区按采样时间精确切分，读取失败的空值行在选区内同样正确对齐。
+- 打包内置寄存器表随最新 RTL 刷新：`ec_slv_pul_axis` 增加 `DEBUG_REG4/5` 与 `PARAM54/55`（m2s/s2m word0）寄存器定义。
 
 ## 5.3.9 发布（2026-10-11）
 
@@ -670,11 +676,11 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 
 ## 直接运行 EXE
 
-解压 **`DevmemStudio-5.3.7-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
+解压 **`DevmemStudio-5.4.0-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
 
 可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
 
-从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.3.7**。之后可通过底部“检查更新”在线升级。
+从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.4.0**。之后可通过底部“检查更新”在线升级。
 
 本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
@@ -771,7 +777,7 @@ Paramiko 5.0 移除了 RSA/SHA-1 签名和 SHA-1 密钥交换，见[官方变更
 - 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
 - EXE 构建及隔离验收：PyInstaller 生成 `build/dist/_runtime/`，封装为候选 `build/DevmemStudio.exe`，再单独复制候选 EXE 到隔离目录，验证首次解压、损坏缓存修复和旧缓存清理。
 
-三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.3.7-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
+三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.4.0-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
 
 <div align="center">
 
