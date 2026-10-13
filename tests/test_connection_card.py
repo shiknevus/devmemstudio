@@ -11,7 +11,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QScrollArea
+from PySide6.QtWidgets import QApplication, QScrollArea, QTreeWidgetItem
 from devmem_studio.core import CommandError, ConfigStore, DemoSession
 from devmem_studio.serial_session import SerialSession
 from devmem_studio.theme import STYLE
@@ -133,7 +133,7 @@ class ConnectionCardTests(unittest.TestCase):
 
         class Refused(DemoSession):
             def connect(self, *args, **kwargs):
-                raise OSError("connection refused")
+                raise CommandError("SSH 算法不兼容")
 
         class Cancelled(DemoSession):
             def connect(self, *args, **kwargs):
@@ -150,6 +150,69 @@ class ConnectionCardTests(unittest.TestCase):
             window.connect_button.click()
             self.settle(lambda: not window._busy)
         self.assertFalse(window.ssh_section.is_expanded())
+
+    def test_refused_ssh_keeps_retrying_and_component_tree_scrolls_until_cancel(self):
+        window = self.open(host="192.0.2.10", username="root")
+        attempts = []
+
+        class Refused(DemoSession):
+            def connect(self, *args, **kwargs):
+                attempts.append(time.monotonic())
+                raise ConnectionRefusedError("connection refused")
+
+        with patch("devmem_studio.window.SshSession", Refused):
+            window.connect_button.click()
+            self.settle(lambda: len(attempts) >= 2)
+            self.assertTrue(window._busy)
+            self.assertEqual(window.connect_button.text(), "取消")
+            self.assertTrue(window.component_tree.isEnabled())
+            self.assertTrue(window.component_search.isEnabled())
+            tree = window.component_tree
+            for index in range(120):
+                tree.addTopLevelItem(QTreeWidgetItem([f"测试组件 {index}"]))
+            tree.expandAll()
+            self.app.processEvents()
+            scrollbar = tree.verticalScrollBar()
+            self.assertGreater(scrollbar.maximum(), 0)
+            QTest.keyClick(scrollbar, Qt.Key_End)
+            self.assertGreater(scrollbar.value(), 0)
+            QTest.keyClick(scrollbar, Qt.Key_Home)
+            self.assertEqual(scrollbar.value(), 0)
+            before = len(attempts)
+            window.connect_button.click()
+            self.settle(lambda: not window._busy)
+            self.assertEqual(len(attempts), before)
+        self.assertFalse(window.connected)
+        self.assertEqual(window.connect_button.text(), "连接")
+
+    def test_export_defaults_use_underscores_in_all_generated_names(self):
+        window = self.open()
+        names = []
+
+        def save_dialog(_parent, _title, name, _filters):
+            names.append(name)
+            return "", ""
+
+        with patch("devmem_studio.window.QFileDialog.getSaveFileName", side_effect=save_dialog):
+            window.export_logs()
+            window.export_snapshot()
+            window.connected = True
+            window.download_board_log()
+            window.connected = False
+        from devmem_studio.monitor import MonitorBuffer, MonitorDialog
+        dialog = MonitorDialog(lambda: None)
+        try:
+            dialog.buffer = MonitorBuffer(1)
+            dialog.buffer.extend([(0., (1,))])
+            with patch("devmem_studio.monitor.QFileDialog.getSaveFileName", side_effect=save_dialog):
+                dialog.export_data()
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+        self.assertEqual(len(names), 4)
+        for name in names:
+            self.assertNotIn("-", name)
+            self.assertRegex(name, r"_\d{8}_\d{6}\.(log|zip)$")
 
     def test_serial_line_tracks_connecting_and_connected_states(self):
         window = self.open()

@@ -147,7 +147,6 @@ class MonitorPlot(QWidget):
     LANE_MIN_HEIGHT = 88
     AXIS_HEIGHT = 26
     MIN_ZOOM = 0.25
-    MAX_ZOOM = 64.0
     ZOOM_STEP = 1.25
 
     def __init__(self, parent=None):
@@ -157,6 +156,7 @@ class MonitorPlot(QWidget):
         self.offsets = []
         self.columns = []   # buffer column of each lane; None = no data
         self.zoom_factor = 1.0
+        self.sample_interval_s = MONITOR_MIN_INTERVAL_MS / 1000
         self._view_range = None
         self.signed = False
         self.highlight = None   # lane of the register picked in the list
@@ -260,22 +260,37 @@ class MonitorPlot(QWidget):
         times = self.buffer.times if self.buffer else array("d")
         end = times[-1] if times else 0.0
         earliest = times[0] if times else 0.0
-        span = max(end - earliest, 1.0) / self.zoom_factor
+        span = max(self.minimum_time_span(), max(end - earliest, 1.0) / self.zoom_factor)
         begin = max(earliest, end - span)
         return begin, max(end, begin + span)
 
+    def minimum_time_span(self):
+        return 2 * self.sample_interval_s
+
+    def maximum_zoom(self):
+        # An anchored view may stay parked while new samples extend the buffer.
+        # Its scale is based on the displayed window, not the growing history.
+        if self._view_range is not None:
+            base_span = (self._view_range[1] - self._view_range[0]) * self.zoom_factor
+        else:
+            times = self.buffer.times if self.buffer else ()
+            base_span = max(times[-1] - times[0], 1.0) if times else 1.0
+        return max(1.0, base_span / self.minimum_time_span())
+
     def set_zoom(self, factor, anchor_x=None):
-        factor = max(self.MIN_ZOOM, min(self.MAX_ZOOM, factor))
+        if anchor_x is None:
+            self._view_range = None
+        factor = max(self.MIN_ZOOM, min(self.maximum_zoom(), factor))
         if anchor_x is None:
             self._view_range = None
         else:
-            if factor == self.zoom_factor:
+            if factor == self.zoom_factor and self._view_range is not None:
                 return
             begin, end = self.time_range()
             lane = self.lanes()[0]
             fraction = max(0.0, min(1.0, (anchor_x - lane.left()) / lane.width()))
             anchor = begin + fraction * (end - begin)
-            span = (end - begin) * self.zoom_factor / factor
+            span = max(self.minimum_time_span(), (end - begin) * self.zoom_factor / factor)
             begin = anchor - fraction * span
             self._view_range = (begin, begin + span)
         if factor != self.zoom_factor:
@@ -446,8 +461,6 @@ class MonitorPlot(QWidget):
     def _begin_scroll(self):
         self._scrolling = True
         self._scroll_idle.start()
-        self._prepare_timer.stop()
-        self._prepared_frame = None   # prioritize tiles entering the viewport
 
     def scroll_changed(self, _value=None):
         self._begin_scroll()
@@ -455,8 +468,6 @@ class MonitorPlot(QWidget):
 
     def _scroll_finished(self):
         self._scrolling = False
-        self._prepared_frame = None
-        self._prepare_timer.stop()
         self.refresh_data()
 
     def header_texts(self, column):
@@ -1064,7 +1075,7 @@ class MonitorPlot(QWidget):
         self._prepare_timer.start(0)
 
     def _interaction_frozen(self):
-        return (self._scrolling or self._drag_marker is not None or self._range_dragging
+        return (self._drag_marker is not None or self._range_dragging
                 or self._range_resize is not None or self._hold_display)
 
     def _prepare_one_lane(self):
@@ -1222,8 +1233,7 @@ class MonitorPlot(QWidget):
         geometry = self._scene_geometry()
         revision = self.buffer.revision if self.buffer is not None else 0
         changed = revision != self._scene_revision
-        # A scroll or a marker click must keep the frame the pointer was aimed
-        # at. Rebuilding here both stalls the wheel and shifts A/B off the cursor.
+        # Marker gestures keep their time coordinates; vertical scrolling stays live.
         freeze = self._interaction_frozen()
         structural = self._scene_key is None or geometry != self._scene_key
         if self._scrolling:
@@ -1241,9 +1251,13 @@ class MonitorPlot(QWidget):
                 self._trace_cache.clear()
                 self._cache_key = None
                 self._scene_cache = None
+            elif changed and not freeze:
+                # Prepare visible lanes between input events and commit their
+                # time axis together. Wheel paints never render the traces.
+                self._start_prepare(geometry, exposed, ratio)
             self._blit_lanes(painter, exposed, ratio)
             self._paint_readouts(painter, exposed, *self._scene_range)
-            self._finish_paint_flags(True)
+            self._finish_paint_flags(freeze)
             self._sync_axis_view()
             return
         update_data = (not freeze and changed and (not self._mouse_repaint or self._data_refresh_requested))
@@ -1307,7 +1321,7 @@ class _MonitorBridge(QObject):
 
 
 class _MonitorRegisterDelegate(QStyledItemDelegate):
-    """Toggle checks across the whole row, using one release for each click; mark the focused row."""
+    """Toggle immediately on press across the whole row; mark the focused row."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1332,7 +1346,7 @@ class _MonitorRegisterDelegate(QStyledItemDelegate):
                     or not flags & Qt.ItemIsEnabled or not flags & Qt.ItemIsUserCheckable
                     or not option.rect.contains(event.position().toPoint())):
                 return False
-            if event.type() == QEvent.MouseButtonRelease:
+            if event.type() == QEvent.MouseButtonPress:
                 checked = index.data(Qt.CheckStateRole) == Qt.Checked.value
                 return model.setData(index, Qt.Unchecked.value if checked else Qt.Checked.value, Qt.CheckStateRole)
             return True
@@ -1425,6 +1439,7 @@ class MonitorDialog(ManagedDialog):
                                       "一次映射、循环读取，减少重复启动 devmem 的开销；无法使用时改为每点每寄存器启动一次 devmem，"
                                       "寄存器越多、间隔越小，CPU 占用越高。跟不上时按实际速度采样并在状态栏提示。")
         self.interval_spin.valueChanged.connect(self.interval_changed)
+        self.interval_spin.valueChanged.connect(lambda value: setattr(self.plot, "sample_interval_s", value / 1000))
         self.start_button = button("开始监视", self.toggle, "primary", "play")
         self.start_button.setFixedWidth(control_width)
         # Header: title on the left, run controls on the right.
@@ -1449,6 +1464,7 @@ class MonitorDialog(ManagedDialog):
         self.search.addAction(icon("search", size=16), QLineEdit.LeadingPosition)
         self.search.textChanged.connect(self._filter_list)
         self.list = QListWidget()
+        self.list.setUniformItemSizes(True)
         self.list.setObjectName("monitorList")
         self.list.setItemDelegate(_MonitorRegisterDelegate(self.list))
         self.list.setSelectionMode(QListWidget.NoSelection)   # the delegate marks the focused row
@@ -1480,12 +1496,14 @@ class MonitorDialog(ManagedDialog):
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
+        self.plot.sample_interval_s = self.interval_spin.value() / 1000
         self.plot.signed = self.settings["signed"]
         self.zoom_label = label("100%", "muted")
-        self.zoom_label.setFixedWidth(58)
+        self.zoom_label.setMinimumWidth(58)
+        self.zoom_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         self.zoom_button = button("Zoom", lambda: self.plot.set_zoom(1.0), "flat", "axis")
-        self.zoom_button.setToolTip("查看全局图表：恢复 100% 比例，显示全部保留的数据。\nCtrl + 滚轮以鼠标位置为中心缩放。")
+        self.zoom_button.setToolTip("查看全局图表：恢复 100% 比例，显示全部保留的数据。\nCtrl + 滚轮以鼠标位置为中心缩放，最小窗口为两倍采样间隔。")
         self.zoom_button.setAccessibleName("Zoom：查看全局图表")
         self.plot.zoom_changed.connect(self._zoom_changed)
         self.marker_label = label("A: —   B: —   Δt: —", "muted")
@@ -1765,6 +1783,7 @@ class MonitorDialog(ManagedDialog):
         self._last_data = None
         self._shown_pause = 0
         self.interval_ms = interval
+        self.plot.sample_interval_s = interval / 1000
         self.buffer = MonitorBuffer(len(chosen))
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
         self._sync_highlight()
@@ -1885,9 +1904,6 @@ class MonitorDialog(ManagedDialog):
         return int(idle) if idle > max(MONITOR_STALE_TIMEOUT_S, self.interval_ms / 1000 * 3 + 0.5) else 0
 
     def _refresh(self):
-        # Status text asks the layout to recompute. Skip that while the wheel is moving.
-        if self.plot._scrolling:
-            return
         paused = self._paused_seconds()
         if self._dirty or paused != self._shown_pause:
             self._shown_pause = paused
@@ -1935,7 +1951,7 @@ class MonitorDialog(ManagedDialog):
             self._set_status("还没有可导出的数据。", "warn")
             return None
         path, selected_filter = QFileDialog.getSaveFileName(
-            self, "导出监视数据", f"monitor-{datetime.now():%Y%m%d-%H%M%S}.zip", EXPORT_FILTERS)
+            self, "导出监视数据", f"monitor_{datetime.now():%Y%m%d_%H%M%S}.zip", EXPORT_FILTERS)
         if not path:
             return None
         path = export_path(path, selected_filter)

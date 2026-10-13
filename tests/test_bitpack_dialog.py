@@ -97,6 +97,108 @@ class StyledPackDialogTests(unittest.TestCase):
         self.assertIn("未找到", self.dialog.status.text())
         self.assertEqual(self.dialog.preference_snapshot()["source_directory"], str(folder))
 
+    def test_folder_bins_are_optional_and_versions_make_one_mixed_package(self):
+        folder = self.root / "mixed"
+        folder.mkdir()
+        bit = folder / "fpga.bit"
+        bit.write_bytes(b"fpga")
+        for index in range(2):
+            nested = folder / str(index)
+            nested.mkdir()
+            (nested / "slave.bin").write_bytes(bytes([index]))
+        self.dialog.scan_directory(folder)
+        self.settle(lambda: not self.dialog.busy)
+        self.assertEqual(self.dialog.bin_table.rowCount(), 2)
+        self.assertEqual(self.dialog.selected_bins(), [])
+        self.dialog.project.setText("MIXED")
+        self.dialog.include_bin.setChecked(True)
+        with patch("devmem_studio.bitpack_dialog.QMessageBox.warning") as warning:
+            self.dialog.start_pack()
+        warning.assert_called_once()
+        self.assertFalse(self.dialog.busy)
+        for index in range(2):
+            self.dialog.bin_table.item(index, 2).setText(f"V{index + 1}")
+        self.dialog.start_pack()
+        self.settle(lambda: not self.dialog.busy)
+        with zipfile.ZipFile(self.dialog._result_path) as archive:
+            self.assertEqual(archive.namelist(), ["sunny_fpga.bit", "V1/slave.bin", "V2/slave.bin"])
+            self.assertEqual(archive.read("V2/slave.bin"), b"\x01")
+
+    def test_switching_to_a_single_source_file_drops_scanned_bins(self):
+        folder = self.root / "source"
+        folder.mkdir()
+        bit = folder / "fpga.bit"
+        bit.write_bytes(b"fpga")
+        (folder / "slave.bin").write_bytes(b"bin")
+        self.dialog.scan_directory(folder)
+        self.settle(lambda: not self.dialog.busy)
+        self.assertEqual(self.dialog.bin_table.rowCount(), 1)
+        # Paste a different .bit path into the source box and commit (file mode):
+        # the previous folder's bins must not leak into the new pack.
+        other = self.root / "other.bit"
+        other.write_bytes(b"other")
+        self.dialog.source.setText(str(other))
+        self.dialog._source_dirty = True
+        self.dialog._commit_source_edit()
+        self.assertEqual(self.dialog._source_mode, "file")
+        self.assertEqual(self.dialog.bin_table.rowCount(), 0)
+        self.assertFalse(self.dialog.bin_table.isVisible())
+        self.assertTrue(self.dialog.include_bit.isChecked())
+        self.dialog.include_bin.setChecked(True)   # even when the toggle is on, no stale bins remain
+        self.assertEqual(self.dialog.selected_bins(), [])
+        self.dialog.project.setText("SWITCH")
+        self.dialog.start_pack()
+        self.settle(lambda: not self.dialog.busy)
+        with zipfile.ZipFile(self.dialog._result_path) as archive:
+            self.assertEqual(archive.namelist(), ["sunny_fpga.bit"])
+            self.assertEqual(archive.read("sunny_fpga.bit"), b"other")
+
+    def test_unchecked_bit_and_bin_rows_are_excluded(self):
+        bin1, bin2 = self.root / "slave1.bin", self.root / "slave2.bin"
+        bin1.write_bytes(b"one")
+        bin2.write_bytes(b"two")
+        self.dialog.scan_directory(self.root)
+        self.settle(lambda: not self.dialog.busy)
+        self.dialog.project.setText("BINONLY")
+        self.dialog.include_bit.setChecked(False)
+        self.dialog.include_bin.setChecked(True)
+        self.dialog.bin_table.item(1, 0).setCheckState(Qt.Unchecked)
+        self.dialog.start_pack()
+        self.settle(lambda: not self.dialog.busy)
+        with zipfile.ZipFile(self.dialog._result_path) as archive:
+            self.assertEqual(archive.namelist(), ["slave1.bin"])
+        self.dialog.include_bin.setChecked(False)
+        with patch("devmem_studio.bitpack_dialog.QMessageBox.warning") as warning:
+            self.dialog.start_pack()
+        warning.assert_called_once()
+        self.assertFalse(self.dialog.busy)
+
+    def test_bin_only_folder_can_pack_and_remembers_versions_and_checks(self):
+        folder = self.root / "bins_only"
+        folder.mkdir()
+        for name in ("one.bin", "two.BIN"):
+            (folder / name).write_bytes(name.encode())
+        self.dialog.scan_directory(folder)
+        self.settle(lambda: not self.dialog.busy)
+        self.assertFalse(self.dialog.include_bit.isChecked())
+        self.dialog.include_bin.setChecked(True)
+        self.dialog.project.setText("ONLY")
+        self.dialog.bin_table.item(0, 2).setText("V1")
+        self.dialog.bin_table.item(1, 0).setCheckState(Qt.Unchecked)
+        settings = self.dialog.preference_snapshot()
+        restored = BitPackDialog(directory=self.root, settings=settings)
+        try:
+            restored.show()
+            self.settle(lambda: not restored.busy and restored.bin_table.rowCount() == 2)
+            self.assertEqual(restored.selected_bins(), [(folder / "one.bin", "V1")])
+            restored.start_pack()
+            self.settle(lambda: not restored.busy)
+            with zipfile.ZipFile(restored._result_path) as archive:
+                self.assertEqual(archive.namelist(), ["V1/one.bin"])
+        finally:
+            restored.close()
+            restored.deleteLater()
+
     def test_restored_project_and_directories_override_fallback_without_losing_output(self):
         selected = self.root / "上次选择"
         output = self.root / "上次输出"
@@ -297,6 +399,21 @@ class CompactWindowTests(unittest.TestCase):
                     second.bit_pack_dialog.deleteLater()
                     second.close()
                     second.deleteLater()
+
+    def test_timeout_width_matches_folder_button_width(self):
+        self.window.open_bit_pack()
+        dialog = self.window.bit_pack_dialog
+        self.assertEqual(dialog.timeout.width(), dialog.choose_folder.width())
+        self.assertEqual(dialog.choose_output.width(), dialog.choose_folder.width())
+
+    def test_status_version_and_update_link_share_a_baseline(self):
+        self.app.processEvents()
+        version = self.window.version_label
+        update = self.window.update_button
+        row = self.window.statusBar().findChildren(type(version))
+        self.assertTrue(row)
+        baseline = lambda widget: widget.geometry().top() + (widget.height() + widget.fontMetrics().ascent() - widget.fontMetrics().height()) // 2
+        self.assertLessEqual(abs(baseline(version) - baseline(update)), 1)
 
     def test_compact_sidebar_is_fixed_tree_only_and_has_no_outer_scroll_area(self):
         self.window.resize(1280, 800)

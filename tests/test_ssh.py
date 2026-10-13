@@ -16,6 +16,7 @@ import paramiko
 from devmem_studio.catalog import DEFAULT_TYPES
 from devmem_studio.core import (SshSession, CommandError, HostKeyChangedError, DEFAULT_LOG_PATH, REGMON_RESOURCE,
                                 resource_path)
+from devmem_studio.core import connect_ssh_until_cancelled
 
 
 class BoardServer(paramiko.ServerInterface):
@@ -237,6 +238,61 @@ class BoardFixture:
         self.listener.close()
         self.server_thread.join(1)
         self.temp.cleanup()
+
+
+class NetworkRecoverySshTests(BoardFixture, unittest.TestCase):
+    connect_on_setup = False
+
+    def test_connect_started_offline_succeeds_after_network_recovers(self):
+        actual_connect_socket = self.session._connect_socket_abortably
+        ready = threading.Event()
+        attempts = []
+        messages = []
+
+        def attempt(*args):
+            attempts.append(len(attempts) + 1)
+            if not ready.is_set():
+                raise OSError(10051, "network unreachable")
+            return actual_connect_socket(*args)
+
+        def progress(message):
+            messages.append(message)
+            if len(attempts) == 2:
+                ready.set()
+
+        with patch.object(self.session, "_connect_socket_abortably", side_effect=attempt):
+            connect_ssh_until_cancelled(self.session, ("127.0.0.1", self.port, "test", "test", 2),
+                                       threading.Event(), progress, retry_delay=0)
+        self.assertTrue(self.session.alive)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(self.session._generation, 0)
+        self.assertEqual(self.session.run("pwd"), "/root")
+
+    def test_repeated_banner_timeouts_recover_when_server_finishes_starting(self):
+        actual_start_server = paramiko.Transport.start_server
+        accepts = []
+        failures = []
+        cancel = threading.Event()
+
+        def starting_server(transport, *args, **kwargs):
+            accepts.append(transport)
+            if len(accepts) <= 2:
+                time.sleep(.65)
+            return actual_start_server(transport, *args, **kwargs)
+
+        def progress(message):
+            failures.append(message)
+            if len(failures) > 10:
+                cancel.set()
+
+        with patch.object(paramiko.Transport, "start_server", starting_server), \
+                patch("devmem_studio.core.SSH_HANDSHAKE_TIMEOUT_S", .5):
+            connect_ssh_until_cancelled(self.session, ("127.0.0.1", self.port, "test", "test", .1),
+                                       cancel, progress, retry_delay=.01)
+        self.assertGreaterEqual(len(failures), 2)
+        self.assertTrue(self.session.alive)
+        self.assertEqual(self.session.run("pwd"), "/root")
 
 
 class BitUploadUnitTests(unittest.TestCase):

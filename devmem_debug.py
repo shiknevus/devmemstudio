@@ -54,15 +54,9 @@ def main():
         return run_smoke(app, Path(args.smoke_test))
     window = MainWindow()
     available = app.primaryScreen().availableGeometry()
-    saved_size = window.cfg.get('window_size', [1540, 960])
-    if not isinstance(saved_size, list) or len(saved_size) != 2 or not all(isinstance(x, int) for x in saved_size):
-        saved_size = [1540, 960]
-    # 只恢复上次窗口大小；小屏钳制与最小尺寸下放由 MainWindow.showEvent 里的
-    # _fit_to_screen 统一处理（旧写法 max(1180, …) 会在 <1180 宽的屏幕上先把
-    # 窗口强制拉大、再被 fit 收回，属重复且相反的两段逻辑）。
-    window.resize(saved_size[0], saved_size[1])
+    # MainWindow restores the saved normal size and maximized state separately.
     window.show()
-    if available.width() <= 1400 or available.height() <= 850:
+    if 'window_maximized' not in window.cfg and (available.width() <= 1400 or available.height() <= 850):
         window.showMaximized()
     launcher = os.environ.get('DEVMEMSTUDIO_LAUNCHER')
     if launcher and sys.platform == 'win32' and not args.offscreen:

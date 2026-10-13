@@ -47,6 +47,44 @@ def release_window_owner(hwnd):
     user32.SetWindowPos(wintypes.HWND(hwnd), None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
 
 
+def _with_taskbar(action):
+    ole32 = ctypes.OleDLL("ole32")
+    initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) >= 0
+    taskbar = ctypes.c_void_p()
+    try:
+        clsid = _Guid.parse("{56FDF344-FD6D-11d0-958A-006097C9A090}")
+        iid = _Guid.parse("{56FDF342-FD6D-11d0-958A-006097C9A090}")
+        if ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(taskbar)):
+            return False
+        try:
+            if _method(taskbar, 3)(taskbar):   # ITaskbarList::HrInit
+                return False
+            return action(taskbar)
+        finally:
+            _method(taskbar, 2)(taskbar)
+    except OSError:
+        return False
+    finally:
+        if initialized:
+            ctypes.windll.ole32.CoUninitialize()
+
+
+def hide_taskbar_tab(hwnd):
+    """Keep a real, independently minimizable window without another taskbar tab."""
+    return _with_taskbar(lambda taskbar: _method(taskbar, 5, wintypes.HWND)(taskbar, wintypes.HWND(hwnd)) == 0)
+
+
+def select_taskbar_tab(hwnd, other_hwnds):
+    """Expose only the target window; Windows restores that exact HWND on click."""
+    def select(taskbar):
+        remove = _method(taskbar, 5, wintypes.HWND)
+        for other in other_hwnds:
+            if other != hwnd and remove(taskbar, wintypes.HWND(other)):
+                return False
+        return _method(taskbar, 4, wintypes.HWND)(taskbar, wintypes.HWND(hwnd)) == 0
+    return _with_taskbar(select)
+
+
 class _Guid(ctypes.Structure):
     _fields_ = [("data1", wintypes.DWORD), ("data2", wintypes.WORD), ("data3", wintypes.WORD),
                 ("data4", ctypes.c_ubyte * 8)]

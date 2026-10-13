@@ -1,6 +1,6 @@
 {
   "schema": 8,
-  "generated_at": "2026-10-12T22:49:45+08:00",
+  "generated_at": "2026-10-13T12:46:20+08:00",
   "source": {
     "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
     "reg_addr_map": "reg_addr_pl.vh",
@@ -13501,6 +13501,13 @@
           ]
         },
         {
+          "offset": "0x180",
+          "name": "PARAM53",
+          "width": 32,
+          "readonly": false,
+          "signal": "i_wheel_spd"
+        },
+        {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
@@ -13577,6 +13584,7 @@
       ],
       "notes": {
         "PARAM4": "home touch speed",
+        "PARAM53": "signed wheel spd",
         "PARAM52": "diff out [1]dir [0]pulse",
         "PARAM64": "fwd limit (hw|soft)",
         "PARAM65": "servo ready",

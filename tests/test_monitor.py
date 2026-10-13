@@ -656,6 +656,16 @@ class DialogTests(unittest.TestCase):
         QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(32)).center())
         self.assertEqual(self.dialog.checked_addresses(), chosen[1:] + [0x1080])
 
+    def test_register_check_responds_on_press_before_release(self):
+        self.dialog.set_registers("A", self.registers)
+        view = self.show_register_list()
+        position = view.visualItemRect(view.item(0)).center()
+        QTest.mousePress(view.viewport(), Qt.LeftButton, pos=position)
+        self.assertEqual(self.dialog.checked_addresses(), [0x1000])
+        self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
+        QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=position)
+        self.assertEqual(self.dialog.checked_addresses(), [0x1000])
+
     def test_32_register_run_scrolls_focus_and_exports_all_columns(self):
         import csv
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
@@ -1046,8 +1056,8 @@ class DialogTests(unittest.TestCase):
         self.app.processEvents()
         plot = self.dialog.plot
         send_plot_wheel(plot, 6000)
-        self.assertEqual(plot.zoom_factor, plot.MAX_ZOOM)
-        self.assertEqual(self.dialog.zoom_label.text(), "6400%")
+        self.assertAlmostEqual(plot.zoom_factor, plot.maximum_zoom())
+        self.assertAlmostEqual(plot.time_range()[1] - plot.time_range()[0], 2 * self.dialog.interval_spin.value() / 1000)
         send_plot_wheel(plot, -6000)
         self.assertEqual(plot.zoom_factor, plot.MIN_ZOOM)
         self.assertEqual(self.dialog.zoom_label.text(), "25%")
@@ -1190,7 +1200,7 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(len(self.dialog.buffer), 0)
         self.assertEqual(self.dialog.status.text(), status)
 
-    def test_wheel_scroll_keeps_the_drawn_frame_while_samples_are_pending(self):
+    def test_wheel_scroll_refreshes_curves_and_time_axis_without_waiting_for_release(self):
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(32)]
         self.dialog.set_registers("32 registers", registers, [reg["_address"] for reg in registers])
         self.dialog.monitored = [(reg["name"], reg["_address"]) for reg in registers]
@@ -1203,19 +1213,25 @@ class DialogTests(unittest.TestCase):
         self.dialog.show()
         self.app.processEvents()
         plot.repaint()
-        drawn = plot._display_time_range()
-        revision = plot._scene_revision
-        buffer.extend([(11.0, tuple(range(32)))])
         scrollbar = self.dialog.plot_scroll.verticalScrollBar()
-        send_plot_wheel(plot, -240, Qt.NoModifier, position=plot.lanes()[0].center())
-        self.app.processEvents()
+        self.dialog._set_state("running")
+        self.dialog._epoch = 7
+        for stamp in range(11, 15):
+            self.dialog._samples(7, [(float(stamp), tuple(range(32)))])
+            send_plot_wheel(plot, -120, Qt.NoModifier, position=plot.lanes()[0].center())
+            self.dialog._refresh()
+            # Keep generating scroll events so the idle/release timer never fires.
+            deadline = time.monotonic() + 2
+            while plot._scene_revision != buffer.revision and time.monotonic() < deadline:
+                plot._begin_scroll()
+                self.app.processEvents()
+                QTest.qWait(5)
+            self.assertTrue(plot._scrolling)
+            self.assertEqual(plot._scene_revision, buffer.revision)
+            self.assertEqual(plot._display_time_range()[1], float(stamp))
+            self.assertTrue(plot._lane_scenes)
         self.assertGreater(scrollbar.value(), 0)
-        self.assertEqual(plot._display_time_range(), drawn)
-        self.assertEqual(plot._scene_revision, revision)
-        self.assertTrue(plot._scrolling)
         plot._scroll_finished()
-        plot.repaint()
-        self.assertEqual(plot._display_time_range()[1], 11.0)
         self.assertFalse(plot._scrolling)
 
     def test_time_axis_stays_under_the_viewport_and_follows_new_samples(self):
@@ -1599,6 +1615,32 @@ class PlotTests(unittest.TestCase):
             self.assertAlmostEqual(begin + 0.7 * (end - begin), 7.0)
         finally:
             plot.close()
+
+    def test_ctrl_wheel_reaches_two_sample_intervals_with_large_history(self):
+        for interval_ms in (5, 10, 100, 60000):
+            for duration in (1.0, 1000.0, 100000.0):
+                with self.subTest(interval_ms=interval_ms, duration=duration):
+                    plot = MonitorPlot()
+                    try:
+                        plot.resize(900, 320)
+                        plot.sample_interval_s = interval_ms / 1000
+                        buffer = MonitorBuffer(1)
+                        buffer.extend([(0.0, (1,)), (duration, (2,))])
+                        plot.set_series(buffer, ["R0"])
+                        lane = plot.lanes()[0]
+                        position = QPointF(lane.left() + .7 * lane.width(), lane.center().y())
+                        begin, end = plot.time_range()
+                        anchor = begin + .7 * (end - begin)
+                        for _ in range(5):
+                            send_plot_wheel(plot, 6000, position=position)
+                        begin, end = plot.time_range()
+                        self.assertAlmostEqual(end - begin, interval_ms * 2 / 1000, places=8)
+                        self.assertAlmostEqual(begin + .7 * (end - begin), anchor, places=8)
+                        buffer.extend([(duration + 1000, (3,))])
+                        send_plot_wheel(plot, 120, position=position)
+                        self.assertAlmostEqual(plot.time_range()[1] - plot.time_range()[0], interval_ms * 2 / 1000, places=8)
+                    finally:
+                        plot.close()
 
     def test_anchored_view_stays_fixed_on_new_samples_and_zoom_resets_at_same_scale(self):
         plot = self.marker_plot()

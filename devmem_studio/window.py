@@ -30,7 +30,7 @@ from . import updater
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
-                   normalize_remote_dir, remember_dir, MONITOR_MIN_INTERVAL_MS)
+                   normalize_remote_dir, remember_dir, MONITOR_MIN_INTERVAL_MS, connect_ssh_until_cancelled)
 from .monitor import MonitorDialog
 from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .console_screen import ScreenBuffer
@@ -43,8 +43,8 @@ from .widgets import (label, button, row, field, divider, restyle, ComboBox, Eli
 from .dialogs import (BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDialog, FileChoiceDialog,
                       file_time, show_help)
 
-# Fixed connect timeout for both SSH and serial: impatient users hit the red
-# cancel button instead of tuning a number.
+# Each SSH attempt is bounded; attempts continue until success or cancellation.
+# Serial keeps its existing overall timeout.
 CONNECT_TIMEOUT = 8
 WINDOW_DEFAULT_SIZE = (1540, 960)
 WINDOW_DESKTOP_MIN_SIZE = (1180, 740)
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.active_component = None
         self._pending_component = None
         self._poll_holds = 0   # >0 while a modal dialog must not race an auto-read
+        self._retry_note = (None, 0.0)   # last SSH retry note (text, time): logs throttle to 1/s per text
         self.view = "basic"
         self.rtl_base = None
         self.visible_regs = []
@@ -221,6 +222,15 @@ class MainWindow(QMainWindow):
                 self.load_top(Path(saved_top), quiet=True)
             else:
                 self.append_log("SYSTEM", f"上次导入的 top 文件不存在：{saved_top}；可重新导入。")
+        saved_size = self.cfg.get("window_size")
+        if (isinstance(saved_size, list) and len(saved_size) == 2
+                and all(type(size) is int and 64 <= size <= 16384 for size in saved_size)):
+            self.setMinimumSize(min(self.minimumWidth(), saved_size[0]), min(self.minimumHeight(), saved_size[1]))
+            self.resize(*saved_size)
+            self._apply_responsive_layout(force=True)
+            self._window_states._capture_owner_geometry()
+        if self.cfg.get("window_maximized") is True:
+            self.setWindowState(Qt.WindowMaximized)
 
     def _build(self):
         central = QWidget()
@@ -275,10 +285,17 @@ class MainWindow(QMainWindow):
         version_layout.setSpacing(gap)
         self.version_label = label(f"版本 {__version__}")
         self.update_button = LinkLabel("检查更新", "statusUpdate")
+        # Keep both text runs on the same typographic baseline. Aligning the
+        # whole row by center leaves the link one pixel low because QLabel and
+        # LinkLabel have different size hints.
+        self.version_label.setAlignment(Qt.AlignLeft | Qt.AlignBaseline)
+        self.update_button.setAlignment(Qt.AlignLeft | Qt.AlignBaseline)
         self.update_button.setToolTip("从 GitHub 检查新版本")
         self.update_button.clicked.connect(self.show_update_dialog)
-        for item in (self.counter_label, self.version_label, self.update_button):
-            version_layout.addWidget(item)
+        version_layout.addWidget(self.counter_label, 0, Qt.AlignBaseline)
+        version_layout.addWidget(self.version_label, 0, Qt.AlignBaseline)
+        version_layout.addWidget(self.update_button, 0, Qt.AlignBaseline)
+        version_layout.setAlignment(Qt.AlignBaseline)
         self.statusBar().addPermanentWidget(version_row)
 
     def _update_dialog(self):
@@ -2037,12 +2054,14 @@ class MainWindow(QMainWindow):
                         self.serial_remember):
             control.setEnabled(not self.serial_connected and not self._serial_busy)
         self.serial_connect_button.setEnabled(not self._closing)   # doubles as cancel while _serial_busy
-        for control in (self.component_tree, self.import_component_button, *self.view_buttons.values()):
+        self.component_tree.setEnabled((not self._busy or self._task_kind == "connect") and not self._closing)
+        for control in (self.import_component_button, *self.view_buttons.values()):
             control.setEnabled(not self._busy and not self._closing)
         # Filters only hide rows; keep them (and the value editor) live during polling
         # reads so each auto-read tick doesn't steal focus from what the user is typing.
         inputs_locked = self._busy and self._task_kind != "read"
-        for control in (self.component_search, self.access_filter, self.search):
+        self.component_search.setEnabled((not inputs_locked or self._task_kind == "connect") and not self._closing)
+        for control in (self.access_filter, self.search):
             control.setEnabled(not inputs_locked and not self._closing)
         self.monitor_button.setEnabled(bool(self.regs) and getattr(self, "address_valid", False) and not self._closing)
         # A top mismatched with the live device can hang the board; import only while disconnected.
@@ -2102,6 +2121,7 @@ class MainWindow(QMainWindow):
             # A connect in flight: the same button doubles as the cancel control.
             if self._task_kind == "connect":
                 self.append_log("SYSTEM", "已请求取消 SSH 连接。")
+                self.cancel.set()
                 self.session.close()   # closes the handshake socket → connect raises at once
             return
         if self.connected:
@@ -2139,11 +2159,15 @@ class MainWindow(QMainWindow):
             if approved_change:
                 session.replace_host_key(approved_change)
             try:
-                session.connect(host, port, user, password, timeout)
+                connect_ssh_until_cancelled(session, request, self.cancel, progress)
             except HostKeyChangedError as change:
                 return change
             return True
         def done(result):
+            if self.cancel.is_set():
+                session.close()
+                self._set_connection(False)
+                return
             if isinstance(result, HostKeyChangedError):
                 self._set_connection(False)
                 self.append_log("ERROR", str(result))
@@ -2722,7 +2746,7 @@ class MainWindow(QMainWindow):
     def download_board_log(self):
         if self._closing or not self.connected or self._busy:
             return
-        default_name = f"sunny-{datetime.now():%Y%m%d-%H%M%S}.log"
+        default_name = f"sunny_{datetime.now():%Y%m%d_%H%M%S}.log"
         path, _ = QFileDialog.getSaveFileName(self, "保存板端日志", default_name, "日志文件 (*.log);;所有文件 (*)")
         if not path:
             return
@@ -2783,6 +2807,15 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _task_progress(self, data):
         if self._closing:
+            return
+        if "message" in data:
+            # SSH retry notes arrive per failed attempt; only log a given
+            # message once per second so a broken link cannot flood the log.
+            text = str(data["message"])
+            now = time.monotonic()
+            if text != self._retry_note[0] or now - self._retry_note[1] >= 1.0:
+                self.append_log("SYSTEM", text)
+                self._retry_note = (text, now)
             return
         reg = data.get("register")
         if reg is not None:
@@ -3024,11 +3057,21 @@ class MainWindow(QMainWindow):
         self._refresh_serial_ports()
 
     def nativeEvent(self, event_type, message):
-        """WM_DEVICECHANGE (port arrival/removal) triggers an immediate port rescan."""
+        """Handle immediate serial hot-plug notifications."""
         if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
             try:
                 from ctypes import wintypes
                 msg = wintypes.MSG.from_address(int(message))
+                if msg.message >= 0xC000:
+                    import ctypes
+                    register = ctypes.windll.user32.RegisterWindowMessageW
+                    register.argtypes = [wintypes.LPCWSTR]
+                    register.restype = wintypes.UINT
+                    created = getattr(self, "_taskbar_created_message", None)
+                    if created is None:
+                        created = self._taskbar_created_message = register("TaskbarButtonCreated")
+                    if msg.message == created:
+                        self._window_states._queue_taskbar(force=True)
                 if msg.message == 0x0219 and msg.wParam in (0x8000, 0x8004):
                     self._ports_changed.start(150)
             except (TypeError, ValueError, OSError):
@@ -3417,7 +3460,7 @@ class MainWindow(QMainWindow):
         self._find_in_log(forward=True)
 
     def export_logs(self):
-        path, _ = QFileDialog.getSaveFileName(self, "导出会话日志", f"session_{datetime.now():%Y%m%d%H%M%S}.log", "日志文件 (*.log)")
+        path, _ = QFileDialog.getSaveFileName(self, "导出会话日志", f"session_{datetime.now():%Y%m%d_%H%M%S}.log", "日志文件 (*.log)")
         if path:
             try:
                 records = self._records_for(self.console_source)
@@ -3451,8 +3494,9 @@ class MainWindow(QMainWindow):
 
     def export_snapshot(self):
         stem = self.active_component["module_type"] if self.active_component else "registers"
+        stem = stem.replace("-", "_")
         path, selected_filter = QFileDialog.getSaveFileName(
-            self, "导出寄存器快照", f"registers-{stem}-{datetime.now():%Y%m%d-%H%M%S}.zip", EXPORT_FILTERS)
+            self, "导出寄存器快照", f"registers_{stem}_{datetime.now():%Y%m%d_%H%M%S}.zip", EXPORT_FILTERS)
         if path:
             path = export_path(path, selected_filter)
             try:
@@ -3476,7 +3520,7 @@ class MainWindow(QMainWindow):
                         serial_username=self.serial_user.text().strip(),
                         serial_password=self.serial_password.text(),
                         remember_serial_password=self.serial_remember.isChecked())
-        self.cfg["window_size"] = [self.width(), self.height()]
+        self._window_states.save_window_preferences()
         try:
             self.store.save(self.cfg)
         except OSError as exc:

@@ -5,6 +5,8 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtCore import QRect
 from devmem_studio.window_state import ManagedDialog, WindowStateCoordinator
 
 
@@ -19,6 +21,7 @@ class WindowStateTests(unittest.TestCase):
 
     def setUp(self):
         self.owner = QWidget()
+        self.owner.cfg = {}
         self.owner.resize(800, 600)
         self.owner._window_states = WindowStateCoordinator(self.owner)
         self.owner.show()
@@ -167,3 +170,172 @@ class WindowStateTests(unittest.TestCase):
         self.owner.showNormal()
         self.settle()
         self.assertEqual(observations, [(False, True, True)])
+
+    def test_taskbar_targets_the_last_minimized_child_and_native_restore_preserves_maximized_state(self):
+        first, last = self.dialog(), self.dialog()
+        first.showMinimized()
+        self.settle()
+        last.showMaximized()
+        self.settle()
+        last.showMinimized()
+        self.settle()
+        states = self.owner._window_states
+        self.assertIs(states.last_minimized, last)
+        self.assertIs(states._taskbar_target(), last)
+        # Windows acts on the represented child directly; no command is redirected.
+        last.present(activate=False)
+        self.settle()
+        self.assertTrue(first.isMinimized())
+        self.assertFalse(last.isMinimized())
+        self.assertTrue(last.isMaximized())
+
+    def test_owner_is_the_restore_target_when_minimized_last(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        self.owner.showMinimized()
+        self.settle()
+        states = self.owner._window_states
+        self.assertIs(states.last_minimized, self.owner)
+        self.assertIs(states._taskbar_target(), self.owner)
+        self.owner.showNormal()
+        self.settle()
+        self.assertFalse(self.owner.isMinimized())
+        self.assertTrue(child.isMinimized())
+
+    def test_closed_last_minimized_child_is_not_restored(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        child.close()
+        self.settle()
+        self.assertFalse(self.owner._window_states.restore_last_minimized())
+        self.assertFalse(child.isVisible())
+
+    def test_owner_activation_never_restores_a_minimized_child(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        QTest.qWait(180)
+        QApplication.sendEvent(self.owner, QEvent(QEvent.WindowActivate))
+        self.settle()
+        self.assertTrue(child.isMinimized())
+        self.assertIs(self.owner._window_states._taskbar_target(), child)
+
+    def test_minimizing_owner_after_child_is_never_intercepted(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        self.owner.showMinimized()
+        self.settle()
+        QTest.qWait(180)
+        self.assertTrue(self.owner.isMinimized())
+        self.assertFalse(child.isVisible())
+        self.assertIs(self.owner._window_states._taskbar_target(), self.owner)
+
+    def test_closing_or_destroying_last_minimized_child_keeps_previous_target(self):
+        first, last = self.dialog(), self.dialog()
+        first.showMinimized()
+        self.settle()
+        last.showMinimized()
+        self.settle()
+        last.close()
+        self.settle()
+        states = self.owner._window_states
+        self.assertIs(states._taskbar_target(), first)
+        first.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.settle()
+        self.assertIs(states._taskbar_target(), self.owner)
+        self.assertIsNone(states.last_minimized)
+
+    def test_repeated_main_and_child_restore_cycles_keep_geometry_and_no_auto_restore(self):
+        child = self.dialog()
+        geometry = child.geometry()
+        states = self.owner._window_states
+        for _ in range(4):
+            child.showMinimized()
+            self.settle()
+            self.assertIs(states._taskbar_target(), child)
+            self.owner.showMinimized()
+            self.settle()
+            self.assertIs(states._taskbar_target(), self.owner)
+            self.owner.showNormal()
+            self.settle()
+            self.assertTrue(child.isMinimized())
+            self.assertIs(states._taskbar_target(), child)
+            child.present(activate=False)
+            self.settle()
+            self.assertEqual(child.geometry(), geometry)
+            self.assertFalse(child.isMinimized())
+
+    def test_ignored_close_keeps_minimized_child_as_taskbar_target(self):
+        class BusyDialog(ManagedDialog):
+            def closeEvent(inner, event):
+                event.ignore()
+
+        child = BusyDialog(self.owner)
+        child.present(activate=False)
+        self.settle()
+        child.showMinimized()
+        self.settle()
+        child.close()
+        self.settle()
+        self.assertTrue(child.isMinimized())
+        self.assertIs(self.owner._window_states._taskbar_target(), child)
+
+    def test_pending_restore_does_not_reopen_a_child_closed_before_callback(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        QTimer.singleShot(0, self.owner._window_states.restore_last_minimized)
+        child.close()
+        self.settle()
+        self.assertFalse(child.isVisible())
+
+    def test_close_during_owner_restore_does_not_leave_a_closed_taskbar_target(self):
+        child = self.dialog()
+        child.showMinimized()
+        self.settle()
+        self.owner.showMinimized()
+        self.settle()
+        self.owner.showNormal()
+        QTimer.singleShot(0, child.close)
+        self.settle()
+        self.assertFalse(child.isVisible())
+        self.assertIs(self.owner._window_states._taskbar_target(), self.owner)
+
+    def test_maximized_owner_saves_and_restores_its_normal_size(self):
+        normal = self.owner.size()
+        self.owner.showMaximized()
+        self.settle()
+        self.owner._window_states.save_window_preferences()
+        saved = self.owner.cfg["window_size"]
+        self.assertEqual(saved, [normal.width(), normal.height()])
+        self.owner.showNormal()
+        self.settle()
+        self.assertEqual(self.owner.size(), normal)
+
+    def test_maximized_child_saves_and_restores_its_normal_size(self):
+        child = self.dialog()
+        normal = child.size()
+        child.showMaximized()
+        self.settle()
+        self.owner._window_states.save_window_preferences()
+        record = self.owner.cfg["dialog_windows"][type(child).__name__]
+        self.assertEqual(record["size"], [normal.width(), normal.height()])
+        child.showNormal()
+        self.settle()
+        self.assertEqual(child.size(), normal)
+
+    def test_saved_maximized_state_does_not_replace_normal_geometry(self):
+        cfg = {"window_size": [640, 480], "window_maximized": True,
+               "dialog_windows": {"ManagedDialog": {"size": [520, 360], "maximized": True}}}
+        self.owner.cfg = cfg
+        self.owner._window_states._owner_geometry = QRect(70, 90, 640, 480)
+        child = ManagedDialog(self.owner)
+        child.present(activate=False)
+        child.showMaximized()
+        self.owner._window_states.save_window_preferences()
+        self.assertEqual(cfg["window_size"], [800, 600])
+        self.assertEqual(cfg["dialog_windows"]["ManagedDialog"]["size"], [520, 360])

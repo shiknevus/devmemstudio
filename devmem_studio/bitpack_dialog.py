@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal, QThreadPool, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFrame, QLineEdit, QCheckBox,
                                QSpinBox, QProgressBar, QPlainTextEdit, QFileDialog, QMessageBox, QComboBox, QSizePolicy)
+from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
 
 from . import bitpack
 from .core import application_dir
@@ -24,8 +25,8 @@ class BitPackDialog(ManagedDialog):
             self.setWindowIcon(parent.windowIcon())
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         self.setAcceptDrops(True)
-        self.resize(820, 660)
-        self.setMinimumSize(640, 540)
+        self.resize(900, 790)
+        self.setMinimumSize(680, 640)
         self.busy = False
         self._worker = None
         self._cancel = None
@@ -54,7 +55,7 @@ class BitPackDialog(ManagedDialog):
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(14)
         layout.addLayout(row(label("FPGA Bit 打包", "title"), 1, label("本地工具 · Bit_pack 2.0.1", "badge")))
-        note = label("选择 .bit 文件，生成项目发布包。源文件始终保留，ZIP 发布前自动校验。", "muted")
+        note = label("选择文件夹查找 bit / bin，勾选需要的类型。多个 bin 请填写不同版本号，按版本子目录放入同一个 ZIP。", "muted")
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -90,12 +91,29 @@ class BitPackDialog(ManagedDialog):
         fields.addWidget(self.directory_caption)
         if self._preferred_source:
             self.source_combo.addItem(self._preferred_source)
+        self.include_bit = QCheckBox("打包所选 bit（sunny_fpga.bit）")
+        self.include_bit.setChecked(self._preferences["include_bit"])
+        self.include_bin = QCheckBox("打包勾选的 bin")
+        self.include_bin.setChecked(self._preferences["include_bin"])
+        fields.addLayout(row(self.include_bit, self.include_bin, 1))
+        self.bin_table = QTableWidget(0, 3)
+        self.bin_table.setHorizontalHeaderLabels(["打包", "bin 文件", "版本号（多个 bin 必填）"])
+        self.bin_table.verticalHeader().hide()
+        self.bin_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.bin_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.bin_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.bin_table.setMinimumHeight(100)
+        self.bin_table.setMaximumHeight(190)
+        self.bin_table.setVisible(False)
+        fields.addWidget(self.bin_table)
         self.output = QLineEdit(self._preferences["output_directory"] or str(initial))
         self.output.setAccessibleName("输出目录")
         self.output.setToolTip(self.output.text())
         self.output.textChanged.connect(self.output.setToolTip)
         self.output.textEdited.connect(self._output_edited)
         self.choose_output = button("选择目录", self.browse_output, None, "folder")
+        directory_width = self.choose_folder.sizeHint().width()
+        self.choose_output.setFixedWidth(directory_width)
         fields.addWidget(label("输出目录", "muted"))
         fields.addLayout(row(self.output, self.choose_output))
         self.nopack = QCheckBox("仅复制为 sunny_fpga.bit，不压缩")
@@ -105,7 +123,7 @@ class BitPackDialog(ManagedDialog):
         self.timeout.setRange(1, 86400)
         self.timeout.setValue(300)
         self.timeout.setSuffix(" 秒")
-        self.timeout.setFixedWidth(112)
+        self.timeout.setFixedWidth(directory_width)
         self.timeout.setAccessibleName("任务超时秒数")
         fields.addLayout(row(self.nopack, 1, label("超时", "muted"), self.timeout))
         layout.addWidget(card)
@@ -142,6 +160,9 @@ class BitPackDialog(ManagedDialog):
         self.project.textChanged.connect(lambda _: self._remember_state())
         self.output.textChanged.connect(lambda _: self._remember_state())
         self.nopack.toggled.connect(lambda _: self._remember_state())
+        self.include_bit.toggled.connect(lambda _: self._remember_state())
+        self.include_bin.toggled.connect(lambda _: self._remember_state())
+        self.bin_table.itemChanged.connect(lambda _: self._remember_state())
         self.source_combo.currentIndexChanged.connect(self._source_selected)
         self.source.textEdited.connect(self._source_edited)
         self.source.editingFinished.connect(self._commit_source_edit)
@@ -154,7 +175,39 @@ class BitPackDialog(ManagedDialog):
     def preference_snapshot(self):
         return {"project": self.project.text(), "source_directory": self._source_directory,
                 "output_directory": self.output.text(), "source_path": self.source.text(),
-                "source_mode": self._source_mode, "nopack": self.nopack.isChecked()}
+                "source_mode": self._source_mode, "nopack": self.nopack.isChecked(),
+                "include_bit": self.include_bit.isChecked(), "include_bin": self.include_bin.isChecked(),
+                "bins": {self.bin_table.item(i, 1).data(Qt.UserRole): {
+                    "checked": self.bin_table.item(i, 0).checkState() == Qt.Checked,
+                    "version": self.bin_table.item(i, 2).text()} for i in range(self.bin_table.rowCount())}}
+
+    def _set_bin_files(self, files):
+        saved = self.preference_snapshot()["bins"] or self._preferences["bins"]
+        self.bin_table.blockSignals(True)
+        try:
+            self.bin_table.setRowCount(len(files))
+            root = Path(self._source_directory)
+            for index, path in enumerate(files):
+                checked = QTableWidgetItem()
+                checked.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+                checked.setCheckState(Qt.Checked if saved.get(path, {}).get("checked", True) else Qt.Unchecked)
+                name = QTableWidgetItem(str(Path(path).relative_to(root)))
+                name.setData(Qt.UserRole, path)
+                name.setToolTip(path)
+                name.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                version = QTableWidgetItem(saved.get(path, {}).get("version", ""))
+                version.setToolTip("ZIP 子文件夹名，例如 V1.0；多个 bin 的版本号必须不同")
+                for column, item in enumerate((checked, name, version)):
+                    self.bin_table.setItem(index, column, item)
+        finally:
+            self.bin_table.blockSignals(False)
+        self.bin_table.setVisible(bool(files))
+
+    def selected_bins(self):
+        if not self.include_bin.isChecked():
+            return []
+        return [(Path(self.bin_table.item(i, 1).data(Qt.UserRole)), self.bin_table.item(i, 2).text())
+                for i in range(self.bin_table.rowCount()) if self.bin_table.item(i, 0).checkState() == Qt.Checked]
 
     def _remember_state(self):
         if not self._updating_source:
@@ -179,6 +232,11 @@ class BitPackDialog(ManagedDialog):
         if self._source_dirty and not self.busy:
             selected = Path(self.source.text().strip().strip('"'))
             if selected.is_file() and selected.suffix.lower() == ".bit":
+                # Switching to a single source file: a previous folder scan may
+                # have filled the bin table. Drop those bins so they can never
+                # leak into this pack (same as set_source).
+                self._set_bin_files([])
+                self.include_bit.setChecked(True)
                 self._source_mode = "file"
                 self._source_directory = str(selected.parent)
                 self._browse_directory = self._source_directory
@@ -199,7 +257,7 @@ class BitPackDialog(ManagedDialog):
                 self._set_status("上次选择的文件夹暂时无法访问，请重新选择。", "offline")
 
     def browse_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "选择包含 .bit 的文件夹", self._browse_directory)
+        path = QFileDialog.getExistingDirectory(self, "选择包含 bit / bin 的文件夹", self._browse_directory)
         if path:
             self.scan_directory(path)
 
@@ -212,7 +270,6 @@ class BitPackDialog(ManagedDialog):
             QMessageBox.warning(self, "目录无效", "请选择可以访问的文件夹。")
             return
         try:
-            bitpack.prepare_bitpack_executable()
             self._cancel = bitpack.CancelEvent()
         except OSError as exc:
             QMessageBox.warning(self, "无法扫描目录", str(exc))
@@ -227,10 +284,10 @@ class BitPackDialog(ManagedDialog):
         self.open_output_button.setEnabled(False)
         self.details.clear()
         self._update_directory_caption()
-        self._set_status("正在扫描文件夹及子目录中的 .bit 文件…", "connecting")
+        self._set_status("正在扫描文件夹及子目录中的 bit / bin 文件…", "connecting")
         self._set_busy(True)
         self._remember_state()
-        worker = Worker(lambda progress: bitpack.scan_bitfiles(root, self._cancel, progress))
+        worker = Worker(lambda progress: bitpack.scan_firmware_files(root, self._cancel, progress))
         self._worker = worker
         worker.signals.progress.connect(self._on_progress)
         worker.signals.result.connect(self._on_scan_result)
@@ -248,6 +305,7 @@ class BitPackDialog(ManagedDialog):
         try:
             self.source_combo.clear()
             self.source_combo.addItems(files[:2000])
+            self._set_bin_files(result.get("bins", []))
             if files:
                 chosen = self._preferred_source if self._preferred_source in files else files[0]
                 index = self.source_combo.findText(chosen)
@@ -257,9 +315,15 @@ class BitPackDialog(ManagedDialog):
                     self.source_combo.setEditText(chosen)
                 if not self._output_custom:
                     self.output.setText(str(Path(chosen).parent))
+            else:
+                self.include_bit.setChecked(False)
+                if not self._output_custom:
+                    self.output.setText(self._source_directory)
         finally:
             self._updating_source = False
-        text = f"找到 {len(files)} 个 .bit 文件，请从下拉列表选择源文件。" if files else "文件夹内未找到 .bit 文件，请重新选择。"
+        bins = result.get("bins", [])
+        text = (f"找到 {len(files)} 个 bit、{len(bins)} 个 bin。请勾选要打包的类型和文件，多个 bin 填写不同版本号。"
+                if files or bins else "文件夹内未找到 bit / bin 文件，请重新选择。")
         if len(files) > 2000:
             text += " 列表显示前 2000 项，其它文件可粘贴完整路径。"
         if result["skipped"] or result["truncated"]:
@@ -289,6 +353,8 @@ class BitPackDialog(ManagedDialog):
             self._updating_source = False
         self._source_mode = "file"
         self._source_directory = str(source.parent)
+        self._set_bin_files([])
+        self.include_bit.setChecked(True)
         self._browse_directory = self._source_directory
         self._update_directory_caption()
         if not self._output_custom:
@@ -328,7 +394,7 @@ class BitPackDialog(ManagedDialog):
     def _set_busy(self, busy):
         self.busy = busy
         for widget in (self.source_combo, self.source, self.output, self.choose_source, self.choose_folder, self.choose_output,
-                       self.nopack, self.timeout, self.start_button):
+                       self.nopack, self.timeout, self.start_button, self.include_bit, self.include_bin, self.bin_table):
             widget.setEnabled(not busy)
         self.project.setEnabled(not busy and not self.nopack.isChecked())
         self.cancel_button.setVisible(busy)
@@ -347,8 +413,14 @@ class BitPackDialog(ManagedDialog):
         self._remember_state()
         project = self.project.text()
         nopack = self.nopack.isChecked()
-        if source.suffix.lower() != ".bit" or not source.is_file():
-            QMessageBox.warning(self, "文件无效", "请选择存在的 .bit 文件。")
+        source = source if self.include_bit.isChecked() else None
+        bins = self.selected_bins()
+        try:
+            bitpack.firmware_members(source, bins)
+            if nopack and (source is None or bins):
+                raise ValueError("仅复制模式只支持 bit；打包 bin 请取消「仅复制」勾选。")
+        except ValueError as exc:
+            QMessageBox.warning(self, "文件选择无效", str(exc))
             self.source.setFocus()
             return
         if not self.output.text().strip().strip('"') or not output.is_dir():
@@ -374,7 +446,8 @@ class BitPackDialog(ManagedDialog):
                     return
                 force = True
         try:
-            bitpack.prepare_bitpack_executable()
+            if not bins:
+                bitpack.prepare_bitpack_executable()
             self._cancel = bitpack.CancelEvent()
         except OSError as exc:
             self._set_status("打包引擎无法启动", "error")
@@ -388,8 +461,9 @@ class BitPackDialog(ManagedDialog):
         self._set_status("正在复制…" if nopack else "正在打包与校验…", "connecting")
         self._set_busy(True)
         seconds = self.timeout.value()
-        worker = Worker(lambda progress: bitpack.run_bitpack(source, output, project, nopack,
-                                                            force, seconds, self._cancel, progress))
+        worker = Worker(lambda progress: bitpack.run_firmware_pack(source, bins, output, project, seconds,
+                                                                    self._cancel, progress) if bins else
+                        bitpack.run_bitpack(source, output, project, nopack, force, seconds, self._cancel, progress))
         self._worker = worker
         worker.signals.progress.connect(self._on_progress)
         worker.signals.result.connect(self._on_result)

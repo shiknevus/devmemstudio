@@ -1,5 +1,6 @@
 """Start-up stays light (SSH stack on demand) and the single-file launch keeps a proper taskbar identity."""
 import ctypes
+import json
 from ctypes import wintypes
 import os
 from pathlib import Path
@@ -49,6 +50,16 @@ class StartupImportTests(unittest.TestCase):
 
 
 class TaskbarIdentityTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows taskbar required")
+    def test_native_window_minimize_restore_and_activation_cycles(self):
+        env = dict(os.environ, QT_QPA_PLATFORM="windows", PYTHONIOENCODING="utf-8")
+        result = subprocess.run([sys.executable, str(ROOT / "tools" / "taskbar_native_probe.py")],
+                                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(report["platform"], "windows")
+        self.assertGreaterEqual(len(report["checks"]), 39)
+
     def test_pinning_relaunches_the_single_exe(self):
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.CreateWindowExW.restype = wintypes.HWND
@@ -67,6 +78,8 @@ class TaskbarIdentityTests(unittest.TestCase):
             self.assertEqual(values[taskbar.RELAUNCH_COMMAND], f'"{launcher}"')
             self.assertEqual(values[taskbar.RELAUNCH_NAME], "DevmemStudio")
             self.assertEqual(values[taskbar.RELAUNCH_ICON], f"{launcher},0")
+            self.assertTrue(taskbar.hide_taskbar_tab(hwnd))
+            self.assertTrue(taskbar.select_taskbar_tab(hwnd, []))
         finally:
             user32.DestroyWindow(hwnd)
 

@@ -591,6 +591,58 @@ def _atomic_download_target(local_path):
             temporary.unlink(missing_ok=True)
 
 
+# A board can accept TCP before its SSH daemon is ready. Keep the whole
+# negotiation bounded so one half-open daemon does not stall the retry loop.
+SSH_HANDSHAKE_TIMEOUT_S = 5.0
+SSH_RETRY_TCP_TIMEOUT_S = 2.0
+SSH_RETRY_BANNER_TIMEOUT_S = 1.0
+SSH_RETRY_DELAY_S = 0.1
+SSH_RETRY_MAX_DELAY_S = 2.0   # exponential backoff ceiling between attempts
+
+
+def connect_ssh_until_cancelled(session, request, cancel, progress, retry_delay=SSH_RETRY_DELAY_S):
+    """Retry bounded handshakes until connected or explicitly cancelled.
+
+    Authentication failures are permanent: wrong credentials never fix
+    themselves, and retrying would hammer the board's login handler (and
+    flood the session log). Network-level errors retry with a capped
+    exponential backoff. `progress` is invoked for every failed attempt;
+    callers that render these as logs should throttle their own output."""
+    attempt = 0
+    delay = retry_delay
+    while not cancel.is_set():
+        attempt += 1
+        try:
+            if isinstance(session, SshSession):
+                handshake_timeout = min(max(float(request[-1]), 1.0), SSH_HANDSHAKE_TIMEOUT_S)
+                session.connect(*request, handshake_timeout=handshake_timeout,
+                                tcp_timeout=min(float(request[-1]), SSH_RETRY_TCP_TIMEOUT_S),
+                                banner_timeout=min(handshake_timeout, SSH_RETRY_BANNER_TIMEOUT_S))
+            else:
+                session.connect(*request)
+            if cancel.is_set():
+                session.close()
+                break
+            return True
+        except HostKeyChangedError:
+            raise
+        except CommandError as exc:
+            if cancel.is_set() or "已取消" in str(exc) or "算法不兼容" in str(exc):
+                raise
+            failure = exc
+        except paramiko.AuthenticationException as exc:
+            raise CommandError("SSH 认证失败（用户名或密码错误）。") from exc
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            failure = exc
+        if cancel.is_set():
+            break
+        progress({"message": f"第 {attempt} 次 SSH 连接未成功：{failure}；继续尝试，点击取消结束。"})
+        if cancel.wait(delay):
+            break
+        delay = min(delay * 2, SSH_RETRY_MAX_DELAY_S)
+    raise CommandError("连接已取消。")
+
+
 class SshSession:
     """Persistent command shell and a separate stream channel, with serialized commands."""
     def __init__(self, log=lambda level, text: None, data_dir: Path | None = None):
@@ -626,12 +678,17 @@ class SshSession:
         immediately."""
         last_error = None
         for family, kind, proto, _null, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+            if generation != self._generation:
+                raise CommandError("连接已取消。")
             sock = socket.socket(family, kind, proto)
             sock.setblocking(False)
+            self._connect_sock = sock
             try:
-                try:
-                    sock.connect(sockaddr)
-                except BlockingIOError:
+                error = sock.connect_ex(sockaddr)
+                pending = (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, 10035, 10036, 10037)
+                if error and error not in pending:
+                    raise OSError(error, os.strerror(error))
+                if error:
                     deadline = time.monotonic() + timeout
                     while True:
                         if generation != self._generation:
@@ -644,28 +701,47 @@ class SshSession:
                         if not writable and not failed:
                             continue
                         error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-                        if error == errno.ECONNREFUSED or (failed and not error):
+                        if error in (errno.ECONNREFUSED, 10061):
                             raise ConnectionRefusedError(errno.ECONNREFUSED, "连接被拒绝（端口未开放或 SSH 服务未启动）")
                         if error:
                             raise OSError(error, os.strerror(error))
+                        # On a changing Windows interface, exceptfds alone is
+                        # not proof of refusal. Confirm that TCP has a peer.
+                        sock.getpeername()
                         break
+                if generation != self._generation:
+                    raise CommandError("连接已取消。")
                 sock.setblocking(True)
                 sock.settimeout(timeout)
                 return sock
             except CommandError:
+                if self._connect_sock is sock:
+                    self._connect_sock = None
                 sock.close()
                 raise
             except OSError as exc:
+                if self._connect_sock is sock:
+                    self._connect_sock = None
                 sock.close()
+                if generation != self._generation:
+                    raise CommandError("连接已取消。") from exc
                 last_error = exc
         raise last_error or OSError("无法建立 TCP 连接")
 
-    def connect(self, host, port, username, password, timeout=8):
-        if self._fresh and self._generation:
+    def connect(self, host, port, username, password, timeout=8, handshake_timeout=None,
+                tcp_timeout=None, banner_timeout=None):
+        handshake_timeout = timeout if handshake_timeout is None else handshake_timeout
+        tcp_timeout = timeout if tcp_timeout is None else tcp_timeout
+        banner_timeout = handshake_timeout if banner_timeout is None else banner_timeout
+        generation = self._generation
+        if self._fresh and generation:
             raise CommandError("连接已取消。")   # closed (cancelled) before the first connect began
         self._fresh = False
-        self.close()
-        generation = self._generation
+        # Discard a failed attempt without marking the next attempt cancelled.
+        # Only an explicit close changes the cancellation generation.
+        self._close_connection()
+        if generation != self._generation:
+            raise CommandError("连接已取消。")
         client = paramiko.SSHClient()
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -677,15 +753,15 @@ class SshSession:
             try:
                 # Abortable TCP connect: a cancel during the SYN wait breaks out
                 # immediately instead of waiting out the timeout.
-                sock = self._connect_socket_abortably(host, port, timeout, generation)
+                sock = self._connect_socket_abortably(host, port, tcp_timeout, generation)
                 self._connect_sock = sock
                 if generation != self._generation:
                     # Cancelled while the socket was being created (close()
                     # found nothing to abort): stop before the handshake waits.
                     raise CommandError("连接已取消。")
                 client.connect(hostname=host, port=port, username=username, password=password,
-                               timeout=timeout, banner_timeout=timeout, auth_timeout=timeout,
-                               channel_timeout=timeout, allow_agent=False, look_for_keys=False,
+                               timeout=handshake_timeout, banner_timeout=banner_timeout, auth_timeout=handshake_timeout,
+                               channel_timeout=handshake_timeout, allow_agent=False, look_for_keys=False,
                                sock=sock, transport_factory=board_transport())
             except paramiko.BadHostKeyException as exc:
                 raise HostKeyChangedError(host, port, exc.key, exc.expected_key) from exc
@@ -712,10 +788,14 @@ class SshSession:
         except Exception:
             sock, self._connect_sock = self._connect_sock, None
             if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+                # A failed handshake needs the same shutdown as an explicit
+                # cancel. close alone can leave Windows recv blocked and keep
+                # abandoned unauthenticated sessions alive on the board.
+                for action in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+                    try:
+                        action()
+                    except OSError:
+                        pass
             client.close()
             raise
 
@@ -1386,6 +1466,9 @@ class SshSession:
 
     def close(self):
         self._generation += 1
+        self._close_connection()
+
+    def _close_connection(self):
         self.stop_stream()
         # Break a handshake still waiting inside client.connect: a socket
         # shutdown unblocks the recv even on Windows (close alone does not),
