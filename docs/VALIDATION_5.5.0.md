@@ -22,4 +22,4 @@
 | `dist/DevmemStudio.exe` | 21,256,192 字节 | `02f4bfbc23855bf35399ba752f1584c6ceac854c72c782563813b59140aeb048` |
 | `dist/DevmemStudio-5.5.0-win64.zip` | 21,147,317 字节 | `f13d97432e30209e0f25fba5c5a46eb840c277aa4be9132014952297f227a5bd` |
 
-构建日志位于 `build/logs/`，源码离线验收报告位于 `artifacts/build-smoke/report.json`，单文件封装信息位于 `artifacts/singlefile-build.json`。GitHub 发布地址会在正式 Release 创建后补充。
+构建日志位于 `build/logs/`，源码离线验收报告位于 `artifacts/build-smoke/report.json`，单文件封装信息位于 `artifacts/singlefile-build.json`。GitHub 正式发布地址：[v5.5.0](https://github.com/shiknevus/devmemstudio/releases/tag/v5.5.0)，发布资产为 ZIP 与 `DevmemStudio-5.5.0-win64.zip.sha256`。
