@@ -71,9 +71,11 @@ def remember_dir(history, directory, limit=BIT_DIR_HISTORY) -> list[str]:
 
 # 寄存器按批读：每批一条 shell 命令一次往返，批大小兼顾 PTY 行缓冲与进度粒度
 BATCH_READ_CHUNK = 32
-# Register monitor: the devmem fallback forks one busybox devmem per register per sample
-# (~1 ms each on the A53), so 5 ms is the shortest interval a few registers can hold there.
-MONITOR_MIN_INTERVAL_MS = 5
+# Register monitor: regmon reads mapped registers in microseconds, so 1 ms holds; the devmem
+# fallback forks one busybox devmem per register per sample (~1 ms each on the A53) and lags below ~5 ms.
+MONITOR_MIN_INTERVAL_MS = 1
+MONITOR_INTERVAL_MS = 1    # fixed monitor sampling period
+LIVE_INTERVAL_MS = 5       # fixed register-table period: it refreshes at ~25 Hz, faster only loads the board
 MONITOR_MAX_REGISTERS = 32
 # Resident sampler (tools/regmon): maps the register pages once and loops on board deadlines.
 REGMON_RESOURCE = "assets/regmon/regmon-aarch64"
@@ -339,11 +341,11 @@ def default_config() -> dict:
             "base": "0xb0100000", "last_category": "axis",
             "last_address": "0x0800", "remember_password": False,
             "top_path": "", "top_import_dir": "", "component_import_dir": "",
-            "poll_interval": 1000, "log_path": DEFAULT_LOG_PATH, "write_cache": {},
+            "log_path": DEFAULT_LOG_PATH, "write_cache": {},
             "serial_port": "", "serial_baud": 115200, "serial_username": "",
             "serial_password": "", "remember_serial_password": False, "inspector_mode": "bits",
             "bitpack_settings": {}, "bit_remote_dir": DEFAULT_BIT_DIR, "bit_remote_dirs": [DEFAULT_BIT_DIR],
-            "bit_local_dir": "", "monitor_interval_ms": 10, "monitor_settings": normalize_monitor_settings(None)}
+            "bit_local_dir": "", "monitor_settings": normalize_monitor_settings(None)}
 
 
 class ConfigStore:
@@ -387,11 +389,8 @@ class ConfigStore:
                     pass
         if cfg.get("last_category") not in DEFAULT_CATEGORIES:
             cfg["last_category"] = "axis"
-        for field, fallback, low, high in (("port", 22, 1, 65535),
-                                            ("poll_interval", 1000, 100, 120000),
-                                            ("monitor_interval_ms", 10, MONITOR_MIN_INTERVAL_MS, 60000)):
-            val = parse_int(cfg.get(field))
-            cfg[field] = val if val is not None and low <= val <= high else fallback
+        port = parse_int(cfg.get("port"))
+        cfg["port"] = port if port is not None and 1 <= port <= 65535 else 22
         baud = parse_int(cfg.get("serial_baud"))
         cfg["serial_baud"] = baud if baud is not None and 1200 <= baud <= 10000000 else 115200
         for field in ("base", "last_address"):
@@ -412,6 +411,8 @@ class ConfigStore:
             cfg[flag] = cfg.get(flag) is True
             if not cfg[flag]:
                 cfg[secret] = ""
+        for stale in ("poll_interval", "live_interval_ms", "live_read", "monitor_interval_ms"):
+            cfg.pop(stale, None)   # periods are fixed now; live read starts off each launch
         if not isinstance(cfg.get("write_cache"), dict):
             cfg["write_cache"] = {}
         if cfg.get("inspector_mode") not in ("bits", "write"):
@@ -1743,9 +1744,9 @@ class DemoSession:
             batch, flushed = [], time.monotonic()
             while not stop.is_set() and self.alive:
                 phase = stamp - start
-                batch.append((stamp, tuple(
-                    (base + int(800 * (1 + math.sin(2 * math.pi * phase / 2 + index)))) & 0xFFFFFFFF
-                    for index, base in enumerate(bases))))
+                batch.append((stamp, tuple(   # rides on live memory so writes show up
+                    (self.memory.get(address, base) + int(800 * (1 + math.sin(2 * math.pi * phase / 2 + index))))
+                    & 0xFFFFFFFF for index, (address, base) in enumerate(zip(addresses, bases)))))
                 if time.monotonic() - flushed >= 0.04:
                     on_samples(batch)
                     batch, flushed = [], time.monotonic()

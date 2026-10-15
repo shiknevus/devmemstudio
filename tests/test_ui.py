@@ -211,7 +211,19 @@ class UiTests(UiTestBase):
         self.assertTrue(window.bit_mode.isChecked())
         self.assertEqual(window.cfg["inspector_mode"], "bits")
 
-    def test_device_error_stops_polling_and_marks_failed_row(self):
+    def test_device_error_marks_failed_row(self):
+        class FailedDevice(DemoSession):
+            def read(self, address, quiet=False):
+                raise RuntimeError("simulated device error")
+        self.window.session.close()
+        self.window.session = FailedDevice(self.window._log_emit("ssh"))
+        self.window.session.connect()
+        self.window.read_all()
+        self.settle(lambda: self.window.error_count > 0 and not self.window._busy)
+        self.assertIn("simulated device error", self.window.regs[0]["_error"])
+        self.assertEqual(self.window.table.item(0, 3).text(), "读取错误")
+
+    def test_live_read_start_failure_stops_live_mode(self):
         class FailedDevice(DemoSession):
             def read(self, address, quiet=False):
                 raise RuntimeError("simulated device error")
@@ -219,10 +231,64 @@ class UiTests(UiTestBase):
         self.window.session = FailedDevice(self.window._log_emit("ssh"))
         self.window.session.connect()
         self.window.poll_check.setChecked(True)
-        self.settle(lambda: self.window.error_count > 0 and not self.window._busy)
-        self.assertFalse(self.window.poll_check.isChecked())
-        self.assertIn("simulated device error", self.window.regs[0]["_error"])
-        self.assertEqual(self.window.table.item(0, 3).text(), "读取错误")
+        self.settle(lambda: not self.window.poll_check.isChecked())
+        self.assertIsNone(self.window.live.key)
+        self.assertTrue(any("实时读取已停止" in m and "simulated device error" in m
+                            for _, _, m in self.window.log_records_system))
+
+    def test_live_read_streams_current_view_and_leaves_writes_free(self):
+        window = self.window
+        side = next((r for r in window.visible_regs if r.get("read_side_effect")), None)
+        window.poll_check.setChecked(True)
+        expected = [r["_address"] for r in window.visible_regs if r is not side]
+        self.assertEqual(list(window.live.key[1]), list(dict.fromkeys(expected)))
+        self.assertFalse(window._busy)   # streaming is not a register task
+        target = next(r for r in window.visible_regs if not r.get("readonly") and not r.get("action")
+                      and r is not side and r["_access_width"] >= 16)
+        first = target["_value"]
+        self.settle(lambda: target["_value"] != first and target["_source"] == "离线演示")
+        self.assertEqual(window.table.item(target["_row"], 3).text(), f"0x{target['_value']:08X}")
+        # Writes go through the shell while the sampler keeps running; the stream then shows them.
+        window.table.selectRow(target["_row"])
+        self.settle()
+        window.write_input.setText("4000")
+        window.write_selected()
+        self.settle(lambda: not window._busy)
+        self.assertEqual(window.session.memory[target["_address"]], 0x4000)
+        self.assertIsNotNone(window.live.key)
+        self.settle(lambda: 0x4000 <= target["_value"] <= 0x4000 + 1600)   # demo wave rides on memory
+        # Switching the tab re-targets the sampler without a shell read.
+        reads = window.read_count
+        window.view_buttons["basic"].click()
+        self.settle(lambda: window.live.key is not None and list(window.live.key[1]) == list(dict.fromkeys(
+            r["_address"] for r in window.visible_regs if not r.get("read_side_effect"))))
+        self.assertEqual(window.read_count, reads)
+        # Disconnect pauses live mode but keeps the preference; reconnect resumes it.
+        window.disconnect()
+        self.settle(lambda: not window.connected)
+        self.assertIsNone(window.live.key)
+        self.assertTrue(window.poll_check.isChecked())
+        window.session = DemoSession(window._log_emit("ssh"))
+        window.session.read_delay = 0
+        window.session.connect()
+        window._set_connection(True)
+        self.assertIsNotNone(window.live.key)
+        window.poll_check.setChecked(False)
+        self.assertIsNone(window.live.key)
+
+    def test_live_read_failed_sample_marks_row(self):
+        window = self.window
+        class GapDevice(DemoSession):
+            def start_monitor(self, addresses, interval_ms, on_samples, stopped, cancel_event, on_sampler=None):
+                on_samples([(0.0, (None, *range(1, len(addresses))))])
+                return True
+        window.session.close()
+        window.session = GapDevice(window._log_emit("ssh"))
+        window.session.connect()
+        window.poll_check.setChecked(True)
+        first = next(r for r in window.visible_regs if not r.get("read_side_effect"))
+        self.settle(lambda: first["_error"] == "实时读取失败")
+        self.assertEqual(window.table.item(first["_row"], 3).text(), "读取错误")
 
     def test_serial_connect_flow_and_command_routing(self):
         """串口连接后终端自动切到 serial 实时终端：板卡输出直接显示，按键逐个直发。"""
@@ -1335,31 +1401,26 @@ class TopImportUiTests(UiTestBase):
         self.assertTrue(self.window.cancel.is_set())
         self.settle(lambda: not self.window._busy)
 
-    def test_poll_interval_presets_and_typed_values(self):
-        # 自动读取周期是可编辑下拉：选预设或直接输入毫秒数/带小数的秒数，最快 0.1 s（100 ms）。
-        self.assertTrue(self.window.interval.isEditable())
-        presets = [self.window.interval.itemData(i) for i in range(self.window.interval.count())]
-        self.assertEqual(min(presets), 100)   # “0.1 s” 是可选预设
-        for i, expected in enumerate(presets):
-            with self.subTest(preset=expected):
-                self.window.interval.setCurrentIndex(i)
-                self.assertEqual(self.window._poll_interval_ms(), expected)
-        for typed, expected in (("0.3", 300), ("150ms", 150), ("500", 500), ("1 s", 1000),
-                                ("0", 100), ("99999", 60000), ("garbage", 1000)):
-            with self.subTest(typed=typed):
-                # 可编辑下拉输入时不改 currentIndex（NoInsert），先钉到 1 s 预设
-                # 让非法文本的后备分支（currentData）确定。
-                self.window.interval.setCurrentIndex(3)
-                self.window.interval.setEditText(typed)
-                self.assertEqual(self.window._poll_interval_ms(), expected)
-        # 旧配置里的自定义周期回填到编辑框原样还原（300 → 300，而非就近预选 200）。
-        cfg = self.window.cfg
-        cfg["poll_interval"] = 300
-        self.window._load_config_fields()
-        self.assertEqual(self.window._poll_interval_ms(), 300)
-        cfg["poll_interval"] = 7000
-        self.window._load_config_fields()
-        self.assertEqual(self.window._poll_interval_ms(), 7000)
+    def test_live_read_starts_off_at_a_fixed_period(self):
+        path = Path(self.temp.name) / "live.json"
+        store = ConfigStore(path)
+        store.save({**store.load(), "poll_interval": 1000, "live_read": True, "live_interval_ms": 20,
+                    "monitor_interval_ms": 25})   # settings of earlier builds are dropped
+        saved = ConfigStore(path).load()
+        for key in ("poll_interval", "live_read", "live_interval_ms", "monitor_interval_ms"):
+            self.assertNotIn(key, saved)
+        window = MainWindow(ConfigStore(path), persist=False)
+        try:
+            self.assertFalse(window.poll_check.isChecked())
+            self.assertFalse(hasattr(window, "interval"))
+        finally:
+            window.close()
+        self.window.poll_check.setChecked(True)
+        self.assertIsNotNone(self.window.live.key)
+        with patch.object(self.window.live, "start") as start:
+            self.window.live.key = None
+            self.window._sync_live()
+        self.assertEqual(start.call_args.args[2], 5)
 
     def test_import_component_updates_runtime_definition(self):
         from PySide6.QtWidgets import QMessageBox
@@ -1572,9 +1633,7 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(len(dialog.checked_addresses()), 32)                              # capped
         for index in range(2, dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Unchecked)
-        dialog.interval_spin.setValue(1)
-        self.assertEqual(dialog.interval_spin.value(), 5)                                  # minimum
-        self.assertEqual(self.window.cfg["monitor_interval_ms"], 5)
+        self.assertEqual(dialog.interval_ms, 1)                                           # fixed period
         dialog.signed_check.setChecked(True)
         self.assertNotIn("window_s", self.window.cfg["monitor_settings"])
         self.assertTrue(self.window.cfg["monitor_settings"]["signed"])

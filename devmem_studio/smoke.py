@@ -350,11 +350,13 @@ def run_smoke(app, directory: Path):
         settle(lambda: not window._busy)
         check(any(message == "devmem 0xb0100800" for _, _, message in window.log_records_ssh),
               "Terminal command read (devmem 0xb0100800) runs over SSH")
-        before = window.read_count
+        live_reg = next(reg for reg in window.visible_regs if not reg.get("read_side_effect"))
+        live_reg["_updated"] = ""
         window.poll_check.setChecked(True)
-        settle(lambda: window.read_count > before and not window._busy)
+        settle(lambda: bool(live_reg["_updated"]))
+        streamed = bool(live_reg["_updated"]) and not window._busy
         window.poll_check.setChecked(False)
-        check(window.read_count > before, "Automatic polling completes without overlapping jobs")
+        check(streamed and window.live.key is None, "Live read streams the view without holding the task gate")
         window.read_all()
         window.cancel_task()
         settle(lambda: not window._busy)
@@ -518,7 +520,7 @@ def run_smoke(app, directory: Path):
         window.read_all_button.click()
         settle(lambda: not window._busy)
         window.disconnect()
-        check(not window.connected and not window.poll_check.isChecked(), "Disconnect stops polling and disables operations")
+        check(not window.connected and window.live.key is None, "Disconnect stops live reads and disables operations")
         check(list(csv.reader(io.StringIO(window.snapshot_csv())))[1][0] == "离线演示", "Disconnected demo snapshot preserves data provenance")
         check(not (directory / "test-config.json").exists(), "Acceptance does not save credentials or production settings")
         change = HostKeyChangedError("192.0.2.10", 22, paramiko.RSAKey.generate(2048),

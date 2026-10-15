@@ -154,7 +154,7 @@ class ResponsiveControlsTests(unittest.TestCase):
             elif size[0] >= 1180:
                 self.assertTrue(shown.startswith(name), size)   # the badge and suffix give way first
             row = [widget for widget in (title, self.window.register_count, badge, self.window.poll_check,
-                                         self.window.interval, self.window.write_all_button,
+                                         self.window.write_all_button,
                                          self.window.read_all_button, self.window.export_button,
                                          self.window.help_button) if widget.isVisible()]
             for left, right in zip(row, row[1:]):
@@ -232,29 +232,6 @@ class ResponsiveControlsTests(unittest.TestCase):
         self.assertEqual(self.window.access_filter.currentText(), "可读写")
         self.assertEqual(self.window.access_filter.width(), 112)
 
-    def test_interval_preset_label_changes_but_value_does_not(self):
-        self.resize(1540, 960)
-        self.window.interval.setCurrentIndex(self.window.interval.findData(200))
-        self.resize(1280, 800)
-        self.assertEqual(self.window.interval.currentText(), "0.2s")
-        self.assertEqual(self.window.interval.currentData(), 200)
-        self.assertEqual(self.window._poll_interval_ms(), 200)
-        self.resize(1540, 960)
-        self.assertEqual(self.window.interval.currentText(), "0.2 s")
-        self.assertEqual(self.window._poll_interval_ms(), 200)
-
-    def test_interval_custom_draft_and_cursor_survive_resizing(self):
-        self.resize(1540, 960)
-        self.window.interval.setEditText("150ms")
-        self.window.interval.lineEdit().setCursorPosition(2)
-        self.resize(1280, 800)
-        self.assertEqual(self.window.interval.currentText(), "150ms")
-        self.assertEqual(self.window.interval.lineEdit().cursorPosition(), 2)
-        self.assertEqual(self.window._poll_interval_ms(), 150)
-        self.resize(1540, 960)
-        self.assertEqual(self.window.interval.currentText(), "150ms")
-        self.assertEqual(self.window.interval.lineEdit().cursorPosition(), 2)
-
     def test_serial_choice_keeps_actual_port_and_complete_description(self):
         self.resize(1540, 960)
         self.window.serial_port.clear()
@@ -273,15 +250,6 @@ class ResponsiveControlsTests(unittest.TestCase):
         self.resize(1540, 960)
         self.assertEqual(self.window.serial_port.currentText(), label)
         self.assertEqual(self.window._serial_port_label("COM3", ""), "COM3")
-
-    def test_tiny_interval_preset_is_fully_visible_not_only_its_unit(self):
-        self.resize(1540, 960)
-        self.window.interval.setCurrentIndex(self.window.interval.findData(100))
-        self.resize(960, 620)
-        edit = self.window.interval.lineEdit()
-        self.assertEqual(self.window.interval.currentText(), "0.1s")
-        self.assertGreaterEqual(edit.contentsRect().width(),
-                                edit.fontMetrics().horizontalAdvance(edit.text()))
 
     def test_tiny_view_selectors_abbreviate_and_preserve_selected_view(self):
         self.resize(1540, 960)

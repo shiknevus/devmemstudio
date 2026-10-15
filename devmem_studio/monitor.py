@@ -11,14 +11,14 @@ import math
 import threading
 import time
 
-from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QLineF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
+from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxLayout, QVBoxLayout, QSplitter,
                                QListWidget, QListWidgetItem,
-                               QLineEdit, QSpinBox, QCheckBox, QFileDialog, QSizePolicy,
+                               QLineEdit, QCheckBox, QFileDialog, QSizePolicy,
                                QScrollArea, QStyledItemDelegate, QStyle)
 
-from .core import (MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_STALE_TIMEOUT_S,
+from .core import (MONITOR_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_STALE_TIMEOUT_S,
                    normalize_monitor_settings, parse_addr)
 from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .theme import icon
@@ -29,7 +29,8 @@ SERIES_COLORS = ("#2463DC", "#168578", "#B57518", "#C44848", "#7A4FC4", "#1F8FB3
 SAMPLE_LIMIT = 200_000   # per run; the oldest quarter is dropped beyond it
 RANGE_BLOCK = 32
 SAMPLER_LABELS = {"shell": "devmem 循环（板端 CPU 占用较高）", "demo": "演示数据"}
-STATE_COLORS = {"idle": "#A3B1BF", "starting": "#2463DC", "running": "#2E9D5B"}
+STATE_COLORS = {"idle": "#A3B1BF", "starting": "#2463DC", "running": "#2E9D5B", "paused": "#D59A2E"}
+PAUSE_FILL = QColor(213, 154, 46, 28)   # chart band where sampling was paused
 STATUS_COLORS = {"warn": "#D59A2E", "error": "#C84B4B"}
 
 
@@ -53,16 +54,32 @@ class MonitorBuffer:
         self.revision = 0
         self._ranges = [([], [], [], []) for _ in range(count)]
         self._range_offset = 0   # retained data's position in the first cached block
+        self.pauses = []         # (begin, end) seconds without sampling between runs
+        self._resumed = False
+        self._levels = {}        # (column, signed) -> [first block, mins, maxs] per 2**k-sample level
 
     def __len__(self):
         return len(self.times)
+
+    def mark_resume(self):
+        """The next sample starts a resumed run: record the gap before it."""
+        self._resumed = bool(self.times)
 
     def extend(self, samples):
         for stamp, values in samples:
             if self.t0 is None:
                 self.t0 = stamp
             index = len(self.times)
-            self.times.append(stamp - self.t0)
+            moment = stamp - self.t0
+            if self._resumed:
+                self._resumed = False
+                previous = self.times[-1]
+                if moment < previous:   # board clock restarted (reboot): continue the axis
+                    self.t0 -= previous - moment
+                    moment = previous
+                elif moment > previous:
+                    self.pauses.append((previous, moment))
+            self.times.append(moment)
             for column, value in enumerate(values):
                 raw = self.raw[column]
                 if value is None:
@@ -86,6 +103,7 @@ class MonitorBuffer:
     def _drop(self, count):
         blocks, self._range_offset = divmod(self._range_offset + count, RANGE_BLOCK)
         del self.times[:count]
+        self.pauses = [gap for gap in self.pauses if gap[1] > self.times[0]]
         for column in range(len(self.raw)):
             del self.raw[column][:count]
             del self.signed[column][:count]
@@ -95,9 +113,33 @@ class MonitorBuffer:
             # directly by extrema(), so discarded values cannot affect its result.
             for summary in self._ranges[column]:
                 del summary[:blocks]
+        dropped = self.dropped
+        for pyramid in self._levels.values():
+            for level, entry in enumerate(pyramid, 1):
+                first = -(-dropped >> level)   # blocks holding dropped samples go
+                del entry[1][:first - entry[0]], entry[2][:first - entry[0]]
+                entry[0] = first
 
     def column(self, index, signed=False):
         return (self.signed if signed else self.raw)[index]
+
+    def blocks(self, column, signed, level):
+        """(first absolute block, mins, maxs) of whole 2**level-sample blocks, built lazily;
+        absolute sample index = retained index + dropped."""
+        values = self.column(column, signed)
+        pyramid = self._levels.setdefault((column, signed), [])
+        first, mins, maxs = self.dropped, values, values
+        for depth in range(level):
+            if depth == len(pyramid):
+                pyramid.append([-(-first // 2), array(values.typecode), array(values.typecode)])
+            entry = pyramid[depth]
+            begin, stop = entry[0] + len(entry[1]), (first + len(mins)) // 2
+            if stop > begin:
+                a, b = 2 * begin - first, 2 * stop - first
+                entry[1].extend(map(min, mins[a:b:2], mins[a + 1:b:2]))
+                entry[2].extend(map(max, maxs[a:b:2], maxs[a + 1:b:2]))
+            first, mins, maxs = entry
+        return first, mins, maxs
 
     def extrema(self, column, begin, end, signed=False):
         """Exact extrema: inspect small boundary fragments and cached whole blocks."""
@@ -149,6 +191,7 @@ class MonitorPlot(QWidget):
     AXIS_HEIGHT = 26
     MIN_ZOOM = 0.25
     ZOOM_STEP = 1.25
+    ZOOM_EASE = 0.35   # share of the remaining (log) zoom covered per glide frame
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -157,7 +200,7 @@ class MonitorPlot(QWidget):
         self.offsets = []
         self.columns = []   # buffer column of each lane; None = no data
         self.zoom_factor = 1.0
-        self.sample_interval_s = MONITOR_MIN_INTERVAL_MS / 1000
+        self.sample_interval_s = MONITOR_INTERVAL_MS / 1000
         self._view_range = None
         self.signed = False
         self.highlight = None   # lane of the register picked in the list
@@ -178,7 +221,13 @@ class MonitorPlot(QWidget):
         self._pan_render_timer.setSingleShot(True)
         self._pan_render_timer.timeout.connect(self._flush_pan_render)
         self._pan_painted = 0.   # perf_counter of the last pan frame
-        self._pan_cache = None
+        self._piece_cache = OrderedDict()
+        self._zoom_target = None   # Ctrl+wheel glide: wheel events move the target, frames ease toward it
+        self._zoom_anchor = None
+        self._zoom_origin = None   # (view range, zoom) when the glide began
+        self._zoom_timer = QTimer(self)
+        self._zoom_timer.setInterval(16)
+        self._zoom_timer.timeout.connect(self._zoom_tick)
         self._trace_cache = {}
         self._cache_key = None
         self._scene_cache = None
@@ -237,7 +286,9 @@ class MonitorPlot(QWidget):
         self._pan_live_active = False
         self._pan_release_pending = False
         self._pan_render_timer.stop()
-        self._pan_cache = None
+        self._stop_zoom_glide()
+        if buffer is not self.buffer:
+            self._piece_cache.clear()
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
         self._hover = None
@@ -299,6 +350,7 @@ class MonitorPlot(QWidget):
 
     def set_zoom(self, factor, anchor_x=None):
         if anchor_x is None:
+            self._stop_zoom_glide()   # Zoom button reset wins over a glide in progress
             self._view_range = None
         factor = max(self.MIN_ZOOM, min(self.maximum_zoom(), factor))
         if anchor_x is None:
@@ -321,13 +373,55 @@ class MonitorPlot(QWidget):
     def zoom(self, steps, anchor_x=None):
         self.set_zoom(self.zoom_factor * self.ZOOM_STEP ** max(-32, min(32, steps)), anchor_x)
 
+    def zoom_smoothly(self, steps, anchor_x):
+        """Glide to the new zoom over a few frames; wheel events during a glide only
+        move its target, so a fast spin never queues one full redraw per notch."""
+        base = self._zoom_target if self._zoom_target is not None else self.zoom_factor
+        target = base * self.ZOOM_STEP ** max(-32, min(32, steps))
+        self._zoom_target = max(self.MIN_ZOOM, min(self.maximum_zoom(), target))
+        if self._zoom_origin is None or anchor_x != self._zoom_anchor:
+            # Frames are computed from the glide's start, so the last one equals a single jump.
+            self._zoom_origin = (self._view_range, self.zoom_factor)
+        self._zoom_anchor = anchor_x
+        if not self._zoom_timer.isActive():
+            self._zoom_timer.start()
+            self._zoom_tick()   # the first frame follows the wheel at once
+
+    def _zoom_tick(self):
+        target = self._zoom_target
+        if target is None:
+            self._zoom_timer.stop()
+            return
+        ratio = target / self.zoom_factor
+        factor = target if abs(math.log(ratio)) < 0.005 else self.zoom_factor * ratio ** self.ZOOM_EASE
+        self._zoom_to(factor)
+        if self.zoom_factor != factor or factor == target:   # reached, or held at a zoom limit
+            self._stop_zoom_glide()
+
+    def _zoom_to(self, factor):
+        self._view_range, self.zoom_factor = self._zoom_origin
+        self.set_zoom(factor, self._zoom_anchor)
+        self._request_paint()   # set_zoom skips it when the factor equals the origin's
+
+    def finish_zoom(self):
+        """Jump to the end of a running glide."""
+        if self._zoom_target is not None:
+            target = self._zoom_target
+            self._zoom_to(target)
+            self._stop_zoom_glide()
+
+    def _stop_zoom_glide(self):
+        self._zoom_target = None
+        self._zoom_origin = None
+        self._zoom_timer.stop()
+
     def wheelEvent(self, event):
         if event.modifiers() & Qt.ControlModifier:
             steps = event.angleDelta().y() / 120 or event.pixelDelta().y() / 60
             lane = self.lanes()[0]
             if steps and lane.left() <= event.position().x() <= lane.right():
                 self._hover = event.position().x()
-                self.zoom(steps, event.position().x())
+                self.zoom_smoothly(steps, event.position().x())
                 event.accept()
                 return
         super().wheelEvent(event)
@@ -390,29 +484,6 @@ class MonitorPlot(QWidget):
                            QPointF(x, y_of(top)), QPointF(x, y_of(values[high - 1]))]
                 low = high
         return points
-
-    @staticmethod
-    def envelope_lines(times, values, first, start, span, rect, y_of, extrema, last):
-        """Same dense envelope as trace(), drawing each vertical column only once."""
-        width = max(1, int(rect.width()))
-        scale = rect.width() / span
-        lines = []
-        low = first
-        previous_x = previous_y = None
-        for column in range(width + 1):
-            high = bisect_right(times, start + (column + 1) / scale, low, last)
-            if high <= low:
-                continue
-            bottom, top = extrema(low, high)
-            x = rect.left() + column
-            y1, y2 = y_of(bottom), y_of(top)
-            if previous_y is not None:
-                lines.append(QLineF(previous_x, previous_y, x, previous_y))
-                y1, y2 = min(y1, y2, previous_y), max(y1, y2, previous_y)
-            lines.append(QLineF(x, y1, x, y2))
-            previous_x, previous_y = x, y_of(values[high - 1])
-            low = high
-        return lines
 
     def value_text(self, column, index):
         column = self.columns[column]
@@ -650,6 +721,7 @@ class MonitorPlot(QWidget):
             # Middle-button panning is independent of marker/range selection.
             # Capture the displayed range on press so live samples arriving
             # during a drag cannot move the view underneath the pointer.
+            self.finish_zoom()   # a pan starts from the glide's end, not a frame it would overwrite
             self._pan_press_pos = QPointF(position)
             self._pan_start_range = tuple(self._display_time_range())
             self._pan_dragging = False
@@ -657,7 +729,6 @@ class MonitorPlot(QWidget):
             self._pan_release_pending = False
             self._pan_render_timer.stop()
             self.setCursor(Qt.ClosedHandCursor)
-            QTimer.singleShot(0, self._warm_pan_cache)
             event.accept()
             return
         if event.button() == Qt.RightButton and self._in_plot(position):
@@ -953,7 +1024,12 @@ class MonitorPlot(QWidget):
             for tick in ticks:
                 x = lane.left() + (tick - start) / span * lane.width()
                 painter.drawLine(QPointF(x, lane.top() + 1), QPointF(x, lane.bottom() - 1))
-            gutter = QRectF(8, lane.top(), self.LABEL_WIDTH - 16, lane.height())
+            for begin, finish in self.buffer.pauses if self.buffer else ():
+                left = lane.left() + max(0.0, (begin - start) / span) * lane.width()
+                right = lane.left() + min(1.0, (finish - start) / span) * lane.width()
+                if right > left:
+                    painter.fillRect(QRectF(left, lane.top() + 1, right - left, lane.height() - 2), PAUSE_FILL)
+            gutter =QRectF(8, lane.top(), self.LABEL_WIDTH - 16, lane.height())
             painter.setPen(Qt.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(QRectF(gutter.left(), gutter.top() + 5, 4, max(4.0, lane.height() - 10)), 2, 2)
@@ -996,17 +1072,12 @@ class MonitorPlot(QWidget):
             painter.setRenderHint(QPainter.Antialiasing, not dense)
             painter.setPen(QPen(color, 1.0 if dense else 1.4))
             painter.setBrush(Qt.NoBrush)
-            if frame is not None and frame.get("pan"):
-                self._paint_pan_trace(painter, source, lane, start, span, count, bottom_value, top_value, dense)
-                painter.restore()
-                continue
             if cached:
                 path, marks = cached[2:]
             else:
-                extrema = lambda lo, hi: self.buffer.extrema(source, lo, hi, self.signed)
-                path = (self.envelope_lines(times, values, first, start, span, lane, y_of, extrema, trace_end)
-                        if dense else QPolygonF(self.trace(times, values, first, start, span, lane, y_of,
-                                                          last=trace_end)))
+                direct = trace_end - first <= self.DIRECT_TRACE
+                path = QPolygonF(self.trace(times, values, first, start, span, lane, y_of,
+                                            last=trace_end)) if direct else None
                 marks = []
                 failures = self.buffer.failures[source]
                 if failures:
@@ -1018,8 +1089,11 @@ class MonitorPlot(QWidget):
                         if at < len(failures) and failures[at] < hi:
                             marks.append(lane.left() + pixel + 0.5)
                 paths[column] = (data_low, data_high, path, marks)
-            if dense:
-                painter.drawLines(path)
+            if path is None:
+                painter.save()
+                self._paint_cached_trace(painter, source, lane, start, span, first, trace_end, count,
+                                         bottom_value, top_value, dense)
+                painter.restore()
             elif len(path) == 1:
                 painter.drawEllipse(path[0], 2, 2)
             else:
@@ -1031,128 +1105,82 @@ class MonitorPlot(QWidget):
                     painter.drawLine(QPointF(x, lane.bottom() - 6), QPointF(x, lane.bottom() - 1))
             painter.restore()
 
-    PAN_CACHE_WIDTHS = 4   # cached pan columns per lane, in lane widths
+    DIRECT_TRACE = 64       # fewer samples are traced directly, keeping the single-sample dot
+    TRACE_CHUNK = 256       # samples (sparse) or min/max blocks (dense) per cached piece
+    TRACE_CACHE = 768       # cached pieces, all lanes and levels
 
-    def _warm_pan_cache(self):
-        """Build the visible pan columns after a middle press, before the drag threshold."""
-        if self._pan_press_pos is None or self._pan_start_range is None or self.buffer is None:
-            return
-        start, end = self._pan_start_range
-        times = self.buffer.times
-        count = len(times)
-        if not count:
-            return
-        # Same density choice as _paint_chart(), so the right representation is built.
-        first = max(0, bisect_right(times, start, hi=count) - 1)
-        samples = min(count, bisect_right(times, end, hi=count) + 1) - first
-        exposed = self._visible_rect()
-        for lane, source in zip(self.lanes(), self.columns):
-            if source is not None and exposed.top() <= lane.bottom() and lane.top() <= exposed.bottom():
-                self._pan_lane_columns(source, lane, start, end - start, count, samples > lane.width() * 2)
-
-    def _paint_pan_trace(self, painter, source, lane, start, span, count, bottom_value, top_value, dense):
-        """Pan frame: reuse columns on a grid fixed by the gesture; build only newly exposed ones.
-
-        Traces live in (column, value) space and the painter transform applies
-        the horizontal offset and this frame's y scale."""
-        state, first, offset = self._pan_lane_columns(source, lane, start, span, count, dense)
-        a, b = first - state["first"], first - state["first"] + math.ceil(lane.width()) + 3
-        left = lane.left() - offset
-        if self.buffer.failures[source]:
-            marks = [left + first + i + 0.5 for i, bad in enumerate(state["failed"][a:b]) if bad]
-            if marks:
-                painter.save()
-                painter.setPen(QPen(QColor("#C44848"), 1))
-                for x in marks:
-                    painter.drawLine(QPointF(x, lane.bottom() - 6), QPointF(x, lane.bottom() - 1))
-                painter.restore()
+    def _paint_cached_trace(self, painter, source, lane, start, span, first, end, count, bottom_value, top_value,
+                            dense):
+        """Trace in (time, value) space from cached pieces, so zoom, pan and live frames mostly
+        reuse points. Sparse: the step trace. Dense: a min/max zigzag of 2**k-sample blocks,
+        at most one block per pixel."""
+        buffer = self.buffer
+        times, values, base = buffer.times, buffer.column(source, self.signed), buffer.dropped
+        level = math.ceil(math.log2((end - first) / max(1.0, lane.width()))) if dense else 0
+        size = self.TRACE_CHUNK << level
+        limit = base + count
+        lo = max(base, (first + base) // size * size)
+        hi = min(limit, -(-(end + base) // size) * size)
+        resumes = {bisect_left(times, resumed) + base for _, resumed in buffer.pauses}
+        cuts = sorted({lo, hi, *range(lo - lo % size + size, hi, size), *(r for r in resumes if lo < r < hi)})
+        points = []
+        for a, b in zip(cuts, cuts[1:]):
+            if points:   # hold the previous sample up to this piece, also across a pause
+                held = values[a - 1 - base]
+                points += (QPointF(times[a - 1 - base], held), QPointF(times[a - base], held))
+            points += self._trace_piece(source, level, a, b, b < limit or b % size == 0)
         pen = painter.pen()
         pen.setCosmetic(True)   # width in pixels despite the value-space transform
+        pen.setWidthF(1.0)      # antialiased pens above 1 px take Qt's ~20x slower stroker
         painter.setPen(pen)
-        scale = -lane.height() / (top_value - bottom_value)
-        painter.setTransform(QTransform(1, 0, 0, scale, left, lane.bottom() - bottom_value * scale), True)
-        if dense:
-            painter.drawLines(list(chain.from_iterable(state["items"][a:b])))
+        sx, sy = lane.width() / span, -lane.height() / (top_value - bottom_value)
+        painter.setTransform(QTransform(sx, 0, 0, sy, lane.left() - start * sx, lane.bottom() - bottom_value * sy),
+                             True)
+        polygon = QPolygonF(points)   # one polyline: antialiased joints blend once
+        painter.drawPolyline(polygon)
+        if not dense:   # a second stroke offset by under half a pixel reads as the 1.4 px trace
+            painter.setTransform(painter.transform() * QTransform.fromTranslate(0.45, 0.45))
+            painter.drawPolyline(polygon)
+
+    def _trace_piece(self, source, level, a, b, final):
+        """Points of absolute samples a..b-1: level 0 steps, else (x, max), (x, min) per block."""
+        key = (source, self.signed, level, a, b)
+        points = self._piece_cache.get(key)
+        if points is not None:
+            self._piece_cache.move_to_end(key)
+            return points
+        buffer = self.buffer
+        times, values, base = buffer.times, buffer.column(source, self.signed), buffer.dropped
+        if not level:
+            xs, ys = times[a - base:b - base], values[a - base:b - base]
+            points = [QPointF(xs[0], ys[0])]
+            points += chain.from_iterable(zip(map(QPointF, xs[1:], ys), map(QPointF, xs[1:], ys[1:])))
         else:
-            # One polyline like trace(): separate antialiased steps double-blend their joints.
-            painter.drawPolyline(QPolygonF(list(chain.from_iterable(state["items"][a:b]))))
+            width = 1 << level
+            j0, j1 = -(-a // width), b // width
+            points = []
 
-    def _pan_lane_columns(self, source, lane, start, span, count, dense):
-        width = lane.width()
-        step = span / width
-        key = (id(self.buffer), self.buffer.dropped, self.signed)
-        cache = self._pan_cache
-        # end - start of a shifted view drifts in the last bits; keep the gesture's grid.
-        if cache is None or cache["key"] != key or abs(cache["step"] - step) > step * 1e-9:
-            cache = self._pan_cache = {"key": key, "step": step, "origin": start, "lanes": {}}
-        origin, step = cache["origin"], cache["step"]
-        offset = (start - origin) / step
-        first, stop = math.floor(offset) - 1, math.ceil(offset + width) + 1
-        state = cache["lanes"].get((source, dense))
-        if state is not None and state["count"] != count:
-            # Appends only change columns from the old last sample on.
-            old = state["count"]
-            cut = math.ceil((self.buffer.times[old - 1] - origin) / step) - 1 if old and count > old else None
-            keep = cut - state["first"] if cut is not None else 0
-            if keep <= 0:
-                state = None
-            else:
-                del state["items"][keep:], state["failed"][keep:]
-                state["count"] = count
-        if state is not None and (first < state["first"] - width or stop > state["first"] + len(state["items"]) + width
-                                  or len(state["items"]) > self.PAN_CACHE_WIDTHS * width):
-            state = None   # a jump or a long pan: rebuild instead of filling a wide gap
-        if state is None:
-            items, failed = self._pan_columns(source, origin, step, first, stop, count, dense)
-            state = cache["lanes"][(source, dense)] = {"first": first, "items": items, "failed": failed,
-                                                       "count": count}
-        if first < state["first"]:
-            items, failed = self._pan_columns(source, origin, step, first, state["first"], count, dense)
-            state["items"][:0], state["failed"][:0] = items, failed
-            state["first"] = first
-        end = state["first"] + len(state["items"])
-        if stop > end:
-            items, failed = self._pan_columns(source, origin, step, end, stop, count, dense)
-            state["items"] += items
-            state["failed"] += failed
-        return state, first, offset
+            def partial(lo, hi):
+                chunk = values[lo - base:hi - base]
+                x = times[lo - base]
+                points.extend((QPointF(x, max(chunk)), QPointF(x, min(chunk))))
 
-    def _pan_columns(self, source, origin, step, first, stop, count, dense):
-        """Columns first..stop-1 in (column, value) space: envelope_lines() lines when
-        dense, trace() step points otherwise."""
-        times = self.buffer.times
-        values = self.buffer.column(source, self.signed)
-        failures = self.buffer.failures[source]
-        items, failed = [], []
-        low = bisect_right(times, origin + first * step, 0, count)
-        for column in range(first, stop):
-            high = bisect_right(times, origin + (column + 1) * step, low, count)
-            if high <= low:
-                items.append(())
-                failed.append(False)
-                continue
-            if dense:
-                lines = []
-                bottom, top = self.buffer.extrema(source, low, high, self.signed)
-                if low:
-                    previous = values[low - 1]
-                    held = math.ceil((times[low - 1] - origin) / step) - 1   # previous sample's column
-                    lines.append(QLineF(held, previous, column, previous))
-                    bottom, top = min(bottom, previous), max(top, previous)
-                lines.append(QLineF(column, bottom, column, top))
-                items.append(tuple(lines))
+            if j0 >= j1:
+                partial(a, b)
             else:
-                points = []
-                for i in range(low, high):
-                    x = (times[i] - origin) / step
-                    if i:
-                        points.append(QPointF(x, values[i - 1]))
-                    points.append(QPointF(x, values[i]))
-                items.append(tuple(points))
-            at = bisect_left(failures, low)
-            failed.append(at < len(failures) and failures[at] < high)
-            low = high
-        return items, failed
+                if a < j0 * width:
+                    partial(a, j0 * width)
+                origin, mins, maxs = buffer.blocks(source, self.signed, level)
+                xs = times[j0 * width - base:j1 * width - base:width]
+                points += chain.from_iterable(zip(map(QPointF, xs, maxs[j0 - origin:j1 - origin]),
+                                                  map(QPointF, xs, mins[j0 - origin:j1 - origin])))
+                if j1 * width < b:
+                    partial(j1 * width, b)
+        if final:   # the growing tail piece changes with every batch
+            self._piece_cache[key] = points
+            while len(self._piece_cache) > self.TRACE_CACHE:
+                self._piece_cache.popitem(last=False)
+        return points
 
     def paint_pinned_axis(self, painter, band, start=None, end=None):
         """Draw the shared time axis into ``band``. Tick x matches the chart lanes."""
@@ -1350,7 +1378,6 @@ class MonitorPlot(QWidget):
         self._lane_scenes = frame["tiles"]
         self._pan_live_active = False
         self._pan_release_pending = False
-        self._pan_cache = None   # pan columns are only reused within one gesture
         self._trace_cache = frame["paths"]
         self._cache_key = (id(self.buffer), self._scene_revision, self.signed, *self._scene_range,
                            self.width(), self.height())
@@ -1484,7 +1511,18 @@ class MonitorPlot(QWidget):
             self._paint_chart(painter, exposed, start, end,
                               frame={"count": count,
                                      "revision": self.buffer.revision if self.buffer is not None else 0,
-                                     "paths": {}, "pan": True})
+                                     "paths": {}})
+            self._paint_readouts(painter, exposed, start, end)
+            self._finish_paint_flags(False)
+            self._sync_axis_view()
+            return
+        if self._zoom_target is not None:
+            # Glide frames go straight to the screen; the tiled frame is built once it settles.
+            start, end = self.time_range()
+            self._paint_chart(painter, exposed, start, end,
+                              frame={"count": len(self.buffer) if self.buffer is not None else 0,
+                                     "revision": self.buffer.revision if self.buffer is not None else 0,
+                                     "paths": {}})
             self._paint_readouts(painter, exposed, start, end)
             self._finish_paint_flags(False)
             self._sync_axis_view()
@@ -1642,10 +1680,9 @@ class _PinnedTimeAxis(QWidget):
 
 class MonitorDialog(ManagedDialog):
     """Pick registers of the current component, sample them on the board and plot them."""
-    interval_changed = Signal(int)
     settings_changed = Signal(dict)
 
-    def __init__(self, session_provider, interval_ms=10, parent=None, settings=None):
+    def __init__(self, session_provider, parent=None, settings=None):
         super().__init__(parent)
         self.setWindowTitle("寄存器监视")
         if parent is not None:
@@ -1670,7 +1707,7 @@ class MonitorDialog(ManagedDialog):
         self.sampler = ""     # board-side sampler of the current/last run, see SAMPLER_LABELS
         self._last_data = None   # monotonic time of the latest samples of this run
         self._shown_pause = 0
-        self.interval_ms = interval_ms
+        self.interval_ms = MONITOR_INTERVAL_MS
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.export_pool = QThreadPool(self)
@@ -1690,21 +1727,19 @@ class MonitorDialog(ManagedDialog):
         self.component_label = ElidedLabel("", "muted")
         self.component_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         control_width = 110
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(MONITOR_MIN_INTERVAL_MS, 60000)
-        self.interval_spin.setSuffix(" ms")
-        self.interval_spin.setFixedWidth(control_width)
-        self.interval_spin.setValue(max(MONITOR_MIN_INTERVAL_MS, min(60000, int(interval_ms))))
-        self.interval_spin.setToolTip(f"板端采样间隔，最小 {MONITOR_MIN_INTERVAL_MS} ms。aarch64 板子上由常驻采样程序"
-                                      "一次映射、循环读取，减少重复启动 devmem 的开销；无法使用时改为每点每寄存器启动一次 devmem，"
-                                      "寄存器越多、间隔越小，CPU 占用越高。跟不上时按实际速度采样并在状态栏提示。")
-        self.interval_spin.valueChanged.connect(self.interval_changed)
-        self.interval_spin.valueChanged.connect(lambda value: setattr(self.plot, "sample_interval_s", value / 1000))
         self.start_button = button("开始监视", self.toggle, "primary", "play")
         self.start_button.setFixedWidth(control_width)
+        self.start_button.setToolTip(f"板端每 {MONITOR_INTERVAL_MS} ms 采样一次：aarch64 板子上由常驻采样程序一次映射、循环读取；"
+                                     "无法使用时改为 devmem 循环，跟不上时按实际速度采样并在状态栏提示。"
+                                     f"最多保留约 {SAMPLE_LIMIT * MONITOR_INTERVAL_MS // 1000} s 数据。")
+        self.pause_button = button("暂停", self.toggle_pause, None, "pause")
+        self.pause_button.setProperty("outlined", True)
+        self.pause_button.setFixedWidth(control_width)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setToolTip("暂停板端采样并保留已采数据，可缩放、打标记、导出；继续后接着画在同一条曲线上，暂停时段以浅色底标出")
         # Header: title on the left, run controls on the right.
         header = row(label("寄存器监视", "title"), self.component_label,
-                     label("采样间隔", "muted"), self.interval_spin, self.start_button, spacing=8)
+                     self.pause_button, self.start_button, spacing=8)
         header.setStretchFactor(self.component_label, 1)
         header.insertSpacing(1, 4)
         header.insertSpacing(3, 16)
@@ -1756,7 +1791,7 @@ class MonitorDialog(ManagedDialog):
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
-        self.plot.sample_interval_s = self.interval_spin.value() / 1000
+        self.plot.sample_interval_s = MONITOR_INTERVAL_MS / 1000
         self.plot.signed = self.settings["signed"]
         self.zoom_label = label("100%", "muted")
         self.zoom_label.setMinimumWidth(58)
@@ -1830,7 +1865,7 @@ class MonitorDialog(ManagedDialog):
         layout.addWidget(self.footer)
         self._status_kind = ""
         self.refresh_timer = QTimer(self)
-        self.refresh_timer.setInterval(50)
+        self.refresh_timer.setInterval(16)   # draw each ~40 ms board batch on arrival, without a beat
         self.refresh_timer.timeout.connect(self._refresh)
         self._update_count()
         self._set_status("勾选寄存器后点「开始监视」。")
@@ -2030,7 +2065,6 @@ class MonitorDialog(ManagedDialog):
         if session is None:
             self._set_status("请先连接 SSH，再开始监视。", "warn")
             return False
-        interval = self.interval_spin.value()
         self._epoch += 1
         self._runs += 1
         token = self._epoch
@@ -2042,12 +2076,16 @@ class MonitorDialog(ManagedDialog):
         self.sampler = ""
         self._last_data = None
         self._shown_pause = 0
-        self.interval_ms = interval
-        self.plot.sample_interval_s = interval / 1000
         self.buffer = MonitorBuffer(len(chosen))
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
         self._sync_highlight()
-        addresses = [address for _, address in chosen]
+        self._launch(session, token, stop)
+        return True
+
+    def _launch(self, session, token, stop):
+        """Start board sampling of self.monitored into the current buffer."""
+        interval = self.interval_ms
+        addresses = [address for _, address in self.monitored]
         bridge = self.bridge
         worker = Worker(lambda progress: session.start_monitor(
             addresses, interval, lambda samples: bridge.samples.emit(token, samples),
@@ -2058,8 +2096,40 @@ class MonitorDialog(ManagedDialog):
         worker.signals.finished.connect(lambda: self._workers.discard(worker))
         self._workers.add(worker)
         self._set_state("starting")
-        self._set_status(f"正在启动板端采样（{len(chosen)} 个寄存器，间隔 {interval} ms）…")
+        self._set_status(f"正在启动板端采样（{len(addresses)} 个寄存器，间隔 {interval} ms）…")
         self.pool.start(worker)
+
+    def toggle_pause(self):
+        if self.state == "running":
+            self.pause()
+        elif self.state == "paused":
+            self.resume()
+
+    def pause(self):
+        """End board sampling but keep the run: its data stays and resume() appends to it."""
+        if self.state != "running":
+            return False
+        self._stop.set()   # same epoch: samples already in flight still belong to this run
+        self._set_state("paused")
+        self._refresh()
+        self._set_status(self._summary("已暂停"))
+        return True
+
+    def resume(self):
+        if self.state != "paused":
+            return False
+        session = self._session_provider()
+        if session is None:
+            self._set_status("请先连接 SSH，再继续监视。", "warn")
+            return False
+        self._epoch += 1
+        token = self._epoch
+        self._stop = stop = threading.Event()
+        self._last_data = None
+        self._shown_pause = 0
+        if self.buffer is not None:
+            self.buffer.mark_resume()
+        self._launch(session, token, stop)
         return True
 
     def stop(self):
@@ -2079,7 +2149,8 @@ class MonitorDialog(ManagedDialog):
             else:
                 self.plot.set_series(self.buffer, [name for name, _ in self.monitored], self.monitored_offsets)
                 self._sync_highlight()
-        self._set_status("已清空。" if self.state == "idle" else self._summary("监视中"))
+        self._set_status("已清空。" if self.state == "idle" else
+                         self._summary("已暂停" if self.state == "paused" else "监视中"))
 
     def _started(self, token, ok):
         if token != self._epoch or self.state != "starting":
@@ -2102,7 +2173,7 @@ class MonitorDialog(ManagedDialog):
             self._dirty = True
 
     def _stopped(self, token, message):
-        if token != self._epoch:
+        if token != self._epoch or self.state == "paused":   # a paused run ends on purpose
             return
         if self.state != "idle":
             self._set_state("idle")
@@ -2119,13 +2190,16 @@ class MonitorDialog(ManagedDialog):
         self.start_button.setObjectName("primary" if idle else "danger")
         self.start_button.setIcon(icon("play", "#FFFFFF") if idle else icon("stop", "#B64242"))
         restyle(self.start_button)
+        paused = state == "paused"
+        self.pause_button.setEnabled(state in ("running", "paused"))
+        self.pause_button.setText("继续" if paused else "暂停")
+        self.pause_button.setIcon(icon("play" if paused else "pause"))
         # Lock the rows while keeping the view and its scrollbar interactive.
         with QSignalBlocker(self.list):
             for item in self._items():
                 flags = item.flags()
                 if flags & Qt.ItemIsUserCheckable:
                     item.setFlags(flags | Qt.ItemIsEnabled if idle else flags & ~Qt.ItemIsEnabled)
-        self.interval_spin.setEnabled(idle)
         self._update_count()
         self._update_state_dot()
         if idle:
@@ -2170,6 +2244,8 @@ class MonitorDialog(ManagedDialog):
             if self._dirty:
                 self._dirty = False
                 self.plot.refresh_data()
+            if self.state == "paused":   # samples in flight at the pause still count
+                self._set_status(self._summary("已暂停"))
             if self.state != "running":
                 return
             if paused:
@@ -2180,7 +2256,8 @@ class MonitorDialog(ManagedDialog):
 
     def _set_status(self, text, kind=""):
         self.status.setText(" · ".join(text.splitlines()))
-        self.status.setStyleSheet({"warn": "color: #9A661D;", "error": "color: #B14040;"}.get(kind, ""))
+        if kind != self._status_kind:   # a restyle per data frame is costly
+            self.status.setStyleSheet({"warn": "color: #9A661D;", "error": "color: #B14040;"}.get(kind, ""))
         self._status_kind = kind
         self._update_state_dot()
 

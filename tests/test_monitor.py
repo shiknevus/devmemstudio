@@ -1,7 +1,9 @@
 """Register monitor: board sampler script, stream parser, sample buffer and plot."""
 from array import array
+import bisect
 import os
 import inspect
+import math
 import random
 from pathlib import Path
 import shutil
@@ -15,7 +17,7 @@ from zipfile import ZipFile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QPointF, QRectF
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QTransform, QWheelEvent
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
 from PySide6.QtTest import QTest, QSignalSpy
@@ -31,6 +33,9 @@ def send_plot_wheel(plot, delta, modifiers=Qt.ControlModifier, pixel_delta=0, po
     event = QWheelEvent(position, position, QPoint(0, pixel_delta), QPoint(0, delta),
                         Qt.NoButton, modifiers, Qt.NoScrollPhase, False)
     QApplication.sendEvent(plot, event)
+    chart = plot if isinstance(plot, MonitorPlot) else getattr(plot, "plot", None)
+    if isinstance(chart, MonitorPlot):
+        chart.finish_zoom()   # the glide's end state; test_ctrl_wheel_zoom_glides covers the frames
     return event
 
 
@@ -59,7 +64,7 @@ class SamplerScriptTests(unittest.TestCase):
         self.assertLess(script.index("command -v devmem"), script.index("while :"))
         self.assertIn("exit 127", script)
         self.assertIn('echo "@$t" || exit;', script)  # channel closure must end the board loop
-        self.assertEqual(MONITOR_MIN_INTERVAL_MS, 5)
+        self.assertEqual(MONITOR_MIN_INTERVAL_MS, 1)
         self.assertEqual(MONITOR_MAX_REGISTERS, 32)
         with self.assertRaises(ValueError):
             monitor_script([], 5)
@@ -243,6 +248,25 @@ class BufferTests(unittest.TestCase):
         self.assertAlmostEqual(buffer.period(), 0.5)
         self.assertEqual(to_signed(0x80000000), -0x80000000)
 
+    def test_resume_records_the_gap_and_survives_a_restarted_clock(self):
+        buffer = MonitorBuffer(1)
+        buffer.mark_resume()   # nothing yet: no gap
+        buffer.extend([(10.0, (1,)), (10.5, (2,))])
+        buffer.mark_resume()
+        buffer.extend([(14.0, (3,))])
+        self.assertEqual(buffer.pauses, [(0.5, 4.0)])
+        buffer.mark_resume()
+        buffer.extend([(1.0, (4,)), (1.5, (5,))])   # board rebooted while paused
+        self.assertEqual(list(buffer.times), [0.0, 0.5, 4.0, 4.0, 4.5])
+        self.assertEqual(buffer.pauses, [(0.5, 4.0)])
+
+    def test_dropping_old_samples_forgets_old_pauses(self):
+        buffer = MonitorBuffer(1, limit=8)
+        buffer.extend([(0.0, (0,)), (1.0, (0,))])
+        buffer.mark_resume()
+        buffer.extend([(float(i), (i,)) for i in range(5, 12)])
+        self.assertEqual(buffer.pauses, [])   # times now start at 6.0, past the (1.0, 5.0) gap
+
     def test_limit_drops_the_oldest_quarter_and_reindexes_failures(self):
         buffer = MonitorBuffer(1, limit=8)
         buffer.extend([(float(i), (None if i in (1, 7) else i,)) for i in range(9)])
@@ -403,7 +427,6 @@ class DialogTests(unittest.TestCase):
         self.dialog.set_registers('A', self.registers, [0x1000, 0x1004])
         self.dialog._set_state('running')
         self.assertTrue(self.dialog.search.isEnabled())
-        self.assertFalse(self.dialog.interval_spin.isEnabled())
         self.dialog.search.setText('R1')
         self.assertTrue(self.dialog.list.item(0).isHidden())
         self.assertFalse(self.dialog.list.item(1).isHidden())
@@ -859,13 +882,14 @@ class DialogTests(unittest.TestCase):
                 self.dialog.splitter.setSizes([width // 2, width])
                 self.app.processEvents()
                 d = self.dialog
-                widths = {control.width() for control in (d.interval_spin, d.start_button, d.clear_button, d.export_button)}
+                widths = {control.width() for control in (d.pause_button, d.start_button, d.clear_button, d.export_button)}
                 self.assertEqual(widths, {110})
                 # header: run controls on the title row, right-aligned with the chart
                 header_y = rect(d.component_label).center().y()
-                for control in (d.interval_spin, d.start_button):
+                for control in (d.pause_button, d.start_button):
                     self.assertLessEqual(abs(rect(control).center().y() - header_y), 1)
-                self.assertGreater(rect(d.interval_spin).left(), rect(d.component_label).right())
+                self.assertGreater(rect(d.pause_button).left(), rect(d.component_label).right())
+                self.assertLess(rect(d.pause_button).right(), rect(d.start_button).left())
                 self.assertLess(rect(d.start_button).bottom(), rect(d.search).top())
                 self.assertLessEqual(abs(rect(d.start_button).right() - rect(d.plot).right()), 1)
                 # toolbar: view options left, data actions right, level with the search box
@@ -887,10 +911,10 @@ class DialogTests(unittest.TestCase):
                 self.assertIn("Δt: 0.500000 s", self.dialog.marker_label.text())
                 self.assertIn("已采 201 点", self.dialog.status.text())
 
-        for state in ("starting", "running", "idle"):
+        for state in ("starting", "running", "paused", "idle"):
             self.dialog._set_state(state)
             self.app.processEvents()
-            widths = {control.width() for control in (self.dialog.interval_spin, self.dialog.start_button,
+            widths = {control.width() for control in (self.dialog.pause_button, self.dialog.start_button,
                                                        self.dialog.clear_button, self.dialog.export_button)}
             self.assertEqual(widths, {110})
 
@@ -1057,8 +1081,9 @@ class DialogTests(unittest.TestCase):
         plot = self.dialog.plot
         send_plot_wheel(plot, 6000)
         self.assertAlmostEqual(plot.zoom_factor, plot.maximum_zoom())
-        self.assertAlmostEqual(plot.time_range()[1] - plot.time_range()[0], 2 * self.dialog.interval_spin.value() / 1000)
+        self.assertAlmostEqual(plot.time_range()[1] - plot.time_range()[0], 2 * self.dialog.interval_ms / 1000)
         send_plot_wheel(plot, -6000)
+        send_plot_wheel(plot, -6000)   # one wheel event moves at most 32 steps
         self.assertEqual(plot.zoom_factor, plot.MIN_ZOOM)
         self.assertEqual(self.dialog.zoom_label.text(), "25%")
         QTest.mouseClick(self.dialog.zoom_button, Qt.LeftButton)
@@ -1135,18 +1160,16 @@ class DialogTests(unittest.TestCase):
             store = ConfigStore(Path(folder) / "settings.json")
             cfg = store.load()
             self.dialog.settings_changed.connect(lambda settings: cfg.update(monitor_settings=settings))
-            self.dialog.interval_changed.connect(lambda interval: cfg.update(monitor_interval_ms=interval))
             self.dialog.set_registers("Component A", self.registers, [0x1000], key="top:A")
             self.dialog.list.item(2).setCheckState(Qt.Checked)
             self.dialog.set_registers("Component B", self.registers, [0x1004], key="top:B")
             self.dialog.list.item(1).setCheckState(Qt.Unchecked)  # remember an intentionally empty selection
-            self.dialog.interval_spin.setValue(25)
             self.dialog.signed_check.setChecked(True)
             store.save(cfg)
             saved = store.load()
-            restored = MonitorDialog(lambda: None, saved['monitor_interval_ms'], settings=saved['monitor_settings'])
+            restored = MonitorDialog(lambda: None, settings=saved['monitor_settings'])
             try:
-                self.assertEqual(restored.interval_spin.value(), 25)
+                self.assertEqual(restored.interval_ms, 1)
                 self.assertNotIn("window_s", restored.settings)
                 self.assertTrue(restored.signed_check.isChecked())
                 self.assertTrue(restored.plot.signed)
@@ -1185,6 +1208,64 @@ class DialogTests(unittest.TestCase):
         finally:
             restored.shutdown()
             restored.close()
+
+    def test_pause_keeps_the_run_and_resume_appends_after_a_gap(self):
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(2)]
+        session = Mock()
+        runs = []
+
+        def start_monitor(chosen, interval, on_samples, stopped, cancel, on_sampler=None):
+            base = 1.0 + 10 * len(runs)
+            runs.append((list(chosen), interval, cancel, stopped))
+            on_samples([(base + i * .01, (i, i)) for i in range(5)])
+            return True
+
+        session.start_monitor.side_effect = start_monitor
+        self.dialog._session_provider = lambda: session
+        self.dialog.set_registers("regs", registers, [reg["_address"] for reg in registers])
+        self.assertFalse(self.dialog.pause_button.isEnabled())
+        self.assertTrue(self.dialog.start())
+        self.wait_state("running")
+        self.assertTrue(self.dialog.pause_button.isEnabled())
+        self.dialog.pause_button.click()
+        self.assertEqual(self.dialog.state, "paused")
+        self.assertTrue(runs[0][2].is_set())                # board sampling ended
+        self.assertEqual(self.dialog.pause_button.text(), "继续")
+        runs[0][3]("")                                       # the sampler reports its end
+        self.app.processEvents()
+        self.assertEqual(self.dialog.state, "paused")
+        self.assertIn("已暂停", self.dialog.status.text())
+        self.dialog.pause_button.click()
+        self.wait_state("running")
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[1][:2], runs[0][:2])           # same registers and interval
+        self.assertEqual(len(self.dialog.buffer), 10)
+        self.assertEqual(len(self.dialog.buffer.pauses), 1)
+        begin, end = self.dialog.buffer.pauses[0]
+        self.assertAlmostEqual(begin, .04)
+        self.assertAlmostEqual(end, 10.0)
+        self.dialog.plot.repaint()                           # the gap band paints
+        self.dialog.pause()
+        self.dialog.stop()                                   # stop from paused ends the run
+        self.assertEqual(self.dialog.state, "idle")
+        self.assertEqual(self.dialog.pause_button.text(), "暂停")
+        self.assertFalse(self.dialog.pause_button.isEnabled())
+
+    def test_resume_without_a_session_stays_paused(self):
+        self.dialog.monitored = [("R0", 0x1000)]
+        self.dialog.buffer = MonitorBuffer(1)
+        self.dialog._set_state("running")
+        self.assertTrue(self.dialog.pause())
+        self.assertFalse(self.dialog.resume())
+        self.assertEqual(self.dialog.state, "paused")
+        self.assertIn("SSH", self.dialog.status.text())
+
+    def wait_state(self, state):
+        deadline = time.monotonic() + 3
+        while self.dialog.state != state and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertEqual(self.dialog.state, state)
 
     def test_stop_then_clear_ignores_queued_samples_and_errors(self):
         self.dialog.monitored = [("R0", 0x1000)]
@@ -1290,28 +1371,94 @@ class DialogTests(unittest.TestCase):
 
 
 class PlotTests(unittest.TestCase):
-    def test_dense_lines_preserve_the_reference_envelope_and_single_sample_pulses(self):
+    def test_block_pyramid_matches_brute_force_across_drops(self):
+        rng = random.Random(42)
+        buffer = MonitorBuffer(1, limit=3000)
+        index = 0
+        for batch in (700, 1, 1300, 2500, 33, 1900):
+            buffer.extend([((index + i) * .001, (rng.randrange(1 << 32),)) for i in range(batch)])
+            index += batch
+            for signed in (False, True):
+                values, base = buffer.column(0, signed), buffer.dropped
+                for level in (1, 3, 6):
+                    width = 1 << level
+                    first, mins, maxs = buffer.blocks(0, signed, level)
+                    self.assertEqual(first, -(-base // width))
+                    self.assertEqual(first + len(mins), (base + len(values)) // width)
+                    for block in range(first, first + len(mins), 7):
+                        chunk = values[block * width - base:(block + 1) * width - base]
+                        self.assertEqual((mins[block - first], maxs[block - first]), (min(chunk), max(chunk)))
+        self.assertTrue(buffer.dropped)
+
+    def cached_trace(self, plot, lane, start, end, dense):
+        """Polygon points _paint_cached_trace() would draw, in (time, value) space."""
+        drawn = []
+
+        class Painter:
+            def pen(self):
+                return QPen()
+
+            def setPen(self, pen):
+                pass
+
+            def setTransform(self, transform, combine=False):
+                pass
+
+            def transform(self):
+                return QTransform()
+
+            def drawPolyline(self, polygon):
+                drawn.append([(point.x(), point.y()) for point in polygon])
+
+        times = plot.buffer.times
+        first = max(0, bisect.bisect_right(times, start) - 1)
+        last = min(len(times), bisect.bisect_right(times, end) + 1)
+        plot._paint_cached_trace(Painter(), 0, lane, start, end - start, first, last, len(times), 0, 1, dense)
+        return drawn[0]
+
+    def test_dense_trace_keeps_block_envelopes_single_sample_pulses_and_pause_holds(self):
         rng = random.Random(42)
         buffer = MonitorBuffer(1)
-        buffer.extend([(i*.001, (rng.randrange(100),)) for i in range(1000)])
-        rect = QRectF(0, 0, 20, 100)
-        points = MonitorPlot.trace(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value)
-        lines = MonitorPlot.envelope_lines(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value,
-                                           lambda low, high: buffer.extrema(0, low, high), len(buffer))
-        reference = {}
-        for first, second in zip(points, points[1:]):
-            if first.x() == second.x():
-                low, high = sorted((first.y(), second.y()))
-                previous = reference.get(first.x(), (low, high))
-                reference[first.x()] = (min(previous[0], low), max(previous[1], high))
-        optimized = {line.x1(): tuple(sorted((line.y1(), line.y2()))) for line in lines if line.x1() == line.x2()}
-        self.assertEqual(optimized, reference)
-        self.assertLessEqual(len(lines), 2*(int(rect.width())+1))
+        buffer.extend([(i * .001, (rng.randrange(100),)) for i in range(3000)])
+        plot = MonitorPlot()
+        plot.set_series(buffer, ["R0"], [0])
+        lane = QRectF(0, 0, 100, 80)
+        points = self.cached_trace(plot, lane, 0., 3., True)
+        level = math.ceil(math.log2(3000 / 100))
+        width = 1 << level
+        self.assertLessEqual(len(points), 2 * (3000 // width + 2))   # at most one block per pixel
+        for block in range(3000 // width):
+            chunk = buffer.raw[0][block * width:(block + 1) * width]
+            self.assertIn((buffer.times[block * width], max(chunk)), points)
+            self.assertIn((buffer.times[block * width], min(chunk)), points)
         buffer = MonitorBuffer(1)
-        buffer.extend([(i*.001, (100 if i == 500 else 0,)) for i in range(1000)])
-        lines = MonitorPlot.envelope_lines(buffer.times, buffer.raw[0], 0, 0., 1., rect, lambda value: value,
-                                           lambda low, high: buffer.extrema(0, low, high), len(buffer))
-        self.assertTrue(any({line.y1(), line.y2()} == {0, 100} for line in lines))
+        buffer.extend([(i * .001, (100 if i == 1234 else 0,)) for i in range(3000)])
+        buffer.mark_resume()
+        buffer.extend([((5000 + i) * .001, (7,)) for i in range(3000)])
+        plot.set_series(buffer, ["R0"], [0])
+        points = self.cached_trace(plot, lane, 0., 8., True)
+        self.assertEqual(max(y for _, y in points), 100)
+        # The last value before the pause is held until the first sample after it.
+        self.assertIn((buffer.times[2999], 0), points)
+        self.assertIn((buffer.times[3000], 0), points)
+        self.assertNotIn(7, {y for x, y in points if buffer.times[2999] < x < buffer.times[3000]})
+        plot.close()
+
+    def test_sparse_cached_trace_matches_the_step_trace(self):
+        rng = random.Random(3)
+        buffer = MonitorBuffer(1)
+        buffer.extend([(i * .001, (rng.randrange(100),)) for i in range(900)])
+        plot = MonitorPlot()
+        plot.set_series(buffer, ["R0"], [0])
+        points = self.cached_trace(plot, QRectF(0, 0, 600, 80), 0., .9, False)
+        steps = MonitorPlot.trace(buffer.times, buffer.raw[0], 0, 0., 1000., QRectF(0, 0, 1000, 80),
+                                  lambda value: value)
+
+        def path(points):   # piece seams repeat a corner point; the path itself is the same
+            return [point for i, point in enumerate(points) if not i or point != points[i - 1]]
+
+        self.assertEqual(path(points), path([(point.x(), point.y()) for point in steps]))
+        plot.close()
 
     def tearDown(self):
         # Dispose standalone charts through Qt while its event loop is alive.
@@ -1943,27 +2090,29 @@ class PlotTests(unittest.TestCase):
         finally:
             plot.close()
 
-    def test_pan_moves_build_only_newly_exposed_columns(self):
+    def test_pan_moves_reuse_cached_trace_pieces(self):
         plot = self.pan_plot(20000)
         try:
             lane = plot.lanes()[0]
-            plot.set_zoom(2.0, lane.right())
+            plot.set_zoom(2.0, lane.center().x())   # the growing tail piece stays out of view
             plot.grab()
             press = QPoint(round(lane.center().x()), round(lane.center().y()))
             QTest.mousePress(plot, Qt.MiddleButton, pos=press)
             self.app.processEvents()
             built = []
-            columns = MonitorPlot._pan_columns
+            piece = MonitorPlot._trace_piece
 
-            def record(widget, source, origin, step, first, stop, *args):
-                built.append(stop - first)
-                return columns(widget, source, origin, step, first, stop, *args)
+            def record(widget, source, level, a, b, final):
+                if (source, widget.signed, level, a, b) not in widget._piece_cache:
+                    built.append(b - a)
+                return piece(widget, source, level, a, b, final)
 
-            with patch.object(MonitorPlot, '_pan_columns', new=record):
+            with patch.object(MonitorPlot, '_trace_piece', new=record):
                 for dx in (6, 12, 18):
                     self.middle_move(plot, press + QPoint(dx, 0))
                     plot.grab()
-            self.assertLessEqual(sum(built), 2 * 3 * 8)
+            # 18 px can expose at most one new piece per lane (one piece spans ~260 px here).
+            self.assertLessEqual(sum(built), 2 * (MonitorPlot.TRACE_CHUNK << 4))
             self.finish_pan(plot, press + QPoint(18, 0))
         finally:
             plot.close()
@@ -2126,6 +2275,35 @@ class PlotTests(unittest.TestCase):
         self.assertEqual(plot.time_range(), (10.0, 90.0))
         self.assertEqual(buffer.total, 101)
         self.assertEqual(list(buffer.raw[0]), list(range(101)))
+
+    def test_ctrl_wheel_zoom_glides_and_merges_fast_notches(self):
+        plot = MonitorPlot()
+        buffer = MonitorBuffer(1)
+        buffer.extend([(float(i), (i,)) for i in range(101)])
+        plot.set_series(buffer, ["R0"])
+        x = plot.lanes()[0].center().x()
+        plot.zoom_smoothly(1, x)
+        first = plot.zoom_factor
+        self.assertGreater(first, 1.0)
+        self.assertLess(first, 1.25)                     # one notch is spread over several frames
+        plot.zoom_smoothly(1, x)                         # a notch during the glide extends its target
+        self.assertAlmostEqual(plot._zoom_target, 1.25 ** 2)
+        factors = [plot.zoom_factor]
+        deadline = time.monotonic() + 2
+        while plot._zoom_timer.isActive() and time.monotonic() < deadline:
+            QTest.qWait(5)
+            factors.append(plot.zoom_factor)
+        self.assertFalse(plot._zoom_timer.isActive())
+        self.assertEqual(plot.zoom_factor, 1.25 ** 2)
+        self.assertEqual(factors, sorted(factors))       # monotonic, no overshoot
+        self.assertGreater(len(set(factors)), 3)
+        plot.zoom_smoothly(-1, x)
+        plot.set_zoom(1.0)                               # the Zoom reset cancels a glide
+        QTest.qWait(40)
+        self.assertEqual(plot.zoom_factor, 1.0)
+        plot.zoom_smoothly(-64, x)                       # held at the minimum
+        plot.finish_zoom()
+        self.assertEqual(plot.zoom_factor, plot.MIN_ZOOM)
 
     def test_zoom_handles_empty_and_dropped_data(self):
         plot = MonitorPlot()

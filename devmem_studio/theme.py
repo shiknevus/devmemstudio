@@ -28,6 +28,7 @@ PATHS = {
     "clear": '<path d="M4 7h16M9 7V3h6v4M6 7l1 14h10l1-14M10 10v7m4-7v7"/>',
     "play": '<path d="m8 4 12 8-12 8z"/>',
     "stop": '<rect x="5" y="5" width="14" height="14" rx="1"/>',
+    "pause": '<path d="M9 5v14M15 5v14"/>',
     "help": '<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5m0 3h.01"/>',
     "copy": '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
     "chevron": '<path d="m9 5 7 7-7 7"/>',

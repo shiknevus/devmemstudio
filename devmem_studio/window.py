@@ -30,8 +30,10 @@ from . import updater
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
-                   normalize_remote_dir, remember_dir, MONITOR_MIN_INTERVAL_MS, connect_ssh_until_cancelled)
+                   normalize_remote_dir, remember_dir, MONITOR_INTERVAL_MS, LIVE_INTERVAL_MS,
+                   connect_ssh_until_cancelled)
 from .monitor import MonitorDialog
+from .live_read import LiveReader, NO_LIVE_FLAGS
 from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
@@ -120,7 +122,7 @@ class MainWindow(QMainWindow):
         self.type_catalog = top_import.load_type_catalog()
         self.active_component = None
         self._pending_component = None
-        self._poll_holds = 0   # >0 while a modal dialog must not race an auto-read
+        self._poll_holds = 0   # >0 while a modal dialog must not race live reads
         self._retry_note = (None, 0.0)   # last SSH retry note (text, time): logs throttle to 1/s per text
         self.view = "basic"
         self.rtl_base = None
@@ -144,6 +146,12 @@ class MainWindow(QMainWindow):
         self.bridge.serial_data.connect(self._serial_output)
         self.bridge.serial_lost.connect(self._serial_lost)
         self.bridge.serial_uboot.connect(self._serial_uboot)
+        self.live = LiveReader(self)
+        self.live.values.connect(self._live_values)
+        self.live.stopped.connect(self._live_stopped)
+        self.live_timer = QTimer(self)   # debounce: search typing restarts the sampler once
+        self.live_timer.setSingleShot(True)
+        self.live_timer.timeout.connect(self._sync_live)
         self.session = SshSession(self._log_emit("ssh"))
         self.serial = SerialSession(self._log_emit("system"))
         self.serial_screen = ScreenBuffer()
@@ -201,9 +209,8 @@ class MainWindow(QMainWindow):
         if self.store.warning:
             self.append_log("ERROR", self.store.warning)
         self.poll_timer = QTimer(self)
-        self.poll_timer.timeout.connect(self._poll)
+        self.poll_timer.timeout.connect(self._sync_live)
         self.poll_timer.start(250)
-        self._next_poll = 0
         self.heartbeat = QTimer(self)
         self.heartbeat.timeout.connect(self._check_session)
         self.heartbeat.start(1000)
@@ -527,21 +534,10 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
         self.module_title = ElidedLabel("寄存器映射", "sectionTitle")
         self.register_count = label("", "muted")
-        self.poll_check = QCheckBox("自动读取")
+        self.poll_check = QCheckBox("实时读取")
+        self.poll_check.setToolTip(f"开启后当前页签的寄存器由板端常驻采样程序每 {LIVE_INTERVAL_MS} ms 读取一次（与监视同一机制），"
+                                   "切换页签/搜索自动跟随；读写走独立通道，写入不受影响。读有副作用的寄存器不参与。")
         self.poll_check.toggled.connect(self._poll_toggled)
-        self.interval = ComboBox()
-        self.interval.setAccessibleName("自动读取周期")
-        for text, value in (("0.1 s", 100), ("0.2 s", 200), ("0.5 s", 500), ("1 s", 1000),
-                            ("2 s", 2000), ("5 s", 5000), ("10 s", 10000)):
-            self.interval.addItem(text, value)
-        self.interval.setFixedWidth(88)
-        # Editable (但 NoInsert)：可直接输入毫秒数或带小数的秒数（500 / 0.3 / 150ms），
-        # 4.1.1 重构时误删 setEditable，README「轮询间隔可编辑输入」因此失效。
-        self.interval.setEditable(True)
-        self.interval.setInsertPolicy(QComboBox.NoInsert)
-        self.interval.currentIndexChanged.connect(lambda _i: self._interval_edited())
-        self.interval.editTextChanged.connect(lambda _text: self._interval_edited())
-        self.interval.setToolTip("自动读取周期；可直接输入毫秒数或带小数的秒数（如 500 或 0.3），最快 0.1 s")
         self.read_all_button = button("读取全部", self.read_all, "primary", "read")
         self.write_all_button = button("批量写入", self.write_all, None, "write")
         self.remote_buttons.extend([self.read_all_button, self.write_all_button])
@@ -553,7 +549,7 @@ class MainWindow(QMainWindow):
         # (寄存器映射 / 会话终端) share a left edge; the cards below keep their
         # own full-width alignment.
         title_row = row(self.module_title, self.register_count, 1, self.module_badge,
-                        self.poll_check, self.interval, self.write_all_button,
+                        self.poll_check, self.write_all_button,
                         self.read_all_button, self.export_button, self.help_button,
                         spacing=10)
         self.register_title_row = title_row
@@ -590,7 +586,7 @@ class MainWindow(QMainWindow):
         filters_layout.addStretch()
         self.monitor_button = button("监视", self.open_monitor, "flat", "axis")
         self.monitor_button.setProperty("outlined", True)
-        self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端按设定间隔（最小 {MONITOR_MIN_INTERVAL_MS} ms）"
+        self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端每 {MONITOR_INTERVAL_MS} ms "
                                        "连续采样，绘制数值随时间变化的曲线。")
         filters_layout.addWidget(self.monitor_button)
         self.access_filter = ComboBox()
@@ -877,14 +873,6 @@ class MainWindow(QMainWindow):
         idx = self.console_source_combo.findData("system")
         self.console_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.console_source = self.console_source_combo.currentData() or "system"
-        saved = self.cfg.get("poll_interval", 1000)
-        index = self.interval.findData(saved)
-        if index < 0:
-            # 旧配置里的自定义周期：回填到编辑框（可编辑下拉直接显示该值），
-            # 而不是就近选预设——用户上次输入的自定义值得以还原。
-            self.interval.setEditText(f"{saved:g} ms")
-        else:
-            self.interval.setCurrentIndex(index)
 
     def _shortcuts(self):
         for sequence, callback in (("F5", self.read_all), ("Ctrl+F", self._focus_log_search),
@@ -961,7 +949,7 @@ class MainWindow(QMainWindow):
 
     @contextmanager
     def _hold_poll(self):
-        """Keep auto-read from starting a task while a modal dialog is open."""
+        """Pause live reads while a modal dialog is open."""
         self._poll_holds += 1
         try:
             yield
@@ -1151,7 +1139,6 @@ class MainWindow(QMainWindow):
             restyle(self.base_field)
             self._status("基地址须为 0x00000000–0xFFFFFFFF 的十六进制数。")
             self.address_valid = False
-            self.poll_check.setChecked(False)
             self._refresh_controls()
             return
         self.base_field.setProperty("invalid", False)
@@ -1246,7 +1233,7 @@ class MainWindow(QMainWindow):
         self._highlight_component()
         self.rebuild_registers()
         self.append_log("SYSTEM", f"已选择组件 {self._component_display_name(comp)}（{comp['module_type']} @ {comp['address']}）。")
-        if self._can_operate():
+        if self._can_operate() and not self.poll_check.isChecked():   # live mode fills the rows itself
             self.read_all()
 
     @property
@@ -1258,7 +1245,7 @@ class MainWindow(QMainWindow):
         if key != self.view:
             self.view = key
             self.filter_rows()
-            if self._can_operate():
+            if self._can_operate() and not self.poll_check.isChecked():
                 self.read_all()
 
     def _highlight_component(self):
@@ -1308,7 +1295,6 @@ class MainWindow(QMainWindow):
             self.base_field.setProperty("invalid", True)
             restyle(self.base_field)
             self._status(str(exc))
-            self.poll_check.setChecked(False)
             self._refresh_controls()
             return
         self.address_valid = True
@@ -1526,6 +1512,7 @@ class MainWindow(QMainWindow):
             if self.active_component:
                 self.empty_label.setText(f"此类型在「{top_import.VIEW_LABELS[self.view]}」视图没有寄存器，可切换视图或搜索。")
         self.table_note.setText(f"  {len(visible)} 项可见 · 选中行查看解析与位状态 · 双击待写入值编辑" if visible else "  0 项可见")
+        self.live_timer.start(150)
 
     def _selection_changed(self):
         if self._updating:
@@ -1760,7 +1747,7 @@ class MainWindow(QMainWindow):
         badge_full = self.module_badge.sizeHint().width() if badge_shown else 0
         for labelled in (True, False):
             self._set_action_labels(labelled)
-            fixed = [widget for widget in (self.register_count, self.poll_check, self.interval, self.write_all_button,
+            fixed = [widget for widget in (self.register_count, self.poll_check, self.write_all_button,
                                            self.read_all_button, self.export_button, self.help_button)
                      if not widget.isHidden()]
             widths = (max(widget.minimumWidth(), min(widget.maximumWidth(), widget.sizeHint().width()))
@@ -1884,15 +1871,11 @@ class MainWindow(QMainWindow):
                 return
 
     def _fit_compact_selectors(self, compact, tiny):
-        for combo in (self.interval, self.width_combo, self.format_combo,
+        for combo in (self.width_combo, self.format_combo,
                       self.preset_combo, self.console_source_combo):
             if combo.property("compact") != compact:
                 combo.setProperty("compact", compact)
                 restyle(combo)
-        periods = ("0.1 s", "0.2 s", "0.5 s", "1 s", "2 s", "5 s", "10 s")
-        self._set_combo_display_labels(self.interval, periods,
-                                      tuple(text.replace(" ", "") for text in periods), compact)
-        self.interval.setFixedWidth(64 if tiny else 72 if compact else 88)
         self.width_combo.setFixedWidth(64 if compact else 80)
         self.format_combo.setFixedWidth(64 if compact else 88)
         self.preset_combo.setMinimumContentsLength(6 if compact else 8)
@@ -2112,7 +2095,6 @@ class MainWindow(QMainWindow):
         if connected and self.demo:
             self._status("演示模式 · 当前数据来自本地模拟")
         if not connected:
-            self.poll_check.setChecked(False)
             self._stop_stream()
         else:
             # SSH just came up: tail sunny.log into the log buffer (background,
@@ -2120,6 +2102,7 @@ class MainWindow(QMainWindow):
             self._ensure_log_stream()
         self._show_measurement()
         self._refresh_controls()
+        self._sync_live()
 
     def _reset_measurements(self):
         for reg in self.regs:
@@ -2455,10 +2438,8 @@ class MainWindow(QMainWindow):
         if self._closing or not self.regs or not getattr(self, "address_valid", False):
             return
         if self.monitor_dialog is None:
-            self.monitor_dialog = MonitorDialog(lambda: self.session if self.connected else None,
-                                                self.cfg.get("monitor_interval_ms", 10), self,
+            self.monitor_dialog = MonitorDialog(lambda: self.session if self.connected else None, self,
                                                 settings=self.cfg.get("monitor_settings"))
-            self.monitor_dialog.interval_changed.connect(self._remember_monitor_interval)
             self.monitor_dialog.settings_changed.connect(self._remember_monitor_settings)
         self._sync_monitor(preselect=True)
         self.monitor_dialog.present()
@@ -2478,10 +2459,6 @@ class MainWindow(QMainWindow):
 
     def _remember_monitor_settings(self, settings):
         self.cfg["monitor_settings"] = settings
-        self._schedule_save()
-
-    def _remember_monitor_interval(self, value):
-        self.cfg["monitor_interval_ms"] = int(value)
         self._schedule_save()
 
     def _remember_bitpack_settings(self, settings):
@@ -2610,7 +2587,6 @@ class MainWindow(QMainWindow):
         if self._closing:
             QTimer.singleShot(0, self.close)   # closeEvent deferred to this worker
             return False
-        self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
         self._refresh_controls()
         return True
 
@@ -2811,7 +2787,6 @@ class MainWindow(QMainWindow):
         # Task failures are software-level events: they land in the system log;
         # user-initiated cancels are not errors.
         self.append_log("SYSTEM" if "已取消" in message else "ERROR", message)
-        self.poll_check.setChecked(False)
         if not self.session.alive:
             self._set_connection(False)
         if self._task_kind == "connect" and not self.cancel.is_set() and "已取消" not in message:
@@ -2878,7 +2853,6 @@ class MainWindow(QMainWindow):
         # A finished connect (e.g. waiting on the host-key dialog) must not keep
         # the badge stuck on 连接中.
         self._update_connection_status()
-        self._next_poll = time.monotonic() + self._poll_interval_ms() / 1000
         self._style_session_button(self.connect_button, self.connected, "断开", "连接")
         self._refresh_controls()
         pending, self._pending_component = self._pending_component, None
@@ -2901,7 +2875,6 @@ class MainWindow(QMainWindow):
                 self.append_log("SYSTEM", "已请求取消 serial 连接。")
         if self._busy:
             self.cancel.set()
-            self.poll_check.setChecked(False)
             if self._task_kind == "connect":
                 self.session.close()
             self.append_log("SYSTEM", "已请求停止后续操作。")
@@ -3012,7 +2985,6 @@ class MainWindow(QMainWindow):
     def write_all(self):
         if not self._can_operate():
             return
-        self.poll_check.setChecked(False)
         records = [reg for reg in self.visible_regs if not reg.get("readonly")]
         try:
             for reg in records:
@@ -3024,41 +2996,68 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self._write_many(dialog.selected())
 
-    def _poll_interval_ms(self):
-        """Auto-read interval in milliseconds from the combo; accepts typed values.
-
-        Accepts "0.3" / "0.3 s" (seconds with decimals) or "300" / "300ms"
-        (milliseconds); clamps to the fastest 0.1 s and 60 s. The typed text wins
-        over the still-selected preset item so custom values take effect at once."""
-        text = str(self.interval.currentText()).strip().lower()
-        match = re.match(r"^(\d+(?:\.\d+)?)\s*(ms|s)?$", text)
-        if match:
-            number = float(match.group(1))
-            unit = match.group(2)
-            if unit == "ms":
-                ms = number
-            elif unit == "s":
-                ms = number * 1000
-            else:
-                ms = number * 1000 if number < 60 else number   # 无单位：按秒，>=60 按毫秒
-            return max(100, min(60000, int(ms)))
-        data = self.interval.currentData()
-        if data is not None:
-            return max(100, min(60000, int(data)))
-        return 1000
-
-    def _interval_edited(self):
-        self._schedule_save()
-
     def _poll_toggled(self, checked):
-        self._next_poll = 0
         if checked:
-            self._status("自动读取已开启 · 每次读取完成后等待所选间隔")
+            self._status("实时读取已开启 · 当前页签由板端持续采样，切换页签自动跟随")
+        self._sync_live()
 
-    def _poll(self):
-        if (self.poll_check.isChecked() and not self._closing and not self._poll_holds
-                and self._can_operate() and time.monotonic() >= self._next_poll):
-            self._read_many(self.visible_regs, quiet=True)
+    def _live_addresses(self):
+        """Addresses the live sampler should cover now; empty pauses it (board tasks, modal holds)."""
+        if not (self.poll_check.isChecked() and self.connected and not self._closing and not self._poll_holds
+                and self.active_component and getattr(self, "address_valid", False)
+                and (not self._busy or self._task_kind in ("read", "write"))):
+            return []
+        return list(dict.fromkeys(reg["_address"] for reg in self.visible_regs
+                                  if not any(reg.get(flag) for flag in NO_LIVE_FLAGS)))
+
+    def _sync_live(self):
+        addresses = self._live_addresses()
+        key = (id(self.session), tuple(addresses)) if addresses else None
+        if key == self.live.key:
+            return
+        if key is None:
+            self.live.stop()
+        else:
+            self.live.start(self.session, addresses, LIVE_INTERVAL_MS, key)
+
+    @Slot(object)
+    def _live_values(self, values):
+        if self._closing or not self.connected:
+            return
+        stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        source, target = ("离线演示", "DEMO") if self.demo else ("设备实测", f"{self.host.text()}:{self.port.value()}")
+        changed = []
+        for reg in self.regs:
+            if reg["_address"] not in values or any(reg.get(flag) for flag in NO_LIVE_FLAGS):
+                continue
+            value = values[reg["_address"]]
+            error = "" if value is not None else "实时读取失败"
+            reg.update(_updated=stamp, _source=source, _target=target)
+            if reg["_error"] == error and not reg.get("_readback_failed") and (value is None or reg["_value"] == value):
+                continue
+            reg.update(_error=error, _readback_failed=False)
+            if value is not None:
+                reg["_value"] = value
+            self._update_table_row(reg)
+            changed.append(reg)
+        refreshed = {id(reg) for reg in changed}
+        if any(reg["name"] == "PARAM4" for reg in changed):
+            # PARAM4 is the pulse divisor: rows scaled by it were rendered with the old value.
+            for other in self.regs:
+                if id(other) not in refreshed and other.get("_row") is not None and self._pulse_scaled_label(other):
+                    self._update_table_row(other)
+                    refreshed.add(id(other))
+        if self.selected is not None and id(self.selected) in refreshed:
+            self._show_measurement()
+        elif self.selected is not None and self.selected["_address"] in values:
+            self.updated_label.setText(f"更新于 {stamp}")
+
+    @Slot(str)
+    def _live_stopped(self, message):
+        if self._closing or not self.connected or not self.session.alive:
+            return   # link loss: the heartbeat reports it and live resumes after reconnect
+        self.append_log("ERROR", f"实时读取已停止：{message}")
+        self.poll_check.setChecked(False)
 
     def _check_session(self):
         if self.connected and not self._busy and not self.session.alive:
@@ -3132,7 +3131,7 @@ class MainWindow(QMainWindow):
             # The prompt was already cleared on submit: give the command back instead of dropping it.
             if self.console.is_interactive():
                 self.console._set_prompt_input(text)
-            self._status("正在执行其他操作（如自动读取），命令未发送，请稍后按回车重试。")
+            self._status("正在执行其他操作（如读取或写入），命令未发送，请稍后按回车重试。")
             return
         if not self.connected:   # ssh / log / system 视图的输入都走 SSH
             self._status("SSH 未连接，请先连接 SSH。")
@@ -3528,7 +3527,6 @@ class MainWindow(QMainWindow):
             return True
         self.cfg.update(host=self.host.text().strip(), port=self.port.value(), username=self.user.text().strip(),
                         password=self.password.text(), remember_password=self.remember.isChecked(),
-                        poll_interval=self._poll_interval_ms(),
                         serial_port=self._serial_device or self._selected_serial_port(), serial_baud=self._serial_baud_value(),
                         serial_username=self.serial_user.text().strip(),
                         serial_password=self.serial_password.text(),
@@ -3547,6 +3545,7 @@ class MainWindow(QMainWindow):
         self.heartbeat.stop()
         self.save_timer.stop()
         self.cancel.set()
+        self.live.stop()
         self._stop_stream()
         if self.monitor_dialog is not None:
             self.monitor_dialog.shutdown()
