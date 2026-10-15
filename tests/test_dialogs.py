@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt, QEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QMessageBox, QDialogButtonBox  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox, QDialogButtonBox, QLabel, QSizePolicy  # noqa: E402
 
 from devmem_studio.dialogs import BitUploadDialog, BitRollbackDialog, FileChoiceDialog  # noqa: E402
 
@@ -86,6 +86,25 @@ class BitUploadDialogTests(unittest.TestCase):
                 dialog.set_path(str(other))
         warning.assert_called_once()
         self.assertIsNone(dialog._local_path)
+
+    def test_long_path_is_elided_without_covering_dialog_content(self):
+        dialog = BitUploadDialog()
+        with tempfile.TemporaryDirectory() as directory:
+            bit = Path(directory) / ("firmware-" + "x" * 170 + ".bit")
+            bit.write_bytes(b"x")
+            dialog.resize(600, 320)
+            dialog.show()
+            self.app.processEvents()
+            dialog.set_path(str(bit))
+            self.app.processEvents()
+            self.assertEqual(dialog.path_label.text(), str(bit))
+            self.assertEqual(dialog.path_label.toolTip(), str(bit))
+            self.assertEqual(dialog.path_label.sizePolicy().horizontalPolicy(), QSizePolicy.Ignored)
+            self.assertNotEqual(QLabel.text(dialog.path_label), str(bit))
+            heading = dialog.layout().itemAt(0).widget()
+            self.assertLessEqual(heading.geometry().bottom(), dialog.path_label.geometry().top())
+            self.assertLess(dialog.path_label.geometry().bottom(), dialog.status.geometry().top())
+        dialog.close()
 
 
 class BitRollbackDialogTests(unittest.TestCase):

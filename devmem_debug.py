@@ -15,6 +15,7 @@ def main():
     args = parser.parse_args()
     if args.offscreen:
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication, QMessageBox
     from devmem_studio.core import user_data_dir
@@ -55,9 +56,10 @@ def main():
     window = MainWindow()
     available = app.primaryScreen().availableGeometry()
     # MainWindow restores the saved normal size and maximized state separately.
-    window.show()
     if 'window_maximized' not in window.cfg and (available.width() <= 1400 or available.height() <= 850):
-        window.showMaximized()
+        # Before show(): the window opens maximized instead of animating from normal size.
+        window.setWindowState(window.windowState() | Qt.WindowMaximized)
+    window.show()
     launcher = os.environ.get('DEVMEMSTUDIO_LAUNCHER')
     if launcher and sys.platform == 'win32' and not args.offscreen:
         from devmem_studio.taskbar import bind_relaunch

@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, QThreadPool, QSize, Slot
+from PySide6.QtCore import Qt, QTimer, QThreadPool, QRect, QSize, Slot
 from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
@@ -36,7 +36,7 @@ from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
-from .window_state import WindowStateCoordinator
+from .window_state import WindowStateCoordinator, saved_origin
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
                       IpAddressField, ResizeAwareWidget, TerminalView, LinkLabel)
@@ -227,6 +227,11 @@ class MainWindow(QMainWindow):
                 and all(type(size) is int and 64 <= size <= 16384 for size in saved_size)):
             self.setMinimumSize(min(self.minimumWidth(), saved_size[0]), min(self.minimumHeight(), saved_size[1]))
             self.resize(*saved_size)
+            origin = saved_origin(self.cfg.get("window_pos"), saved_size)
+            if origin is not None:
+                # Client geometry, like the saved value (move() would place the
+                # unshown frame there). Also picks the monitor a maximized window opens on.
+                self.setGeometry(QRect(origin, self.size()))
             self._apply_responsive_layout(force=True)
             self._window_states._capture_owner_geometry()
         if self.cfg.get("window_maximized") is True:
@@ -1655,24 +1660,32 @@ class MainWindow(QMainWindow):
         if screen is None or self.isFullScreen() or self.isMinimized():
             return
         available = screen.availableGeometry()
+        previous = self._screen_min_size
+        # Sizes below are client sizes; the title bar and borders must fit too.
+        frame = self.frameGeometry()
+        frame_w, frame_h = frame.width() - self.width(), frame.height() - self.height()
         # A low-resolution monitor cannot satisfy the normal desktop floor. Lower
         # the application floor before clamping the window so it remains usable
         # instead of extending beyond the monitor work area.
         if available.width() < WINDOW_DESKTOP_MIN_SIZE[0] or available.height() < WINDOW_DESKTOP_MIN_SIZE[1]:
-            min_width = max(640, min(WINDOW_COMPACT_MIN_SIZE[0], available.width() - 16))
-            min_height = max(480, min(WINDOW_COMPACT_MIN_SIZE[1], available.height() - 16))
+            min_width = max(640, min(WINDOW_COMPACT_MIN_SIZE[0], available.width() - max(16, frame_w)))
+            min_height = max(480, min(WINDOW_COMPACT_MIN_SIZE[1], available.height() - max(16, frame_h)))
             self._screen_min_size = (min_width, min_height)
         else:
             self._screen_min_size = None
+        if self._screen_min_size != previous:
+            # The responsive pass reapplies its floor only when the layout mode flips.
+            floor = WINDOW_COMPACT_MIN_SIZE if self._compact_layout else WINDOW_DESKTOP_MIN_SIZE
+            self.setMinimumSize(*(self._screen_min_size or floor))
         self._apply_responsive_layout()
         if self.isMaximized():
             return
-        width = min(self.width(), available.width())
-        height = min(self.height(), available.height())
+        width = min(self.width(), available.width() - frame_w)
+        height = min(self.height(), available.height() - frame_h)
         if width != self.width() or height != self.height():
             self.resize(width, height)
-        x = min(max(self.x(), available.left()), available.right() - self.width() + 1)
-        y = min(max(self.y(), available.top()), available.bottom() - self.height() + 1)
+        x = min(max(self.x(), available.left()), available.right() - self.width() - frame_w + 1)
+        y = min(max(self.y(), available.top()), available.bottom() - self.height() - frame_h + 1)
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
 

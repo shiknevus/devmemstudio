@@ -1847,6 +1847,157 @@ class PlotTests(unittest.TestCase):
         finally:
             plot.close()
 
+    @staticmethod
+    def middle_move(plot, pos, held=True):
+        QApplication.sendEvent(plot, QMouseEvent(QEvent.MouseMove, QPointF(pos), QPointF(pos), Qt.NoButton,
+                                                 Qt.MiddleButton if held else Qt.NoButton, Qt.NoModifier))
+
+    def test_middle_drag_pans_clamps_and_commits_frame(self):
+        plot = self.marker_plot()
+        try:
+            lane = plot.lanes()[0]
+            plot.set_zoom(2.0, lane.right())
+            self.assertEqual(plot.time_range(), (5.0, 10.0))
+            plot.grab()
+            press = QPoint(round(lane.center().x()), round(lane.center().y()))
+            QTest.mousePress(plot, Qt.MiddleButton, pos=press)
+            self.middle_move(plot, press + QPoint(round(lane.width() / 4), 0))
+            begin, end = plot.time_range()
+            self.assertAlmostEqual(end - begin, 5.0)
+            self.assertAlmostEqual(begin, 3.75, delta=0.02)
+            self.middle_move(plot, press + QPoint(round(lane.width()), 0))
+            self.assertEqual(plot.time_range(), (0.0, 5.0))   # clamped to the oldest sample
+            QTest.mouseRelease(plot, Qt.MiddleButton, pos=press + QPoint(round(lane.width()), 0))
+            self.assertNotEqual(plot.cursor().shape(), Qt.ClosedHandCursor)
+            for _ in range(200):
+                if not plot._pan_live_active:
+                    break
+                self.app.processEvents()
+            self.assertFalse(plot._pan_live_active)
+            self.assertEqual(plot._scene_range, (0.0, 5.0))
+        finally:
+            plot.close()
+
+    def pan_plot(self, count, step=.005):
+        rng = random.Random(7)
+        buffer = MonitorBuffer(2)
+        values = [0, 0]
+        samples = []
+        for i in range(count):
+            values = [rng.randrange(1000) if rng.random() < .05 else value for value in values]
+            samples.append((i * step, (values[0], None if i % 997 == 5 else values[1])))
+        buffer.extend(samples)
+        plot = MonitorPlot()
+        plot.resize(900, 320)
+        plot.set_series(buffer, ["R0", "R1"], [0x800, 0x804])
+        plot.show()
+        self.app.processEvents()
+        return plot
+
+    def finish_pan(self, plot, pos):
+        QTest.mouseRelease(plot, Qt.MiddleButton, pos=pos)
+        for _ in range(500):
+            if not plot._pan_live_active:
+                break
+            self.app.processEvents()
+        self.assertFalse(plot._pan_live_active)
+
+    def pan_matches_final_frame(self, plot, zoom, append=None):
+        lane = plot.lanes()[0]
+        # Below 100% the window is wider than the history, so new samples land in view.
+        plot.set_zoom(zoom, None if zoom < 1 else lane.right())
+        plot.grab()
+        press = QPoint(round(lane.center().x()), round(lane.center().y()))
+        QTest.mousePress(plot, Qt.MiddleButton, pos=press)
+        self.app.processEvents()   # cache warm-up
+        pos = press + QPoint(137, 0)
+        self.middle_move(plot, pos)
+        if append:
+            plot.grab()   # cache the columns before the new samples arrive
+            plot.buffer.extend(append)
+        plot._hover = None
+        panned = plot.grab().toImage()
+        self.assertTrue(plot._pan_live_active)
+        self.finish_pan(plot, pos)
+        plot._hover = None
+        final = plot.grab().toImage()
+        differing = sum(panned.pixel(x, y) != final.pixel(x, y)
+                        for y in range(0, panned.height(), 2) for x in range(MonitorPlot.LABEL_WIDTH, panned.width()))
+        self.assertLessEqual(differing, 20)
+
+    def test_pan_frame_matches_final_frame_for_dense_and_sparse_traces(self):
+        for count, zoom in ((20000, 2.0), (2000, 8.0)):
+            plot = self.pan_plot(count)
+            try:
+                with self.subTest(samples_per_pixel=count / zoom / plot.lanes()[0].width()):
+                    self.pan_matches_final_frame(plot, zoom)
+            finally:
+                plot.close()
+
+    def test_pan_frame_includes_samples_appended_during_the_drag(self):
+        plot = self.pan_plot(20000)
+        try:
+            last = plot.buffer.times[-1] + plot.buffer.t0
+            self.pan_matches_final_frame(plot, .5, append=[(last + (i + 1) * .005, (5000 + i, 7000))
+                                                           for i in range(400)])
+        finally:
+            plot.close()
+
+    def test_pan_moves_build_only_newly_exposed_columns(self):
+        plot = self.pan_plot(20000)
+        try:
+            lane = plot.lanes()[0]
+            plot.set_zoom(2.0, lane.right())
+            plot.grab()
+            press = QPoint(round(lane.center().x()), round(lane.center().y()))
+            QTest.mousePress(plot, Qt.MiddleButton, pos=press)
+            self.app.processEvents()
+            built = []
+            columns = MonitorPlot._pan_columns
+
+            def record(widget, source, origin, step, first, stop, *args):
+                built.append(stop - first)
+                return columns(widget, source, origin, step, first, stop, *args)
+
+            with patch.object(MonitorPlot, '_pan_columns', new=record):
+                for dx in (6, 12, 18):
+                    self.middle_move(plot, press + QPoint(dx, 0))
+                    plot.grab()
+            self.assertLessEqual(sum(built), 2 * 3 * 8)
+            self.finish_pan(plot, press + QPoint(18, 0))
+        finally:
+            plot.close()
+
+    def test_middle_click_jitter_keeps_live_view(self):
+        plot = self.marker_plot()
+        try:
+            lane = plot.lanes()[0]
+            press = QPoint(round(lane.center().x()), round(lane.center().y()))
+            QTest.mousePress(plot, Qt.MiddleButton, pos=press)
+            self.middle_move(plot, press + QPoint(2, 0))
+            QTest.mouseRelease(plot, Qt.MiddleButton, pos=press + QPoint(2, 0))
+            self.assertIsNone(plot._view_range)
+            self.assertFalse(plot._pan_live_active)
+        finally:
+            plot.close()
+
+    def test_lost_middle_release_ends_pan_on_next_move(self):
+        plot = self.marker_plot()
+        try:
+            lane = plot.lanes()[0]
+            plot.set_zoom(2.0, lane.right())
+            press = QPoint(round(lane.center().x()), round(lane.center().y()))
+            QTest.mousePress(plot, Qt.MiddleButton, pos=press)
+            self.middle_move(plot, press + QPoint(40, 0))
+            self.middle_move(plot, press + QPoint(80, 0), held=False)
+            self.assertIsNone(plot._pan_press_pos)
+            self.assertTrue(plot._pan_release_pending)
+            panned = plot.time_range()
+            self.middle_move(plot, press + QPoint(160, 0), held=False)
+            self.assertEqual(plot.time_range(), panned)
+        finally:
+            plot.close()
+
     def test_released_range_can_resize_both_edges_without_changing_markers(self):
         plot = self.marker_plot()
         try:

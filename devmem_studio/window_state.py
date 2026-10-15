@@ -4,7 +4,7 @@ import ctypes
 import os
 import sys
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QWidget
 from shiboken6 import isValid
 
@@ -25,6 +25,20 @@ def _is_normal(widget):
 def _saved_size(value):
     return (isinstance(value, list) and len(value) == 2
             and all(type(size) is int and 64 <= size <= 16384 for size in value))
+
+
+def saved_origin(value, size):
+    """Saved client top-left, or None when no screen would show its title bar."""
+    if not (isinstance(value, list) and len(value) == 2
+            and all(type(coord) is int and abs(coord) <= 32767 for coord in value)):
+        return None
+    title = 24   # the frame sits above the saved client origin
+    strip = QRect(value[0], value[1] - title, size[0], title)
+    for screen in QApplication.screens():
+        visible = screen.availableGeometry().intersected(strip)
+        if visible.height() == title and visible.width() >= min(120, size[0]):
+            return QPoint(*value)
+    return None
 
 
 def _refresh_restored_window(widget):
@@ -228,8 +242,14 @@ class WindowStateCoordinator(QObject):
         config = getattr(self.owner, "cfg", None)
         if not isinstance(config, dict):
             return
-        size = self.normal_geometry(self.owner).size()
+        normal = self.normal_geometry(self.owner)
+        size = normal.size()
         config["window_size"] = [size.width(), size.height()]
+        if not _is_normal(self.owner) and self.owner.normalGeometry().isValid():
+            # Qt tracks the native restore rectangle; a window shown maximized
+            # never moved, so the coordinator copy keeps the unshown origin.
+            normal = self.owner.normalGeometry()
+        config["window_pos"] = [normal.x(), normal.y()]
         config["window_maximized"] = bool(_state(self.owner) & Qt.WindowMaximized)
         raw = config.get("dialog_windows", {})
         saved = dict(raw) if isinstance(raw, dict) else {}

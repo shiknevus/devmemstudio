@@ -179,11 +179,39 @@ class IpAddressField(QWidget):
                 restyle(self)
         elif event.type() == QEvent.KeyPress and watched in self.octets:
             idx = self.octets.index(watched)
-            if event.text() in (".", "。", " "):   # dotted typing: jump to the next octet
+            # Treat a typed separator as navigation rather than as invalid
+            # input.  Checking the key as well as the text keeps this working
+            # with keyboard layouts that do not report the period character
+            # in QKeyEvent.text().
+            if event.key() == Qt.Key_Period or event.text() in (".", "\u3002", " "):
+                # An empty octet swallows the dot: after "192" auto-advances,
+                # the typed "." must not skip another octet.
                 if watched.text() and idx < 3:
                     self.octets[idx + 1].setFocus()
                     self.octets[idx + 1].selectAll()
                 return True
+            if event.key() == Qt.Key_Backspace:
+                # A segmented address should delete across the dot just like
+                # one ordinary line edit: once the caret reaches the start of
+                # an octet, continue deleting the previous octet.
+                if (idx > 0 and not watched.hasSelectedText()
+                        and watched.cursorPosition() == 0):
+                    previous = self.octets[idx - 1]
+                    previous.setFocus()
+                    previous.setCursorPosition(len(previous.text()))
+                    if previous.text():
+                        previous.backspace()
+                    return True
+            elif event.key() == Qt.Key_Delete:
+                # Mirror the same behavior for Delete at the end of an octet.
+                if (idx < 3 and not watched.hasSelectedText()
+                        and watched.cursorPosition() >= len(watched.text())):
+                    following = self.octets[idx + 1]
+                    following.setFocus()
+                    following.setCursorPosition(0)
+                    if following.text():
+                        following.del_()
+                    return True
             if event.matches(QKeySequence.Paste):
                 text = QGuiApplication.clipboard().text().strip()
                 if "." in text:   # a whole address: spread it over the octets

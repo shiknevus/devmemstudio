@@ -4,6 +4,7 @@ from array import array
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 import copy
+from itertools import chain
 import csv
 from datetime import datetime
 import math
@@ -11,7 +12,7 @@ import threading
 import time
 
 from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QLineF, QRectF, QSignalBlocker, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxLayout, QVBoxLayout, QSplitter,
                                QListWidget, QListWidgetItem,
                                QLineEdit, QSpinBox, QCheckBox, QFileDialog, QSizePolicy,
@@ -168,6 +169,16 @@ class MonitorPlot(QWidget):
         self._range_press = None
         self._range_dragging = False
         self._range_resize = None
+        self._pan_press_pos = None
+        self._pan_start_range = None
+        self._pan_dragging = False
+        self._pan_live_active = False
+        self._pan_release_pending = False
+        self._pan_render_timer = QTimer(self)
+        self._pan_render_timer.setSingleShot(True)
+        self._pan_render_timer.timeout.connect(self._flush_pan_render)
+        self._pan_painted = 0.   # perf_counter of the last pan frame
+        self._pan_cache = None
         self._trace_cache = {}
         self._cache_key = None
         self._scene_cache = None
@@ -210,7 +221,7 @@ class MonitorPlot(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAccessibleDescription("单击图表放置 A/B 标记，同一位置再次单击取消该标记，拖动标记调整位置，右键清除标记。"
                                       "左键拖选导出时间段，拖动选区左右边缘调整范围，在选区外拖动重新选择，右键清除选区。"
-                                      "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴。")
+                                      "单击左侧寄存器名称高亮曲线。滚轮上下浏览，Ctrl + 滚轮缩放时间轴，按住中键左右拖动平移时间轴。")
 
     def set_series(self, buffer, names, offsets=(), columns=None):
         self.clear_markers()
@@ -218,6 +229,15 @@ class MonitorPlot(QWidget):
         self._range_press = None
         self._range_dragging = False
         self._range_resize = None
+        if self._pan_press_pos is not None:
+            self.unsetCursor()   # drop the grab cursor of an interrupted pan
+        self._pan_press_pos = None
+        self._pan_start_range = None
+        self._pan_dragging = False
+        self._pan_live_active = False
+        self._pan_release_pending = False
+        self._pan_render_timer.stop()
+        self._pan_cache = None
         self.buffer, self.names = buffer, list(names)
         self.highlight = None
         self._hover = None
@@ -626,6 +646,20 @@ class MonitorPlot(QWidget):
 
     def mousePressEvent(self, event):
         position = event.position()
+        if event.button() == Qt.MiddleButton and self._in_plot(position):
+            # Middle-button panning is independent of marker/range selection.
+            # Capture the displayed range on press so live samples arriving
+            # during a drag cannot move the view underneath the pointer.
+            self._pan_press_pos = QPointF(position)
+            self._pan_start_range = tuple(self._display_time_range())
+            self._pan_dragging = False
+            # Keep live painting if the previous pan's frame is still building.
+            self._pan_release_pending = False
+            self._pan_render_timer.stop()
+            self.setCursor(Qt.ClosedHandCursor)
+            QTimer.singleShot(0, self._warm_pan_cache)
+            event.accept()
+            return
         if event.button() == Qt.RightButton and self._in_plot(position):
             self.export_range = None
             self._range_press = None
@@ -696,6 +730,10 @@ class MonitorPlot(QWidget):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MiddleButton and self._pan_press_pos is not None:
+            self._finish_pan()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._range_resize is not None:
             self.export_range = tuple(sorted((self._range_resize, self._range_time_at(event.position()))))
             self._range_resize = None
@@ -743,6 +781,12 @@ class MonitorPlot(QWidget):
     def mouseMoveEvent(self, event):
         self._hover = event.position().x()
         self._mouse_repaint = True
+        if self._pan_press_pos is not None:
+            if event.buttons() & Qt.MiddleButton:
+                self._pan_view(event.position())
+                event.accept()
+                return
+            self._finish_pan()   # release lost, e.g. focus switched mid-drag
         if self._range_resize is not None and event.buttons() & Qt.LeftButton:
             self.export_range = tuple(sorted((self._range_resize, self._range_time_at(event.position()))))
             self._request_paint()
@@ -769,6 +813,76 @@ class MonitorPlot(QWidget):
                 self._drag_moved = True
                 self._set_marker(self._drag_marker, stamp)
         self._request_paint()
+
+    def _pan_view(self, position):
+        """Move the displayed time window horizontally while the middle button is held."""
+        if (self._pan_press_pos is None or self._pan_start_range is None
+                or self.buffer is None or not len(self.buffer)):
+            return
+        lane = self.lanes()[0]
+        if lane.width() <= 0:
+            return
+        start, end = self._pan_start_range
+        span = max(0.0, end - start)
+        if span <= 0:
+            return
+        moved = position.x() - self._pan_press_pos.x()
+        if not self._pan_dragging and abs(moved) < 3:
+            return   # a plain middle click must not park the live view
+        self._pan_dragging = True
+        delta = moved / lane.width() * span
+        desired = start - delta
+        earliest, latest = float(self.buffer.times[0]), float(self.buffer.times[-1])
+        # Keep the window over retained samples.  If the minimum zoom span is
+        # wider than the retained history, pin it to the earliest sample.
+        if span >= latest - earliest:
+            begin = earliest
+        else:
+            begin = max(earliest, min(desired, latest - span))
+        view = (begin, begin + span)
+        if view == self._view_range:
+            return
+        self._view_range = view
+        # Use the same deferred frame path as vertical scrolling so a drag
+        # remains responsive when many lanes or a dense sample history are
+        # visible.
+        self._begin_scroll()
+        self._prepare_timer.stop()
+        self._prepared_frame = None
+        self._tile_timer.stop()
+        self._pending_tiles.clear()
+        self._scene_cache = None
+        self._pan_live_active = True
+        # Coalesce high-frequency mouse moves and paint only the newest range.
+        # The eventual frame is still rendered from the current buffer; this
+        # prevents a slow paint from blocking and queuing every intermediate
+        # pointer position.
+        if not self._pan_render_timer.isActive():
+            # Pace to ~60 fps from the last frame, not from this move; a fixed
+            # 16 ms after each move capped the drag near 40 fps.
+            elapsed = (time.perf_counter() - self._pan_painted) * 1000
+            self._pan_render_timer.start(max(0, round(16 - elapsed)))
+
+    def _finish_pan(self):
+        self._pan_press_pos = None
+        self._pan_start_range = None
+        self._pan_dragging = False
+        if self._pan_live_active:
+            # Keep drawing the current range while the final cached frame
+            # is prepared after release.
+            self._pan_release_pending = True
+        self._pan_render_timer.stop()
+        self.unsetCursor()
+        self._request_paint()
+        self._flush_pan_render()
+
+    def _flush_pan_render(self):
+        if not self._pan_live_active:
+            return
+        exposed = self._visible_rect().toAlignedRect()
+        if exposed.isValid() and not exposed.isEmpty():
+            self._pan_painted = time.perf_counter()
+            self.repaint(exposed)
 
     def _update_export_range(self, position):
         origin, stamp, markers, next_marker = self._range_press
@@ -882,6 +996,10 @@ class MonitorPlot(QWidget):
             painter.setRenderHint(QPainter.Antialiasing, not dense)
             painter.setPen(QPen(color, 1.0 if dense else 1.4))
             painter.setBrush(Qt.NoBrush)
+            if frame is not None and frame.get("pan"):
+                self._paint_pan_trace(painter, source, lane, start, span, count, bottom_value, top_value, dense)
+                painter.restore()
+                continue
             if cached:
                 path, marks = cached[2:]
             else:
@@ -912,6 +1030,129 @@ class MonitorPlot(QWidget):
                 for x in marks:
                     painter.drawLine(QPointF(x, lane.bottom() - 6), QPointF(x, lane.bottom() - 1))
             painter.restore()
+
+    PAN_CACHE_WIDTHS = 4   # cached pan columns per lane, in lane widths
+
+    def _warm_pan_cache(self):
+        """Build the visible pan columns after a middle press, before the drag threshold."""
+        if self._pan_press_pos is None or self._pan_start_range is None or self.buffer is None:
+            return
+        start, end = self._pan_start_range
+        times = self.buffer.times
+        count = len(times)
+        if not count:
+            return
+        # Same density choice as _paint_chart(), so the right representation is built.
+        first = max(0, bisect_right(times, start, hi=count) - 1)
+        samples = min(count, bisect_right(times, end, hi=count) + 1) - first
+        exposed = self._visible_rect()
+        for lane, source in zip(self.lanes(), self.columns):
+            if source is not None and exposed.top() <= lane.bottom() and lane.top() <= exposed.bottom():
+                self._pan_lane_columns(source, lane, start, end - start, count, samples > lane.width() * 2)
+
+    def _paint_pan_trace(self, painter, source, lane, start, span, count, bottom_value, top_value, dense):
+        """Pan frame: reuse columns on a grid fixed by the gesture; build only newly exposed ones.
+
+        Traces live in (column, value) space and the painter transform applies
+        the horizontal offset and this frame's y scale."""
+        state, first, offset = self._pan_lane_columns(source, lane, start, span, count, dense)
+        a, b = first - state["first"], first - state["first"] + math.ceil(lane.width()) + 3
+        left = lane.left() - offset
+        if self.buffer.failures[source]:
+            marks = [left + first + i + 0.5 for i, bad in enumerate(state["failed"][a:b]) if bad]
+            if marks:
+                painter.save()
+                painter.setPen(QPen(QColor("#C44848"), 1))
+                for x in marks:
+                    painter.drawLine(QPointF(x, lane.bottom() - 6), QPointF(x, lane.bottom() - 1))
+                painter.restore()
+        pen = painter.pen()
+        pen.setCosmetic(True)   # width in pixels despite the value-space transform
+        painter.setPen(pen)
+        scale = -lane.height() / (top_value - bottom_value)
+        painter.setTransform(QTransform(1, 0, 0, scale, left, lane.bottom() - bottom_value * scale), True)
+        if dense:
+            painter.drawLines(list(chain.from_iterable(state["items"][a:b])))
+        else:
+            # One polyline like trace(): separate antialiased steps double-blend their joints.
+            painter.drawPolyline(QPolygonF(list(chain.from_iterable(state["items"][a:b]))))
+
+    def _pan_lane_columns(self, source, lane, start, span, count, dense):
+        width = lane.width()
+        step = span / width
+        key = (id(self.buffer), self.buffer.dropped, self.signed)
+        cache = self._pan_cache
+        # end - start of a shifted view drifts in the last bits; keep the gesture's grid.
+        if cache is None or cache["key"] != key or abs(cache["step"] - step) > step * 1e-9:
+            cache = self._pan_cache = {"key": key, "step": step, "origin": start, "lanes": {}}
+        origin, step = cache["origin"], cache["step"]
+        offset = (start - origin) / step
+        first, stop = math.floor(offset) - 1, math.ceil(offset + width) + 1
+        state = cache["lanes"].get((source, dense))
+        if state is not None and state["count"] != count:
+            # Appends only change columns from the old last sample on.
+            old = state["count"]
+            cut = math.ceil((self.buffer.times[old - 1] - origin) / step) - 1 if old and count > old else None
+            keep = cut - state["first"] if cut is not None else 0
+            if keep <= 0:
+                state = None
+            else:
+                del state["items"][keep:], state["failed"][keep:]
+                state["count"] = count
+        if state is not None and (first < state["first"] - width or stop > state["first"] + len(state["items"]) + width
+                                  or len(state["items"]) > self.PAN_CACHE_WIDTHS * width):
+            state = None   # a jump or a long pan: rebuild instead of filling a wide gap
+        if state is None:
+            items, failed = self._pan_columns(source, origin, step, first, stop, count, dense)
+            state = cache["lanes"][(source, dense)] = {"first": first, "items": items, "failed": failed,
+                                                       "count": count}
+        if first < state["first"]:
+            items, failed = self._pan_columns(source, origin, step, first, state["first"], count, dense)
+            state["items"][:0], state["failed"][:0] = items, failed
+            state["first"] = first
+        end = state["first"] + len(state["items"])
+        if stop > end:
+            items, failed = self._pan_columns(source, origin, step, end, stop, count, dense)
+            state["items"] += items
+            state["failed"] += failed
+        return state, first, offset
+
+    def _pan_columns(self, source, origin, step, first, stop, count, dense):
+        """Columns first..stop-1 in (column, value) space: envelope_lines() lines when
+        dense, trace() step points otherwise."""
+        times = self.buffer.times
+        values = self.buffer.column(source, self.signed)
+        failures = self.buffer.failures[source]
+        items, failed = [], []
+        low = bisect_right(times, origin + first * step, 0, count)
+        for column in range(first, stop):
+            high = bisect_right(times, origin + (column + 1) * step, low, count)
+            if high <= low:
+                items.append(())
+                failed.append(False)
+                continue
+            if dense:
+                lines = []
+                bottom, top = self.buffer.extrema(source, low, high, self.signed)
+                if low:
+                    previous = values[low - 1]
+                    held = math.ceil((times[low - 1] - origin) / step) - 1   # previous sample's column
+                    lines.append(QLineF(held, previous, column, previous))
+                    bottom, top = min(bottom, previous), max(top, previous)
+                lines.append(QLineF(column, bottom, column, top))
+                items.append(tuple(lines))
+            else:
+                points = []
+                for i in range(low, high):
+                    x = (times[i] - origin) / step
+                    if i:
+                        points.append(QPointF(x, values[i - 1]))
+                    points.append(QPointF(x, values[i]))
+                items.append(tuple(points))
+            at = bisect_left(failures, low)
+            failed.append(at < len(failures) and failures[at] < high)
+            low = high
+        return items, failed
 
     def paint_pinned_axis(self, painter, band, start=None, end=None):
         """Draw the shared time axis into ``band``. Tick x matches the chart lanes."""
@@ -1107,6 +1348,9 @@ class MonitorPlot(QWidget):
         self._frame_count = frame["count"]
         self._scene_range = frame["range"]
         self._lane_scenes = frame["tiles"]
+        self._pan_live_active = False
+        self._pan_release_pending = False
+        self._pan_cache = None   # pan columns are only reused within one gesture
         self._trace_cache = frame["paths"]
         self._cache_key = (id(self.buffer), self._scene_revision, self.signed, *self._scene_range,
                            self.width(), self.height())
@@ -1229,6 +1473,22 @@ class MonitorPlot(QWidget):
         if exposed.isEmpty():
             return
         ratio = self.devicePixelRatioF()
+        if self._pan_live_active:
+            # A pan frame is rendered from the current buffer and current
+            # range. This keeps the trace accurate while the pointer moves;
+            # the cached tile frame is prepared only after release.
+            if self._pan_release_pending and self._prepared_frame is None:
+                self._start_prepare(self._scene_geometry(), exposed, ratio)
+            count = len(self.buffer) if self.buffer is not None else 0
+            start, end = self.time_range()
+            self._paint_chart(painter, exposed, start, end,
+                              frame={"count": count,
+                                     "revision": self.buffer.revision if self.buffer is not None else 0,
+                                     "paths": {}, "pan": True})
+            self._paint_readouts(painter, exposed, start, end)
+            self._finish_paint_flags(False)
+            self._sync_axis_view()
+            return
         transform = self._transform_key()
         geometry = self._scene_geometry()
         revision = self.buffer.revision if self.buffer is not None else 0
@@ -1503,7 +1763,7 @@ class MonitorDialog(ManagedDialog):
         self.zoom_label.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self.zoom_label.setAlignment(Qt.AlignCenter)
         self.zoom_button = button("Zoom", lambda: self.plot.set_zoom(1.0), "flat", "axis")
-        self.zoom_button.setToolTip("查看全局图表：恢复 100% 比例，显示全部保留的数据。\nCtrl + 滚轮以鼠标位置为中心缩放，最小窗口为两倍采样间隔。")
+        self.zoom_button.setToolTip("查看全局图表：恢复 100% 比例，显示全部保留的数据。\nCtrl + 滚轮以鼠标位置为中心缩放，最小窗口为两倍采样间隔；按住中键拖动平移。")
         self.zoom_button.setAccessibleName("Zoom：查看全局图表")
         self.plot.zoom_changed.connect(self._zoom_changed)
         self.marker_label = label("A: —   B: —   Δt: —", "muted")

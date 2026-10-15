@@ -6,8 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QWidget
 from PySide6.QtTest import QTest
-from PySide6.QtCore import QRect
-from devmem_studio.window_state import ManagedDialog, WindowStateCoordinator
+from PySide6.QtCore import QPoint, QRect
+from devmem_studio.window_state import ManagedDialog, WindowStateCoordinator, saved_origin
 
 
 class WindowStateTests(unittest.TestCase):
@@ -327,6 +327,86 @@ class WindowStateTests(unittest.TestCase):
         child.showNormal()
         self.settle()
         self.assertEqual(child.size(), normal)
+
+    def test_owner_shown_maximized_saves_its_restore_position(self):
+        owner = QWidget()
+        owner.cfg = {}
+        owner.resize(500, 400)
+        owner._window_states = WindowStateCoordinator(owner)
+        try:
+            owner.setGeometry(QRect(130, 140, 500, 400))
+            owner.setWindowState(Qt.WindowMaximized)
+            owner.show()
+            self.settle()
+            owner._window_states.save_window_preferences()
+            self.assertEqual(owner.cfg["window_pos"], [130, 140])
+            self.assertEqual(owner.cfg["window_size"], [500, 400])
+            self.assertTrue(owner.cfg["window_maximized"])
+        finally:
+            owner.close()
+            owner.deleteLater()
+
+    def test_saved_origin_requires_a_visible_title_bar(self):
+        area = QApplication.primaryScreen().availableGeometry()
+        size = [400, 300]
+        inside = [area.left() + 40, area.top() + 60]
+        self.assertEqual(saved_origin(inside, size), QPoint(*inside))
+        self.assertIsNone(saved_origin([area.left() + 40, area.top()], size))   # title bar above the screen
+        self.assertIsNone(saved_origin([area.right() + 50, area.top() + 60], size))
+        self.assertIsNone(saved_origin([area.left() - 390, area.top() + 60], size))   # only 10 px left
+        self.assertEqual(saved_origin([area.left() - 200, area.top() + 60], size),
+                         QPoint(area.left() - 200, area.top() + 60))
+        for value in (None, [1], [1.0, 2], ["1", 2], [True, 60], [1, 2, 3], [40000, 60]):
+            self.assertIsNone(saved_origin(value, size))
+
+    def test_main_window_reopens_at_its_saved_position(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from devmem_studio.core import ConfigStore
+        from devmem_studio.window import MainWindow
+        area = QApplication.primaryScreen().availableGeometry()
+        # The 800 px offscreen screen clamps the width; the saved height still fits.
+        size = [area.width() - 16, area.height() - 160]
+        origin = [area.left() + 8, area.top() + 50]   # the default placement centers it vertically
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "settings.json"
+            for saved, expected in ((origin, origin[1]), ([area.right() + 500, 50], None)):
+                path.write_text(json.dumps({"window_size": size, "window_pos": saved}), encoding="utf-8")
+                window = MainWindow(ConfigStore(path), persist=False)
+                try:
+                    window.show()
+                    self.settle()
+                    self.assertEqual(window.height(), size[1])
+                    self.assertTrue(area.contains(window.frameGeometry()), window.frameGeometry())
+                    if expected is not None:
+                        self.assertEqual(window.geometry().y(), expected)
+                    window._window_states.save_window_preferences()
+                    client = window.geometry()   # client origin: x()/y() include the frame
+                    self.assertEqual(window.cfg["window_pos"], [client.x(), client.y()])
+                finally:
+                    window.close()
+                    window.deleteLater()
+                    self.settle()
+
+    def test_small_screen_lowers_the_main_window_floor_to_fit(self):
+        import tempfile
+        from pathlib import Path
+        from devmem_studio.core import ConfigStore
+        from devmem_studio.window import MainWindow, WINDOW_COMPACT_MIN_SIZE
+        area = QApplication.primaryScreen().availableGeometry()
+        self.assertLess(area.width(), WINDOW_COMPACT_MIN_SIZE[0])   # offscreen screen: 800 px wide
+        with tempfile.TemporaryDirectory() as temp:
+            window = MainWindow(ConfigStore(Path(temp) / "settings.json"), persist=False)
+            try:
+                window.show()
+                self.settle()
+                self.assertLessEqual(window.minimumWidth(), area.width() - 16)
+                self.assertTrue(area.contains(window.frameGeometry()), window.frameGeometry())
+            finally:
+                window.close()
+                window.deleteLater()
+                self.settle()
 
     def test_saved_maximized_state_does_not_replace_normal_geometry(self):
         cfg = {"window_size": [640, 480], "window_maximized": True,

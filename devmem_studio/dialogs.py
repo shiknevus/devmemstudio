@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, 
                                QPushButton, QProgressBar, QListWidget, QListWidgetItem, QComboBox, QSizePolicy)
 from . import file_scan
 from .core import write_command, DEFAULT_BIT_DIR
-from .widgets import label, button, row, ComboBox, Worker
+from .widgets import label, button, row, ComboBox, Worker, ElidedLabel
 from .theme import icon
 from .log_view import LogView, LogSearchEdit
 from .window_state import ManagedDialog
@@ -403,7 +403,7 @@ class BitUploadDialog(ManagedDialog):
         self.setWindowTitle("上传bit file")
         self.setWindowFlags(self.windowFlags() | Qt.Window)
         self.setWindowModality(Qt.NonModal)
-        self.setMinimumSize(600, 260)
+        self.setMinimumSize(600, 320)
         self.setAcceptDrops(True)
         self._local_path = None
         self._local_dir = local_dir
@@ -411,13 +411,17 @@ class BitUploadDialog(ManagedDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
-        layout.addWidget(label("选择、拖入或粘贴 .bit 文件", "title"))
+        heading = label("选择、拖入或粘贴 .bit 文件", "title")
+        heading.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        layout.addWidget(heading)
         hint = label("可直接选文件，或选文件夹自动查找其下（含子目录）的 .bit，多个时列表选择。新文件先完整上传到所选板端目录，"
                      "再把原 sunny_fpga.bit 重命名为 sunny_fpga.bit_时间戳 备份并换入；传输失败时原文件不受影响。", "muted")
         hint.setWordWrap(True)
         layout.addWidget(hint)
-        self.path_label = label("未选择文件", "mono")
-        self.path_label.setWordWrap(True)
+        # Long paths must not change the row height or force a wider window.
+        # ElidedLabel retains the complete path in its text and tooltip.
+        self.path_label = ElidedLabel("未选择文件", "mono")
+        self.path_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         layout.addWidget(self.path_label)
         self.choose_button = button("选择文件…", self.choose_file, "flat", "export")
         self.folder_button = button("选择文件夹…", self.choose_folder, "flat", "folder")
