@@ -74,7 +74,8 @@ BATCH_READ_CHUNK = 32
 # Register monitor: regmon reads mapped registers in microseconds, so 1 ms holds; the devmem
 # fallback forks one busybox devmem per register per sample (~1 ms each on the A53) and lags below ~5 ms.
 MONITOR_MIN_INTERVAL_MS = 1
-MONITOR_INTERVAL_MS = 1    # fixed monitor sampling period
+MONITOR_MAX_INTERVAL_MS = 60000
+MONITOR_INTERVAL_MS = 5    # default monitor sampling period
 LIVE_INTERVAL_MS = 5       # fixed register-table period: it refreshes at ~25 Hz, faster only loads the board
 MONITOR_MAX_REGISTERS = 32
 # Resident sampler (tools/regmon): maps the register pages once and loops on board deadlines.
@@ -217,8 +218,8 @@ def monitor_script(addresses, interval_ms) -> str:
         raise ValueError("请至少选择一个寄存器。")
     if len(addresses) > MONITOR_MAX_REGISTERS:
         raise ValueError(f"最多同时监视 {MONITOR_MAX_REGISTERS} 个寄存器。")
-    if not math.isfinite(float(interval_ms)) or not MONITOR_MIN_INTERVAL_MS <= float(interval_ms) <= 60000:
-        raise ValueError(f"采样间隔须为 {MONITOR_MIN_INTERVAL_MS}–60000 ms。")
+    if not math.isfinite(float(interval_ms)) or not MONITOR_MIN_INTERVAL_MS <= float(interval_ms) <= MONITOR_MAX_INTERVAL_MS:
+        raise ValueError(f"采样间隔须为 {MONITOR_MIN_INTERVAL_MS}–{MONITOR_MAX_INTERVAL_MS} ms。")
     addresses = [validated_address(hex(address)) for address in addresses]
     if any(address % 4 for address in addresses):
         raise ValueError("监视地址须按 32 位访问要求对齐。")
@@ -331,9 +332,12 @@ def normalize_monitor_settings(value):
                 result[key] = list(dict.fromkeys(address for address in addresses
                                                  if type(address) is int and 0 <= address <= 0xFFFFFFFF))[:MONITOR_MAX_REGISTERS]
         return dict(list(result.items())[-MONITOR_SAVED_KEYS:])   # most recently used last
+    interval = value.get("interval_ms")
+    if type(interval) is not int or not MONITOR_MIN_INTERVAL_MS <= interval <= MONITOR_MAX_INTERVAL_MS:
+        interval = MONITOR_INTERVAL_MS
     # selections: component instance -> addresses; types: module type -> offsets of the latest pick
-    return {"signed": value.get("signed") is True, "selections": lists(value.get("selections")),
-            "types": lists(value.get("types"))}
+    return {"signed": value.get("signed") is True, "interval_ms": interval,
+            "selections": lists(value.get("selections")), "types": lists(value.get("types"))}
 
 
 def default_config() -> dict:

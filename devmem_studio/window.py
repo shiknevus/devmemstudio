@@ -586,7 +586,7 @@ class MainWindow(QMainWindow):
         filters_layout.addStretch()
         self.monitor_button = button("监视", self.open_monitor, "flat", "axis")
         self.monitor_button.setProperty("outlined", True)
-        self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端每 {MONITOR_INTERVAL_MS} ms "
+        self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端按设定间隔（默认 {MONITOR_INTERVAL_MS} ms）"
                                        "连续采样，绘制数值随时间变化的曲线。")
         filters_layout.addWidget(self.monitor_button)
         self.access_filter = ComboBox()

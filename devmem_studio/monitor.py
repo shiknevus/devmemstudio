@@ -15,11 +15,11 @@ from PySide6.QtCore import Qt, QEvent, QObject, QPoint, QPointF, QRectF, QSignal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (QDialog, QWidget, QFrame, QLabel, QLayout, QHBoxLayout, QVBoxLayout, QSplitter,
                                QListWidget, QListWidgetItem,
-                               QLineEdit, QCheckBox, QFileDialog, QSizePolicy,
+                               QLineEdit, QCheckBox, QSpinBox, QFileDialog, QSizePolicy,
                                QScrollArea, QStyledItemDelegate, QStyle)
 
-from .core import (MONITOR_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_STALE_TIMEOUT_S,
-                   normalize_monitor_settings, parse_addr)
+from .core import (MONITOR_INTERVAL_MS, MONITOR_MAX_INTERVAL_MS, MONITOR_MAX_REGISTERS, MONITOR_MIN_INTERVAL_MS,
+                   MONITOR_STALE_TIMEOUT_S, normalize_monitor_settings, parse_addr)
 from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .theme import icon
 from .widgets import ElidedLabel, label, button, row, restyle, Worker
@@ -1707,7 +1707,7 @@ class MonitorDialog(ManagedDialog):
         self.sampler = ""     # board-side sampler of the current/last run, see SAMPLER_LABELS
         self._last_data = None   # monotonic time of the latest samples of this run
         self._shown_pause = 0
-        self.interval_ms = MONITOR_INTERVAL_MS
+        self.interval_ms = self.settings["interval_ms"]   # period of the current/last run
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.export_pool = QThreadPool(self)
@@ -1727,19 +1727,23 @@ class MonitorDialog(ManagedDialog):
         self.component_label = ElidedLabel("", "muted")
         self.component_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         control_width = 110
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_INTERVAL_MS)
+        self.interval_spin.setSuffix(" ms")
+        self.interval_spin.setFixedWidth(control_width)
+        self.interval_spin.setValue(self.settings["interval_ms"])
+        self.interval_spin.valueChanged.connect(self._interval_changed)
         self.start_button = button("开始监视", self.toggle, "primary", "play")
         self.start_button.setFixedWidth(control_width)
-        self.start_button.setToolTip(f"板端每 {MONITOR_INTERVAL_MS} ms 采样一次：aarch64 板子上由常驻采样程序一次映射、循环读取；"
-                                     "无法使用时改为 devmem 循环，跟不上时按实际速度采样并在状态栏提示。"
-                                     f"最多保留约 {SAMPLE_LIMIT * MONITOR_INTERVAL_MS // 1000} s 数据。")
+        self._interval_tooltip()
         self.pause_button = button("暂停", self.toggle_pause, None, "pause")
         self.pause_button.setProperty("outlined", True)
         self.pause_button.setFixedWidth(control_width)
         self.pause_button.setEnabled(False)
         self.pause_button.setToolTip("暂停板端采样并保留已采数据，可缩放、打标记、导出；继续后接着画在同一条曲线上，暂停时段以浅色底标出")
         # Header: title on the left, run controls on the right.
-        header = row(label("寄存器监视", "title"), self.component_label,
-                     self.pause_button, self.start_button, spacing=8)
+        header = row(label("寄存器监视", "title"), self.component_label, label("采样间隔", "muted"),
+                     self.interval_spin, self.pause_button, self.start_button, spacing=8)
         header.setStretchFactor(self.component_label, 1)
         header.insertSpacing(1, 4)
         header.insertSpacing(3, 16)
@@ -1791,7 +1795,7 @@ class MonitorDialog(ManagedDialog):
         for control in (self.clear_button, self.export_button):
             control.setFixedWidth(control_width)
         self.plot = MonitorPlot()
-        self.plot.sample_interval_s = MONITOR_INTERVAL_MS / 1000
+        self.plot.sample_interval_s = self.interval_ms / 1000
         self.plot.signed = self.settings["signed"]
         self.zoom_label = label("100%", "muted")
         self.zoom_label.setMinimumWidth(58)
@@ -2076,6 +2080,8 @@ class MonitorDialog(ManagedDialog):
         self.sampler = ""
         self._last_data = None
         self._shown_pause = 0
+        self.interval_ms = self.interval_spin.value()
+        self.plot.sample_interval_s = self.interval_ms / 1000
         self.buffer = MonitorBuffer(len(chosen))
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
         self._sync_highlight()
@@ -2194,6 +2200,7 @@ class MonitorDialog(ManagedDialog):
         self.pause_button.setEnabled(state in ("running", "paused"))
         self.pause_button.setText("继续" if paused else "暂停")
         self.pause_button.setIcon(icon("play" if paused else "pause"))
+        self.interval_spin.setEnabled(idle)   # a resumed run keeps its period
         # Lock the rows while keeping the view and its scrollbar interactive.
         with QSignalBlocker(self.list):
             for item in self._items():
@@ -2275,6 +2282,19 @@ class MonitorDialog(ManagedDialog):
         difference = abs(second - first) if first is not None and second is not None else None
         self.marker_label.setText(f"A: {stamp_text(first)}   B: {stamp_text(second)}   Δt: {stamp_text(difference)}")
         self.clear_markers_button.setEnabled(any(stamp is not None for stamp in markers))
+
+    def _interval_changed(self, value):
+        self.settings["interval_ms"] = value
+        self.settings_changed.emit(copy.deepcopy(self.settings))
+        self._interval_tooltip()
+
+    def _interval_tooltip(self):
+        value = self.interval_spin.value()
+        self.interval_spin.setToolTip(f"板端采样间隔，默认 {MONITOR_INTERVAL_MS} ms，最快 {MONITOR_MIN_INTERVAL_MS} ms；"
+                                      "监视与暂停期间锁定，下次开始监视时生效。")
+        self.start_button.setToolTip(f"板端每 {value} ms 采样一次：aarch64 板子上由常驻采样程序一次映射、循环读取；"
+                                     "无法使用时改为 devmem 循环，跟不上时按实际速度采样并在状态栏提示。"
+                                     f"最多保留约 {SAMPLE_LIMIT * value // 1000} s 数据。")
 
     def _signed_changed(self, on):
         self.plot.signed = on

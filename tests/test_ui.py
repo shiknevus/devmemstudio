@@ -1633,7 +1633,9 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(len(dialog.checked_addresses()), 32)                              # capped
         for index in range(2, dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Unchecked)
-        self.assertEqual(dialog.interval_ms, 1)                                           # fixed period
+        self.assertEqual(dialog.interval_spin.value(), 5)                                 # default period
+        dialog.interval_spin.setValue(1)
+        self.assertEqual(self.window.cfg["monitor_settings"]["interval_ms"], 1)
         dialog.signed_check.setChecked(True)
         self.assertNotIn("window_s", self.window.cfg["monitor_settings"])
         self.assertTrue(self.window.cfg["monitor_settings"]["signed"])

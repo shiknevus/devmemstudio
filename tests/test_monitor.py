@@ -1164,12 +1164,17 @@ class DialogTests(unittest.TestCase):
             self.dialog.list.item(2).setCheckState(Qt.Checked)
             self.dialog.set_registers("Component B", self.registers, [0x1004], key="top:B")
             self.dialog.list.item(1).setCheckState(Qt.Unchecked)  # remember an intentionally empty selection
+            self.assertEqual(self.dialog.interval_spin.value(), 5)   # default period
+            self.assertEqual(self.dialog.interval_spin.minimum(), 1)
             self.dialog.signed_check.setChecked(True)
+            self.dialog.interval_spin.setValue(2)
             store.save(cfg)
             saved = store.load()
             restored = MonitorDialog(lambda: None, settings=saved['monitor_settings'])
             try:
-                self.assertEqual(restored.interval_ms, 1)
+                self.assertEqual(restored.interval_ms, 2)
+                self.assertEqual(restored.interval_spin.value(), 2)
+                self.assertAlmostEqual(restored.plot.sample_interval_s, 0.002)
                 self.assertNotIn("window_s", restored.settings)
                 self.assertTrue(restored.signed_check.isChecked())
                 self.assertTrue(restored.plot.signed)
@@ -1224,11 +1229,15 @@ class DialogTests(unittest.TestCase):
         self.dialog._session_provider = lambda: session
         self.dialog.set_registers("regs", registers, [reg["_address"] for reg in registers])
         self.assertFalse(self.dialog.pause_button.isEnabled())
+        self.dialog.interval_spin.setValue(3)
         self.assertTrue(self.dialog.start())
         self.wait_state("running")
+        self.assertEqual(runs[0][1], 3)
+        self.assertFalse(self.dialog.interval_spin.isEnabled())
         self.assertTrue(self.dialog.pause_button.isEnabled())
         self.dialog.pause_button.click()
         self.assertEqual(self.dialog.state, "paused")
+        self.assertFalse(self.dialog.interval_spin.isEnabled())
         self.assertTrue(runs[0][2].is_set())                # board sampling ended
         self.assertEqual(self.dialog.pause_button.text(), "继续")
         runs[0][3]("")                                       # the sampler reports its end
