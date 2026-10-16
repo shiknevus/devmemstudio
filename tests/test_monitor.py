@@ -1004,6 +1004,19 @@ class DialogTests(unittest.TestCase):
         self.dialog.clear_selection()
         self.assertEqual(plot.names, [])
 
+    def test_idle_chart_uses_buffer_addresses_after_run_list_is_rebuilt(self):
+        self.dialog.set_registers("A", self.registers, [0x1000, 0x1008])
+        buffer = MonitorBuffer(2, addresses=(0x1000, 0x1008))
+        buffer.extend([(0.0, (1, 583)), (0.01, (2, 584))])
+        self.dialog.buffer = buffer
+        self.dialog.monitored = [("stale", 0x1004), ("stale2", 0x1000)]
+        self.dialog._shown = None
+
+        self.dialog._show_selection()
+
+        self.assertEqual(self.dialog.plot.columns, [0, 1])
+        self.assertEqual(self.dialog.plot.readout_values(1)[0], "0x248 · 584")
+
     def test_active_register_list_scrolls_without_changing_checks(self):
         registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(100)]
         registers[1]["write_only"] = True

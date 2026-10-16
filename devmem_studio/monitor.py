@@ -42,7 +42,11 @@ class MonitorBuffer:
     """Shared time axis plus raw/signed value columns. A failed read holds the previous
     value and is indexed separately, so min()/max() run on plain C arrays."""
 
-    def __init__(self, count, limit=SAMPLE_LIMIT):
+    def __init__(self, count, limit=SAMPLE_LIMIT, addresses=()):
+        addresses = tuple(addresses)
+        if addresses and len(addresses) != count:
+            raise ValueError("monitor buffer address count must match column count")
+        self.addresses = addresses
         self.limit = limit
         self.t0 = None
         self.times = array("d")
@@ -1968,7 +1972,14 @@ class MonitorDialog(ManagedDialog):
         if self.state != "idle":
             return
         chosen = self.checked_registers()
-        runs = {address: i for i, (_, address) in enumerate(self.monitored)} if self.buffer is not None else {}
+        if self.buffer is not None:
+            # The buffer owns the column order.  Do not derive it from the
+            # mutable register list after a run has stopped; that list can be
+            # rebuilt when the user changes the checked rows or component.
+            addresses = self.buffer.addresses or tuple(address for _, address in self.monitored)
+            runs = {address: i for i, address in enumerate(addresses)}
+        else:
+            runs = {}
         columns = [runs.get(address) for _, address in chosen]
         offsets = {item.data(Qt.UserRole): item.data(Qt.UserRole + 2) for item in self._items()}
         self._shown = chosen
@@ -2082,7 +2093,7 @@ class MonitorDialog(ManagedDialog):
         self._shown_pause = 0
         self.interval_ms = self.interval_spin.value()
         self.plot.sample_interval_s = self.interval_ms / 1000
-        self.buffer = MonitorBuffer(len(chosen))
+        self.buffer = MonitorBuffer(len(chosen), addresses=[address for _, address in chosen])
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
         self._sync_highlight()
         self._launch(session, token, stop)
@@ -2149,7 +2160,8 @@ class MonitorDialog(ManagedDialog):
 
     def clear(self):
         if self.monitored:
-            self.buffer = MonitorBuffer(len(self.monitored))
+            addresses = self.buffer.addresses or tuple(address for _, address in self.monitored)
+            self.buffer = MonitorBuffer(len(self.monitored), addresses=addresses)
             if self.state == "idle" and self._shown is not None:
                 self._show_selection()
             else:
