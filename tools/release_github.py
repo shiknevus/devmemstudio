@@ -120,7 +120,7 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
-commit = subprocess.run(["git", "rev-parse", tag], capture_output=True, text=True, cwd=ROOT, check=True).stdout.strip()
+commit = subprocess.run(["git", "rev-parse", f"{tag}^{{commit}}"], capture_output=True, text=True, cwd=ROOT, check=True).stdout.strip()
 try:
     release = api("GET", f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")   # rerun: keep the release
 except urllib.error.HTTPError as exc:
