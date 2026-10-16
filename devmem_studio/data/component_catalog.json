@@ -2,7 +2,7 @@
   "schema": 8,
   "generated_at": "2026-10-15T14:11:48+08:00",
   "source": {
-    "rtl_root": "E:\\base_prj\\bykz_v6.0\\rtl",
+    "rtl_root": "${DEVMEMSTUDIO_RTL}",
     "reg_addr_map": "reg_addr_pl.vh",
     "note": "由 tools/gen_component_catalog.py 生成；RTL 变更后需重新生成"
   },

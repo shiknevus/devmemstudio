@@ -2,6 +2,8 @@ import ast
 import copy
 import json
 from pathlib import Path
+import socket
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -10,7 +12,7 @@ from devmem_studio.catalog import DEFAULT_CATEGORIES, DEFAULT_TYPES
 from devmem_studio.core import (ConfigStore, access_width, decode_fields, format_decoded_fields, default_config,
                                parse_addr, parse_int, parse_devmem_read_output,
                                validated_address, write_command, write_value, SshSession, DemoSession,
-                               CommandError, ReadbackError)
+                               CommandError, ReadbackError, unprotect_secret)
 
 
 class RegisterTests(unittest.TestCase):
@@ -221,6 +223,74 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg["top_import_dir"], "")
             self.assertEqual(cfg["component_import_dir"], "")
             self.assertNotIn("connect_timeout", cfg)
+
+    def test_password_dpapi_encryption_and_plaintext_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registers.json"
+            path.write_text(json.dumps({"password": "plain-secret", "serial_password": "serial-secret",
+                                        "remember_password": True, "remember_serial_password": True}), encoding="utf-8")
+            store = ConfigStore(path)
+            cfg = store.load()
+            self.assertEqual(cfg["password"], "plain-secret")
+            self.assertEqual(cfg["serial_password"], "serial-secret")
+
+            store.save(cfg)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if sys.platform == "win32":
+                self.assertTrue(raw["password"].startswith("dpapi:"))
+                self.assertTrue(raw["serial_password"].startswith("dpapi:"))
+                self.assertNotIn("plain-secret", path.read_text(encoding="utf-8"))
+
+            restored = store.load()
+            self.assertEqual(restored["password"], "plain-secret")
+            self.assertEqual(restored["serial_password"], "serial-secret")
+
+    def test_dpapi_legacy_prefix_collision_remains_plaintext(self):
+        for literal in ("dpapi:this-is-a-password", "dpapi:v1:this-is-a-password"):
+            with self.subTest(literal=literal):
+                self.assertEqual(unprotect_secret(literal), literal)
+
+    def test_undecryptable_secret_is_blanked_with_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registers.json"
+            path.write_text(json.dumps({"password": "dpapi:v1:AAAAAAAA", "remember_password": True}), encoding="utf-8")
+            store = ConfigStore(path)
+            self.assertEqual(store.load()["password"], "")
+            self.assertIn("无法", store.warning)
+
+
+class ReadToMarkerTests(unittest.TestCase):
+    class FakeChannel:
+        def __init__(self, chunks):
+            self.chunks, self.timeout, self.closed = list(chunks), 7.5, False
+
+        def gettimeout(self):
+            return self.timeout
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def recv(self, size):
+            if not self.chunks:
+                raise socket.timeout()
+            return self.chunks.pop(0)
+
+        def get_transport(self):
+            return Mock(is_active=Mock(return_value=True))
+
+    def test_channel_timeout_is_restored(self):
+        marker = "__END_"
+        for chunks, expected in (([b"out\n__END_0__\n"], 0), ([], None)):
+            channel = self.FakeChannel(chunks)
+            status, _ = SshSession()._read_to_marker(channel, marker, 0.2)
+            self.assertEqual(status, expected)
+            self.assertEqual(channel.timeout, 7.5)
+
+    def test_channel_timeout_is_restored_on_error(self):
+        channel = self.FakeChannel([b""])
+        with self.assertRaises(CommandError):
+            SshSession()._read_to_marker(channel, "__END_", 0.2)
+        self.assertEqual(channel.timeout, 7.5)
 
 
 class DemoSessionTests(unittest.TestCase):

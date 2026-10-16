@@ -21,7 +21,7 @@
    - `dist/DevmemStudio.exe`
    - `dist/DevmemStudio-5.3.0-win64.zip`
    - `dist/DevmemStudio-5.3.0-win64.zip.sha256`
-3. 在仓库的 Releases 页面创建正式 Release，标签为 `v5.3.0`，填写说明并上传 ZIP 和校验文件（`artifacts/release_github.py` 会同时上传两者）。此操作需要维护者自行发布；本地构建不会上传 GitHub。**校验文件必须上传**：API 受限时客户端只能靠它校验。
+3. 在仓库的 Releases 页面创建正式 Release，标签为 `v5.3.0`，填写说明并上传 ZIP 和校验文件（`tools/release_github.py` 会同时上传两者）。此操作需要维护者自行发布；本地构建不会上传 GitHub。**校验文件必须上传**：API 受限时客户端只能靠它校验。
 4. 旧版客户端检查后应显示 `5.3.0`，下载安装验证成功后可人工清理旧 EXE 备份。
 
 ZIP 必须只包含 `DevmemStudio/DevmemStudio.exe`。校验文件内容为 `SHA256  ZIP文件名`。优先使用 GitHub 资产返回的 `sha256:` digest；无 digest 时读取同名 `.sha256` 文件。没有有效校验信息时拒绝下载更新。

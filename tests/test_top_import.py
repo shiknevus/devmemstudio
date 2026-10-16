@@ -422,7 +422,9 @@ class ComponentsParamTests(unittest.TestCase):
             param = root / "rtl" / "include_files" / "components_param.vh"
             param.write_text("`define REG_SPACE_SIZE 512\n`define PL_CFG_BASE_ADDR {32'hB010_0000}\n",
                              encoding="utf-8")
-            self.assertEqual(top_import.find_components_param(top), param)
+            # The locator resolves the path, so an 8.3 short temp path (RUNNER~1) must
+            # still compare equal to the long form it returns.
+            self.assertEqual(top_import.find_components_param(top), param.resolve())
             self.assertEqual(top_import.parse_base_address(param.read_text(encoding="utf-8")), 0xB0100000)
         with tempfile.TemporaryDirectory() as empty:
             self.assertIsNone(top_import.find_components_param(Path(empty) / "x" / "top.sv"))

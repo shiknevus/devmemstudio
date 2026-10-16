@@ -41,11 +41,14 @@ class LiveReader(QObject):
         chunks = [addresses[i:i + MONITOR_MAX_REGISTERS] for i in range(0, len(addresses), MONITOR_MAX_REGISTERS)]
 
         def run(_progress):
+            sampler = session.monitor_sampler(stop) if hasattr(session, "monitor_sampler") else None   # probed once per run
             for chunk in chunks:
                 def on_samples(samples, chunk=chunk):
                     self._samples.emit(token, dict(zip(chunk, samples[-1][1])))
+                kwargs = {"sampler": sampler if sampler is not None else ""} if hasattr(session, "monitor_sampler") else {}
                 if not session.start_monitor(chunk, interval_ms, on_samples,
-                                             lambda message: self._ended.emit(token, message), stop):
+                                             lambda message: self._ended.emit(token, message), stop,
+                                             **kwargs):
                     return
         worker = Worker(run)
         worker.signals.failed.connect(lambda message: self._ended.emit(token, f"启动失败：{message}"))

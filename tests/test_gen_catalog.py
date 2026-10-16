@@ -328,6 +328,20 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(gen.refresh(out, None, "fixed"), 0)
             self.assertEqual(out.read_bytes(), before)
 
+    def test_catalog_external_rtl_root_is_portable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _ = self.build_fixture_tree(directory)
+            catalog, _ = gen.build(root, [], stamp="fixed")
+        self.assertEqual(catalog["source"]["rtl_root"], "${DEVMEMSTUDIO_RTL}")
+
+    def test_strict_refresh_rejects_unavailable_recorded_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory) / "catalog.json"
+            out.write_text(json.dumps({"source": {"rtl_root": "${DEVMEMSTUDIO_RTL}"}, "types": {}}),
+                           encoding="utf-8")
+            with patch.dict("os.environ", {"DEVMEMSTUDIO_RTL": ""}, clear=False):
+                self.assertEqual(gen.refresh(out, None, "fixed", strict=True), 1)
+
     def test_missing_define_map_fails_loudly(self):
         with tempfile.TemporaryDirectory() as directory:
             empty = Path(directory)
@@ -407,6 +421,19 @@ class ComponentFolderTests(unittest.TestCase):
             found = gen.find_component_folders(Path(directory))
         names = [folder.name for folder in found]
         self.assertEqual(names, ["ec_uut", "ec_other"])
+
+    def test_find_component_folders_honors_depth_and_file_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shallow = root / "shallow"
+            deep = root / "a" / "b" / "c"
+            shallow.mkdir()
+            deep.mkdir(parents=True)
+            (shallow / "ps_rw_pl_reg_shallow.sv").write_text("", encoding="utf-8")
+            (deep / "ps_rw_pl_reg_deep.sv").write_text("", encoding="utf-8")
+            found = gen.find_component_folders(root, max_depth=1)
+            self.assertEqual([item.name for item in found], ["shallow"])
+            self.assertEqual([item.name for item in gen.find_component_folders(root, max_files=1)], ["shallow"])
 
     def test_concat_hookups_yield_per_bit_fields(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -557,9 +557,37 @@ def parse_component_folder(folder: Path) -> tuple[dict, dict]:
     return entry, info
 
 
-def find_component_folders(root: Path) -> list[Path]:
+def find_component_folders(root: Path, *, max_depth: int = 32,
+                           max_folders: int = 20_000,
+                           max_files: int = 200_000) -> list[Path]:
     """Every folder under root that carries its own ps_rw_pl_reg module (batch 更新控件)."""
     root = Path(root)
-    folders = {path.parent for path in root.rglob("ps_rw_pl_reg_*")
-               if path.suffix.lower() in (".sv", ".v")}
+    if not root.is_dir() or max_depth < 0 or max_folders <= 0 or max_files <= 0:
+        return []
+    folders: set[Path] = set()
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    visited = files_seen = 0
+    while pending and visited < max_folders and files_seen < max_files:
+        folder, depth = pending.pop()
+        visited += 1
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            if files_seen >= max_files:
+                break
+            try:
+                # Do not recurse through user supplied links/junctions.
+                if path.is_symlink():
+                    continue
+                if path.is_dir():
+                    if depth < max_depth and visited + len(pending) < max_folders:
+                        pending.append((path, depth + 1))
+                    continue
+                files_seen += 1
+                if path.suffix.lower() in (".sv", ".v") and path.name.startswith("ps_rw_pl_reg_"):
+                    folders.add(path.parent)
+            except OSError:
+                continue
     return sorted(folders)

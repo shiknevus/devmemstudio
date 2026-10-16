@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import paramiko
 from devmem_studio.catalog import DEFAULT_TYPES
-from devmem_studio.core import (SshSession, CommandError, HostKeyChangedError, DEFAULT_LOG_PATH, REGMON_RESOURCE,
+from devmem_studio.core import (SshSession, CommandError, HostKeyChangedError, HostKeyUnknownError, DEFAULT_LOG_PATH, REGMON_RESOURCE,
                                 resource_path)
 from devmem_studio.core import connect_ssh_until_cancelled
 
@@ -178,6 +178,7 @@ class BoardServer(paramiko.ServerInterface):
 
 
 class BoardFixture:
+    pretrust = True
     host_key_types = None
     kex_types = None
     connect_on_setup = True
@@ -226,6 +227,10 @@ class BoardFixture:
         self.server_thread.start()
         self.logs = []
         self.session = SshSession(lambda level, message: self.logs.append((level, message)), Path(self.temp.name))
+        if self.pretrust:
+            keys = paramiko.HostKeys()
+            keys.add(f"[127.0.0.1]:{self.port}", self.key.get_name(), self.key)
+            keys.save(str(Path(self.temp.name) / "known_hosts"))
         self.addCleanup(self.close_board)
         if self.connect_on_setup:
             self.session.connect("127.0.0.1", self.port, "test", "test", timeout=2)
@@ -975,12 +980,30 @@ class LegacySshTests(BoardFixture, unittest.TestCase):
 
 
 class HostKeyTests(BoardFixture, unittest.TestCase):
+    pretrust = False
     connect_on_setup = False
 
     def save_host_key(self, key):
         keys = paramiko.HostKeys()
         keys.add(f"[127.0.0.1]:{self.port}", "ssh-rsa", key)
         keys.save(str(Path(self.temp.name) / "known_hosts"))
+
+    def test_unknown_host_key_requires_explicit_first_trust(self):
+        path = Path(self.temp.name) / "known_hosts"
+        with self.assertRaises(HostKeyUnknownError) as captured:
+            self.session.connect("127.0.0.1", self.port, "test", "test", timeout=2)
+        change = captured.exception
+        self.assertIsNone(change.expected_key)
+        self.assertEqual(change.old_fingerprint, "")
+        self.assertTrue(change.new_fingerprint.startswith("SHA256:"))
+        self.assertEqual(self.server.auth_attempts, 0)
+        self.assertEqual(path.read_text(encoding="utf-8"), "")
+
+        self.session.replace_host_key(change)
+        keys = paramiko.HostKeys(str(path))
+        self.assertTrue(keys.check(change.hostkey_name, self.key))
+        self.session.connect("127.0.0.1", self.port, "test", "test", timeout=2)
+        self.assertTrue(self.session.alive)
 
     def test_saved_rsa_key_still_prefers_sha2(self):
         self.save_host_key(self.key)

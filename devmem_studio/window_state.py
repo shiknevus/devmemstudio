@@ -205,7 +205,7 @@ class WindowStateCoordinator(QObject):
         self._taskbar_timer = QTimer(self)
         self._taskbar_timer.setSingleShot(True)
         self._taskbar_timer.timeout.connect(self._sync_taskbar)
-        QApplication.instance().installEventFilter(self)
+        self.owner.installEventFilter(self)
 
     def prepare_dialog(self, widget):
         record = self._record(widget)
@@ -404,6 +404,7 @@ class WindowStateCoordinator(QObject):
             record = _DialogState(_state(widget), QRect(geometry if geometry.isValid() else widget.geometry()))
             self.dialogs[widget] = record
             widget.destroyed.connect(lambda _object=None, window=widget: self._dialog_destroyed(window))
+            widget.installEventFilter(self)
         return record
 
     def _dialog_destroyed(self, widget):

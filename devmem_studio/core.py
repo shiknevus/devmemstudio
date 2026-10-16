@@ -354,6 +354,85 @@ def default_config() -> dict:
             "bit_local_dir": "", "monitor_settings": normalize_monitor_settings(None)}
 
 
+DPAPI_PREFIX = "dpapi:v1:"
+
+
+class SecretProtectionError(OSError):
+    """The platform could not protect a credential before it was persisted."""
+
+
+def protect_secret(text: str) -> str:
+    """Encrypt a secret using Windows DPAPI.
+
+    A failed DPAPI call must never silently turn a remembered password back into
+    plaintext on disk.  Non-Windows builds have no DPAPI provider, so they keep
+    the existing plaintext behaviour for compatibility with their platform's
+    credential stores; Windows failures are explicit and abort the config save.
+    """
+    if not text or sys.platform != "win32":
+        return text
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        data = text.encode("utf-8")
+        in_blob = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))
+        out_blob = DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+            raise SecretProtectionError("Windows DPAPI 拒绝保护凭据")
+        try:
+            buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return DPAPI_PREFIX + base64.b64encode(buf).decode("ascii")
+    except SecretProtectionError:
+        raise
+    except Exception as exc:
+        raise SecretProtectionError(f"Windows DPAPI 不可用：{exc}") from exc
+
+
+def unprotect_secret(enc: str) -> str:
+    """Decrypt a DPAPI secret, preserving legacy/plaintext values safely.
+
+    ``dpapi:v1:`` is deliberately distinct from the old ``dpapi:`` marker so a
+    legitimate password beginning with that text is not mistaken for ciphertext.
+    Existing v0 values are still read on Windows, but malformed values are kept
+    as plaintext rather than being silently erased.  This also prevents a
+    literal password beginning with either marker from being lost.
+    """
+    if not enc or not isinstance(enc, str):
+        return enc if isinstance(enc, str) else ""
+    current = enc.startswith(DPAPI_PREFIX)
+    legacy = enc.startswith("dpapi:") and not current
+    if not current and not legacy:
+        return enc if isinstance(enc, str) else ""
+    if sys.platform != "win32":
+        return enc
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        payload = enc[len(DPAPI_PREFIX):] if current else enc[6:]
+        raw = base64.b64decode(payload, validate=True)
+        in_blob = DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
+        out_blob = DATA_BLOB()
+        if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
+            return enc
+        try:
+            buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+        finally:
+            ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+        return buf.decode("utf-8")
+    except Exception:
+        return enc
+
+
 class ConfigStore:
     def __init__(self, path: Path | None = None):
         self.warning = ""
@@ -411,6 +490,11 @@ class ConfigStore:
         for field in ("host", "username", "password", "log_path", "top_path",
                       "serial_port", "serial_username", "serial_password"):
             cfg[field] = str(cfg.get(field) or "")
+        for secret in ("password", "serial_password"):
+            cfg[secret] = unprotect_secret(cfg[secret])
+            if cfg[secret].startswith(DPAPI_PREFIX):   # other user/machine: ciphertext is unusable
+                cfg[secret] = ""
+                self.warning = "已保存的密码无法在当前用户下解密，请重新输入。"
         for flag, secret in (("remember_password", "password"),
                              ("remember_serial_password", "serial_password")):
             # Only an explicit JSON true opts into retaining credentials.
@@ -448,6 +532,8 @@ class ConfigStore:
             data[flag] = data.get(flag) is True
             if not data[flag]:
                 data[secret] = ""
+            elif data[secret]:
+                data[secret] = protect_secret(data[secret])
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # Replace atomically so loss of power doesn't leave half a JSON document.
         temp_name = None
@@ -499,7 +585,7 @@ class HostKeyChangedError(Exception):
         self.hostname, self.key, self.expected_key = hostname, key, expected_key
         self.port = port
         self.hostkey_name = hostname if port == 22 else f"[{hostname}]:{port}"
-        self.old_fingerprint = host_key_fingerprint(expected_key)
+        self.old_fingerprint = host_key_fingerprint(expected_key) if expected_key is not None else ""
         self.new_fingerprint = host_key_fingerprint(key)
 
     def __str__(self):
@@ -515,6 +601,29 @@ def _matches_host(token, hostname):
         except (ValueError, AssertionError, IndexError):
             return False
     return False
+
+
+class HostKeyUnknownError(HostKeyChangedError):
+    """The board presented a key for which no local trust record exists.
+
+    This subclasses ``HostKeyChangedError`` so existing confirmation-dialog
+    callers continue to work, while the explicit type lets new callers
+    distinguish first trust from key rotation.
+    """
+
+    def __str__(self):
+        return f"{self.hostname}:{self.port} SSH host key is not trusted; verify its fingerprint before accepting it."
+
+
+class _RejectUnknownHostKeyPolicy:
+    """Never silently trust a key that is absent from ``known_hosts``."""
+
+    def __init__(self, hostname, port):
+        self.hostname = hostname
+        self.port = port
+
+    def missing_host_key(self, client, hostname, key):
+        raise HostKeyUnknownError(self.hostname, self.port, key, None)
 
 
 _board_transport = None
@@ -756,7 +865,9 @@ class SshSession:
             if not known_hosts.exists():
                 known_hosts.touch()
             client.load_host_keys(str(known_hosts))
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Unknown identities must go through the same explicit fingerprint
+            # confirmation flow as a changed key; never auto-accept them.
+            client.set_missing_host_key_policy(_RejectUnknownHostKeyPolicy(host, port))
             try:
                 # Abortable TCP connect: a cancel during the SYN wait breaks out
                 # immediately instead of waiting out the timeout.
@@ -812,8 +923,14 @@ class SshSession:
         original = path.read_bytes()
         keys = paramiko.HostKeys(str(path))
         current = keys.lookup(change.hostkey_name)
-        if (path.read_bytes() != original or not current
-                or not any(key == change.expected_key for key in current.values())):
+        if change.expected_key is None:
+            # First trust: the review started with no matching entry.  A key
+            # appearing while the dialog was open is a concurrent change and
+            # must never be overwritten silently.
+            if path.read_bytes() != original or current:
+                raise CommandError("Host key record changed while it was being reviewed")
+        elif (path.read_bytes() != original or not current
+              or not any(key == change.expected_key for key in current.values())):
             raise CommandError("已保存的主机密钥记录已变化，请重新连接并核对指纹。")
         retained = []
         for line in original.decode("utf-8").splitlines(keepends=True):
@@ -868,9 +985,20 @@ class SshSession:
         output = bytearray()
         scanned = 0
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline and not cancelled():
-            if channel.recv_ready():
-                chunk = channel.recv(65536)
+        old_timeout = channel.gettimeout()
+        try:
+            while time.monotonic() < deadline and not cancelled():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    channel.settimeout(min(0.05, remaining))
+                    chunk = channel.recv(65536)
+                except socket.timeout:
+                    transport = channel.get_transport()
+                    if channel.closed or transport is None or not transport.is_active():
+                        raise CommandError("SSH 连接已断开，设备可能正在重启。")
+                    continue
                 if not chunk:
                     raise CommandError("SSH 连接已断开。")
                 output.extend(chunk)
@@ -882,12 +1010,12 @@ class SshSession:
                 scanned = len(output)
                 if match:
                     return int(match.group(1)), output[:match.start()].decode("utf-8", "replace")
-                continue
-            transport = channel.get_transport()
-            if channel.closed or transport is None or not transport.is_active():
-                raise CommandError("SSH 连接已断开，设备可能正在重启。")
-            time.sleep(0.015)
-        return None, output.decode("utf-8", "replace")
+            return None, output.decode("utf-8", "replace")
+        finally:
+            try:
+                channel.settimeout(old_timeout)
+            except Exception:
+                pass
 
     def _await_marker(self, channel, timeout, generation):
         """Swallow login banners until the shell answers a sync marker (best effort)."""
@@ -1334,6 +1462,16 @@ class SshSession:
 
                     def verified(candidate):
                         try:
+                            stat_fn = getattr(sftp, "stat", None)
+                            if stat_fn is not None:
+                                try:
+                                    attr = stat_fn(candidate)
+                                    if attr.st_mode & 0o002:   # reject world-writable in /tmp
+                                        return False
+                                    if attr.st_size != len(data):
+                                        return False
+                                except OSError:
+                                    return False
                             with sftp.open(candidate, "rb") as handle:
                                 content = handle.read(len(data) + 1)
                             if stop.is_set():
@@ -1359,9 +1497,9 @@ class SshSession:
                                 if stop.is_set():
                                     raise CommandError("监视启动已取消。")
                                 handle.write(data[offset:offset + 16384])
+                        sftp.chmod(staging, 0o755)
                         if not verified(staging):
                             raise CommandError("板端采样程序校验失败。")
-                        sftp.chmod(staging, 0o755)
                         if stop.is_set():
                             raise CommandError("监视启动已取消。")
                         try:
@@ -1383,7 +1521,7 @@ class SshSession:
             self.log("SYSTEM", f"无法放置板端常驻采样程序（{exc}），监视改用 devmem 循环。")
         return path
 
-    def start_monitor(self, addresses, interval_ms, on_samples, stopped, cancel_event, on_sampler=None):
+    def start_monitor(self, addresses, interval_ms, on_samples, stopped, cancel_event, on_sampler=None, sampler=None):
         """Sample registers on the board on a dedicated exec channel (the shell stays free).
 
         on_samples(list of (seconds, values)) is called about every 40 ms from a reader
@@ -1393,12 +1531,13 @@ class SshSession:
         if not self.alive:
             raise CommandError("请先连接设备。")
         monitor_script(addresses, interval_ms)   # validate before touching the board
-        try:
-            sampler = self.monitor_sampler(stop)
-        except CommandError:
-            if stop.is_set():
-                return False
-            raise
+        if sampler is None:
+            try:
+                sampler = self.monitor_sampler(stop)
+            except CommandError:
+                if stop.is_set():
+                    return False
+                raise
         if stop.is_set():
             return False
         shell_interval = max(float(interval_ms), MONITOR_SHELL_MIN_INTERVAL_MS)

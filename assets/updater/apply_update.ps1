@@ -9,6 +9,18 @@ function Start-Devmem($path) {
     return [Diagnostics.Process]::Start($info)
 }
 
+# Microsoft.PowerShell.Utility is not always importable (locked-down images, redirected
+# PSModulePath, ConstrainedLanguage), so hash through .NET like the rest of this script.
+function Get-DevmemHash($path) {
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 # Antivirus scans and a just-exited image keep the EXE locked briefly (sharing or access denied).
 function Replace-DevmemFile($source, $target, $backup) {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -79,7 +91,7 @@ function Invoke-DevmemUpdate($job) {
         # Older launchers do not export their PID; allow the outer EXE to release
         # its image lock after the Python child exits. Also handles other instances.
         # Verify right before the swap: the staged file sat beside the target during the wait.
-        if ((Get-FileHash -LiteralPath $stagePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $job.sha256) {
+        if ((Get-DevmemHash $stagePath) -ne ([string]$job.sha256).ToLowerInvariant()) {
             throw 'Update SHA-256 verification failed.'
         }
         Replace-DevmemFile $stagePath $targetPath $backupPath

@@ -27,7 +27,7 @@ from .catalog import REGISTER_FIELDS
 from .bitpack_dialog import BitPackDialog
 from .update_dialog import UpdateDialog
 from . import updater
-from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
+from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, HostKeyUnknownError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
                    normalize_remote_dir, remember_dir, MONITOR_INTERVAL_MS, LIVE_INTERVAL_MS,
@@ -152,6 +152,14 @@ class MainWindow(QMainWindow):
         self.live_timer = QTimer(self)   # debounce: search typing restarts the sampler once
         self.live_timer.setSingleShot(True)
         self.live_timer.timeout.connect(self._sync_live)
+        # Layout fitting is deliberately driven by an object-owned timer.  A
+        # queued ``singleShot`` callback can otherwise run while Qt is tearing
+        # down the title-row layout during window close/rebuild.
+        self._title_fit_timer = QTimer(self)
+        self._title_fit_timer.setSingleShot(True)
+        self._title_fit_timer.timeout.connect(self._fit_title_row)
+        self._component_import_active = False
+        self._component_parse_pending = False
         self.session = SshSession(self._log_emit("ssh"))
         self.serial = SerialSession(self._log_emit("system"))
         self.serial_screen = ScreenBuffer()
@@ -940,12 +948,20 @@ class MainWindow(QMainWindow):
     def import_component(self):
         """Re-parse component register definitions at runtime (RTL changed, no rebuild).
 
-        A picked folder that carries ps_rw_pl_reg_* imports that one component; any other
-        folder is scanned recursively. Always list candidates before parsing the selection."""
-        if self._closing or self._busy:
+        Directory discovery and RTL parsing run in the worker pool so a large
+        source tree cannot block the GUI.  Candidate selection and catalog
+        updates remain on the GUI thread.
+        """
+        if self._closing or self._busy or self._component_import_active:
             return
-        with self._hold_poll():   # the rebuild below must not race an in-flight read
+        self._component_import_active = True
+        self._component_parse_pending = False
+        self._poll_holds += 1
+        try:
             self._import_component()
+        except Exception:
+            self._finish_component_import()
+            raise
 
     @contextmanager
     def _hold_poll(self):
@@ -962,23 +978,53 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(parent, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return answer == QMessageBox.Yes and not (self._closing or self._busy or not self.connected)
 
+    def _finish_component_import(self):
+        """Release the import hold exactly once on every exit path."""
+        if not self._component_import_active:
+            return
+        self._component_import_active = False
+        self._component_parse_pending = False
+        self._poll_holds = max(0, self._poll_holds - 1)
+
     def _import_component(self):
         start = self._import_start_dir("component_import_dir")
         folder = QFileDialog.getExistingDirectory(
             self, "选择组件文件夹，或上级目录（批量导入其下全部组件）", start)
         if not folder:
+            self._finish_component_import()
             return
         folder = Path(folder)
         self.cfg["component_import_dir"] = str(folder.resolve())
         self._schedule_save()
-        if any(folder.glob("ps_rw_pl_reg_*.sv")) or any(folder.glob("ps_rw_pl_reg_*.v")):
-            targets = [folder]
-        else:
-            targets = component_parse.find_component_folders(folder)
-            if not targets:
-                QMessageBox.warning(self, "更新控件失败",
-                                    "所选目录及其子目录中未找到组件（需含 ps_rw_pl_reg_*.sv/.v）。")
-                return
+
+        def scan(progress):
+            if self.cancel.is_set():
+                return []
+            direct = any(folder.glob("ps_rw_pl_reg_*.sv")) or any(folder.glob("ps_rw_pl_reg_*.v"))
+            return [folder] if direct else component_parse.find_component_folders(folder)
+
+        if not self._run_task(scan,
+                              lambda targets: self._component_targets_scanned(folder, targets),
+                              "component scan", "component_scan"):
+            self._finish_component_import()
+
+    def _component_targets_scanned(self, folder, targets):
+        try:
+            self._choose_component_targets(folder, targets)
+        except Exception:
+            self._finish_component_import()
+            raise
+
+    def _choose_component_targets(self, folder, targets):
+        if self._closing or self.cancel.is_set():
+            self._finish_component_import()
+            return
+        targets = [Path(target) for target in targets]
+        if not targets:
+            QMessageBox.warning(self, "更新控件失败",
+                                "所选目录及其子目录中未找到组件（需含 ps_rw_pl_reg_*.sv/.v）。")
+            self._finish_component_import()
+            return
         rows = [(target, [", ".join(self._type_keys(target)),
                           ", ".join(sorted(path.name for pattern in ("ps_rw_pl_reg_*.sv", "ps_rw_pl_reg_*.v")
                                           for path in target.glob(pattern)))]) for target in targets]
@@ -987,18 +1033,53 @@ class MainWindow(QMainWindow):
             "可点击行取消或重新选择；点「选择」后解析并确认导入。", folder, rows,
             ["类型", "寄存器定义文件"], self, multiple=True, path_header="组件目录")
         if chooser.exec() != QDialog.Accepted:
+            self._finish_component_import()
             return
         selected = set(chooser.selected_paths())
         targets = [target for target in targets if str(target) in selected]
         if not targets:
+            self._finish_component_import()
             return
-        results, failures = [], []
-        for target in targets:
-            try:
-                entry, info = component_parse.parse_component_folder(target)
-                results.append((target, entry, info))
-            except (ValueError, OSError) as exc:
-                failures.append((target.name, str(exc)))
+        self._component_parse_pending = True
+        QTimer.singleShot(0, lambda: self._start_component_parse(folder, targets))
+
+    def _start_component_parse(self, folder, targets):
+        self._component_parse_pending = False
+        if self._closing or not self._component_import_active:
+            self._finish_component_import()
+            return
+
+        def parse(progress):
+            results, failures = [], []
+            total = len(targets)
+            for index, target in enumerate(targets, 1):
+                if self.cancel.is_set():
+                    return results, failures, True
+                try:
+                    entry, info = component_parse.parse_component_folder(target)
+                    results.append((target, entry, info))
+                except (ValueError, OSError) as exc:
+                    failures.append((target.name, str(exc)))
+                progress({"current": index, "total": total})
+            return results, failures, False
+
+        if not self._run_task(parse,
+                              lambda result: self._component_parse_finished(folder, result),
+                              "component parse", "component_parse"):
+            self._finish_component_import()
+
+    def _component_parse_finished(self, folder, payload):
+        try:
+            self._apply_component_import(folder, payload)
+        finally:
+            self._finish_component_import()
+
+    def _apply_component_import(self, folder, payload):
+        if self._closing:
+            return
+        results, failures, cancelled = payload
+        if cancelled or self.cancel.is_set():
+            return
         if not results:
             QMessageBox.warning(self, "更新控件失败", "\n".join(f"{name}：{reason}" for name, reason in failures))
             self.append_log("ERROR", f"更新控件失败：{failures}")
@@ -1275,7 +1356,7 @@ class MainWindow(QMainWindow):
             self.module_title.setText("寄存器映射")
             self.module_badge.setText("")
             self._set_register_count("")
-            QTimer.singleShot(0, self._fit_title_row)
+            self._schedule_title_fit()
             self.empty_label.setText("先点击左侧「导入 top」加载组件目录，再选择组件开始调试。" if not self.top_info
                                      else "从左侧「组件目录」选择一个组件开始调试。")
             self.empty_label.show()
@@ -1306,7 +1387,7 @@ class MainWindow(QMainWindow):
         self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
-        QTimer.singleShot(0, self._fit_title_row)
+        self._schedule_title_fit()
         if context == self._last_context:
             self._refresh_controls()
             return
@@ -1723,7 +1804,7 @@ class MainWindow(QMainWindow):
         if shown and self.workspace.width() < 1070:
             shown = shown.split("项", 1)[0].replace(" ", "") + "项"
         self.register_count.setText(shown)
-        QTimer.singleShot(0, self._fit_title_row)
+        self._schedule_title_fit()
 
     def _set_action_labels(self, labelled):
         for control, text in ((self.read_all_button, "读取全部"), (self.write_all_button, "批量写入"),
@@ -1735,30 +1816,47 @@ class MainWindow(QMainWindow):
             control.setAccessibleName(text)
             control.setToolTip(text)
 
+    def _schedule_title_fit(self):
+        """Coalesce title fitting on a timer owned by this window."""
+        if self._closing or not hasattr(self, "_title_fit_timer"):
+            return
+        try:
+            self._title_fit_timer.start(0)
+        except RuntimeError:
+            # The QObject may already be in Qt's deferred-delete phase.
+            return
+
     def _fit_title_row(self):
         """Keep both names whole if icon buttons fit; then elide the badge before the title."""
-        row = self.register_title_row
-        available = row.geometry().width()
-        if available <= 0:
+        if self._closing:
             return
-        margins = row.contentsMargins()
-        badge_shown = not self.module_badge.isHidden() and bool(self.module_badge.text())
-        title_full = self.module_title.sizeHint().width()
-        badge_full = self.module_badge.sizeHint().width() if badge_shown else 0
-        for labelled in (True, False):
-            self._set_action_labels(labelled)
-            fixed = [widget for widget in (self.register_count, self.poll_check, self.write_all_button,
-                                           self.read_all_button, self.export_button, self.help_button)
-                     if not widget.isHidden()]
-            widths = (max(widget.minimumWidth(), min(widget.maximumWidth(), widget.sizeHint().width()))
-                      for widget in fixed)   # fixed-width controls report a smaller hint
-            free = (available - margins.left() - margins.right() - sum(widths)
-                    - row.spacing() * (len(fixed) + badge_shown))
-            if free >= title_full + badge_full:
-                break
-        badge = min(badge_full, max(min(badge_full, 90), free - title_full))
-        self.module_badge.setMaximumWidth(max(0, badge))
-        self.module_title.setMaximumWidth(max(40, min(title_full, free - badge)))
+        try:
+            row = self.register_title_row
+            available = row.geometry().width()
+            if available <= 0:
+                return
+            margins = row.contentsMargins()
+            badge_shown = not self.module_badge.isHidden() and bool(self.module_badge.text())
+            title_full = self.module_title.sizeHint().width()
+            badge_full = self.module_badge.sizeHint().width() if badge_shown else 0
+            for labelled in (True, False):
+                self._set_action_labels(labelled)
+                fixed = [widget for widget in (self.register_count, self.poll_check, self.write_all_button,
+                                               self.read_all_button, self.export_button, self.help_button)
+                         if not widget.isHidden()]
+                widths = (max(widget.minimumWidth(), min(widget.maximumWidth(), widget.sizeHint().width()))
+                          for widget in fixed)   # fixed-width controls report a smaller hint
+                free = (available - margins.left() - margins.right() - sum(widths)
+                        - row.spacing() * (len(fixed) + badge_shown))
+                if free >= title_full + badge_full:
+                    break
+            badge = min(badge_full, max(min(badge_full, 90), free - title_full))
+            self.module_badge.setMaximumWidth(max(0, badge))
+            self.module_title.setMaximumWidth(max(40, min(title_full, free - badge)))
+        except RuntimeError:
+            # QLayouts/widgets can be deleted before queued timer delivery while
+            # the window is closing or a central widget is rebuilt.
+            return
 
     def _fit_console_toolbar(self):
         if not hasattr(self, "console_toolbar"):
@@ -1767,43 +1865,46 @@ class MainWindow(QMainWindow):
         wide = available >= 1420
         narrow = available < 1070
         tiny = available < 820
-        self.console_source_combo.setFixedWidth(70 if tiny else 88 if narrow else 118)
         compact = self.width() < COMPACT_WIDTH or self.height() < COMPACT_HEIGHT
-        self.log_search.setMinimumWidth(80 if tiny else 100 if compact else 120)
-        self.log_search.setMaximumWidth(110 if tiny else 140 if compact else 170)
-        for control, text in ((self.bit_pack_button, "打包bit"), (self.bit_upload_button, "上传bit"),
-                              (self.bit_rollback_button, "回退bit")):
-            control.setText("" if tiny else text)
-            control.setIconSize(QSize(16, 16))
-            control.setMinimumWidth(control.minimumSizeHint().width())
-            control.setAccessibleName(text)
-        for control, text in ((self.log_download_button, "下载log"), (self.reboot_button, "重启设备"),
-                              (self.log_export_button, "导出"), (self.log_clear_button, "清空")):
-            control.setText(text if wide else "")
-            control.setIconSize(QSize(16, 16))
-            control.setFixedWidth(control.sizeHint().width())
-            control.setAccessibleName(text)
-        for control in (self.log_prev, self.log_next):
-            control.setIconSize(QSize(14, 14))
-            control.setFixedWidth(control.sizeHint().width())
-        self.console_title.setVisible(not narrow)
-        self.log_match_count.setVisible(not narrow)
-        self.log_prev.setVisible(not narrow)
-        self.log_next.setVisible(not narrow)
-        self.console_toolbar.setSpacing(0 if tiny else 3 if narrow else 4)
-        self.module_badge.setVisible(not tiny)
-        self.register_count.setVisible(not tiny)
+        sidebar_narrow = self.sidebar_scroll.viewport().width() < 320
+        state = (wide, narrow, tiny, compact, sidebar_narrow)
+        if getattr(self, "_last_toolbar_state", None) != state:
+            self._last_toolbar_state = state
+            self.console_source_combo.setFixedWidth(70 if tiny else 88 if narrow else 118)
+            self.log_search.setMinimumWidth(80 if tiny else 100 if compact else 120)
+            self.log_search.setMaximumWidth(110 if tiny else 140 if compact else 170)
+            for control, text in ((self.bit_pack_button, "打包bit"), (self.bit_upload_button, "上传bit"),
+                                  (self.bit_rollback_button, "回退bit")):
+                control.setText("" if tiny else text)
+                control.setIconSize(QSize(16, 16))
+                control.setMinimumWidth(control.minimumSizeHint().width())
+                control.setAccessibleName(text)
+            for control, text in ((self.log_download_button, "下载log"), (self.reboot_button, "重启设备"),
+                                  (self.log_export_button, "导出"), (self.log_clear_button, "清空")):
+                control.setText(text if wide else "")
+                control.setIconSize(QSize(16, 16))
+                control.setFixedWidth(control.sizeHint().width())
+                control.setAccessibleName(text)
+            for control in (self.log_prev, self.log_next):
+                control.setIconSize(QSize(14, 14))
+                control.setFixedWidth(control.sizeHint().width())
+            self.console_title.setVisible(not narrow)
+            self.log_match_count.setVisible(not narrow)
+            self.log_prev.setVisible(not narrow)
+            self.log_next.setVisible(not narrow)
+            self.console_toolbar.setSpacing(0 if tiny else 3 if narrow else 4)
+            self.module_badge.setVisible(not tiny)
+            self.register_count.setVisible(not tiny)
+            for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "更新控件")):
+                control.setText("" if sidebar_narrow else text)
+                control.setIconSize(QSize(16, 16))
+                control.setFixedWidth(control.sizeHint().width())
+                control.setAccessibleName(text)
+            self._set_combo_display_labels(self.console_source_combo, ("tail log", "ssh", "serial", "system"),
+                                           ("log", "ssh", "serial", "sys"), narrow)
+            self._fit_compact_selectors(narrow, tiny)
         self._set_register_count(getattr(self, "_full_register_count", ""))
         self._fit_title_row()
-        sidebar_narrow = self.sidebar_scroll.viewport().width() < 320
-        for control, text in ((self.import_button, "导入 top"), (self.import_component_button, "更新控件")):
-            control.setText("" if sidebar_narrow else text)
-            control.setIconSize(QSize(16, 16))
-            control.setFixedWidth(control.sizeHint().width())
-            control.setAccessibleName(text)
-        self._set_combo_display_labels(self.console_source_combo, ("tail log", "ssh", "serial", "system"),
-                                       ("log", "ssh", "serial", "sys"), narrow)
-        self._fit_compact_selectors(narrow, tiny)
         self._fit_register_filters()
 
     @staticmethod
@@ -2156,7 +2257,7 @@ class MainWindow(QMainWindow):
                 session.replace_host_key(approved_change)
             try:
                 connect_ssh_until_cancelled(session, request, self.cancel, progress)
-            except HostKeyChangedError as change:
+            except (HostKeyChangedError, HostKeyUnknownError) as change:
                 return change
             return True
         def done(result):
@@ -2164,7 +2265,7 @@ class MainWindow(QMainWindow):
                 session.close()
                 self._set_connection(False)
                 return
-            if isinstance(result, HostKeyChangedError):
+            if isinstance(result, (HostKeyChangedError, HostKeyUnknownError)):
                 self._set_connection(False)
                 self.append_log("ERROR", str(result))
                 self._pending_host_key_change = (result, request)
@@ -2791,6 +2892,8 @@ class MainWindow(QMainWindow):
             self._set_connection(False)
         if self._task_kind == "connect" and not self.cancel.is_set() and "已取消" not in message:
             self.ssh_section.set_expanded(True)   # show the settings that just failed
+        if self._task_kind in ("component_scan", "component_parse"):
+            self._finish_component_import()
 
     @Slot(object)
     def _task_progress(self, data):
@@ -2846,6 +2949,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _task_finished(self):
+        finished_kind = self._task_kind
+        if self._closing and finished_kind in ("component_scan", "component_parse"):
+            self._finish_component_import()
         self._busy = False
         self._task_callback = None
         self._active_worker = None
@@ -3099,7 +3205,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         now = time.monotonic()
-        if not force and now - self._last_ports_scan < 3:
+        if not force and now - self._last_ports_scan < 20:
             return
         self._last_ports_scan = now
         ports = list_serial_ports()
@@ -3541,6 +3647,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._closing = True
+        if hasattr(self, "_title_fit_timer"):
+            self._title_fit_timer.stop()
         self.poll_timer.stop()
         self.heartbeat.stop()
         self.save_timer.stop()

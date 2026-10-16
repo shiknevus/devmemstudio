@@ -164,6 +164,30 @@ class UiTests(UiTestBase):
         window.serial.send.assert_not_called()
         self.assertTrue(window.poll_check.isChecked())
 
+    def test_toolbar_state_matches_width_after_resize(self):
+        for size in ((1700, 900), (1000, 700), (800, 600), (1500, 900), (900, 650)):
+            self.window.resize(*size)
+            deadline = time.monotonic() + 0.15
+            self.settle(lambda: time.monotonic() > deadline)
+            cached = self.window._last_toolbar_state
+            self.window._last_toolbar_state = None
+            self.window._fit_console_toolbar()
+            self.assertEqual(cached, self.window._last_toolbar_state, size)
+
+    def test_import_component_ignores_reentry_and_releases_hold(self):
+        window = self.window
+        holds = window._poll_holds
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value="") as pick:
+            window._component_import_active = True
+            window.import_component()
+            pick.assert_not_called()
+            window._component_import_active = False
+        with patch("devmem_studio.window.QFileDialog.getExistingDirectory", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                window.import_component()
+        self.assertFalse(window._component_import_active)
+        self.assertEqual(window._poll_holds, holds)
+
     def test_compact_layout_relaxes_fixed_widths_and_restores(self):
         self.window.resize(1280, 800)
         self.settle()
@@ -953,6 +977,7 @@ class TopImportUiTests(UiTestBase):
                 patch('devmem_studio.window.component_parse.parse_component_folder') as parse, \
                 patch('devmem_studio.window.QMessageBox.question') as confirm:
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         parse.assert_not_called()
         confirm.assert_not_called()
 
@@ -984,6 +1009,7 @@ class TopImportUiTests(UiTestBase):
                 patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
                 patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         saved = Path(self.temp.name) / 'component_overrides'
         self.assertTrue((saved / 'ec_1do.json').is_file())
         self.assertFalse((saved / 'ec_1di.json').exists())
@@ -1008,6 +1034,7 @@ class TopImportUiTests(UiTestBase):
                 patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
                 patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         saved = Path(self.temp.name) / 'component_overrides'
         self.assertTrue((saved / 'ec_9x_9y.json').is_file())   # the name a top instantiates
         self.assertTrue((saved / 'ec_9x9y.json').is_file())
@@ -1026,14 +1053,15 @@ class TopImportUiTests(UiTestBase):
                 patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.No) as question:
             self.window.import_button.click()
             self.settle(lambda: question.called and not self.window._busy)
-        self.assertEqual(self.window.cfg['top_import_dir'], str(root))
+        self.assertEqual(self.window.cfg['top_import_dir'], str(root.resolve()))
         self.assertEqual(self.window.cfg['top_path'], old_top)
         component_folder = Path(self.temp.name) / 'component-search-root'
         component_folder.mkdir()
         with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(component_folder)), \
                 patch('devmem_studio.window.QMessageBox.warning'):
             self.window.import_component()
-        self.assertEqual(self.window.cfg['component_import_dir'], str(component_folder))
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
+        self.assertEqual(self.window.cfg['component_import_dir'], str(component_folder.resolve()))
         # Exercise the real settings save path in this isolated test directory.
         self.window.persist = True
         try:
@@ -1044,11 +1072,11 @@ class TopImportUiTests(UiTestBase):
         try:
             with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value='') as pick:
                 restored.import_top_folder()
-                self.assertEqual(pick.call_args.args[2], str(root))
+                self.assertEqual(pick.call_args.args[2], str(root.resolve()))
                 restored.import_component()
-                self.assertEqual(pick.call_args.args[2], str(component_folder))
-            self.assertEqual(restored.cfg['top_import_dir'], str(root))
-            self.assertEqual(restored.cfg['component_import_dir'], str(component_folder))
+                self.assertEqual(pick.call_args.args[2], str(component_folder.resolve()))
+            self.assertEqual(restored.cfg['top_import_dir'], str(root.resolve()))
+            self.assertEqual(restored.cfg['component_import_dir'], str(component_folder.resolve()))
         finally:
             restored.close()
             restored.deleteLater()
@@ -1062,7 +1090,7 @@ class TopImportUiTests(UiTestBase):
         with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value='') as pick:
             for action in (self.window.import_top_folder, self.window.import_component):
                 action()
-                self.assertEqual(pick.call_args.args[2], self.temp.name)
+                self.assertEqual(pick.call_args.args[2], str(Path(self.temp.name).resolve()))
             self.window.cfg['top_path'] = str(Path(self.temp.name) / 'missing' / 'top.sv')
             for action in (self.window.import_top_folder, self.window.import_component):
                 action()
@@ -1438,12 +1466,14 @@ class TopImportUiTests(UiTestBase):
                 patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.No):
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         self.assertNotIn("imported_from", self.window.type_catalog["types"]["ec_1do"])
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
                 patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
                 patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         self.assertTrue((Path(self.temp.name) / "component_overrides" / "ec_1do.json").exists())
         entry = self.window.type_catalog["types"]["ec_1do"]
         self.assertEqual(entry["imported_from"], str(folder))
@@ -1471,6 +1501,7 @@ class TopImportUiTests(UiTestBase):
                       return_value=QMessageBox.Yes) as question, \
                 patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
             self.window.import_component()
+            self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         self.assertIn("解析到 3 个寄存器", question.call_args[0][2])
         self.assertIn(str(Path(self.temp.name)), question.call_args[0][2])
         self.assertIn("imported_from", self.window.type_catalog["types"]["ec_1do"])

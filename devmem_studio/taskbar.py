@@ -57,7 +57,8 @@ def _with_taskbar(action):
         if ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(taskbar)):
             return False
         try:
-            if _method(taskbar, 3)(taskbar):   # ITaskbarList::HrInit
+            hr_init = _method(taskbar, 3)(taskbar)   # ITaskbarList::HrInit
+            if hr_init not in (0, 1, -2147467263, 0x80004001):
                 return False
             return action(taskbar)
         finally:

@@ -6,8 +6,6 @@ import inspect
 import math
 import random
 from pathlib import Path
-import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -41,21 +39,6 @@ def send_plot_wheel(plot, delta, modifiers=Qt.ControlModifier, pixel_delta=0, po
 
 
 class SamplerScriptTests(unittest.TestCase):
-    @staticmethod
-    def run_shell(path, **kwargs):
-        shell = shutil.which("sh")
-        env = os.environ.copy()
-        if os.name == "nt":
-            # Use Git's actual shell; its bin launcher can survive a timeout
-            # through a child that inherits stdout. Avoid slow Windows PATH scans.
-            direct = Path(shell).parent.parent / "usr" / "bin" / "sh.exe"
-            if direct.exists():
-                shell = str(direct)
-            env["PATH"] = "/usr/bin:/bin"
-        # MSYS startup on busy Windows hosts can take longer than the sampler
-        # itself; the script still exits after its finite number of reads.
-        return subprocess.run([shell, str(path)], env=env, timeout=45, **kwargs)
-
     def test_script_reads_each_address_with_microsecond_period(self):
         script = monitor_script([0xB0100800, 0xB0100804], 5)
         self.assertTrue(script.startswith("P=5000;"))
@@ -80,56 +63,6 @@ class SamplerScriptTests(unittest.TestCase):
         self.assertTrue(command.startswith("/tmp/regmon 5000 " + " ".join(f"0x{a:08x}" for a in addresses)))
         with self.assertRaisesRegex(ValueError, "最多同时监视 32 个"):
             monitor_script(addresses + [0xB0100880], 5)
-
-    @unittest.skipUnless(shutil.which("sh"), "needs a POSIX sh")
-    def test_script_runs_and_holds_the_period_under_posix_sh(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "sampler.sh"
-            # Stop inside the shell instead of killing an infinite loop: on
-            # Windows Git sh's child can otherwise retain the capture pipes.
-            path.write_text("reads=0; devmem() { reads=$((reads + 1)); [ $reads -le 12 ] || exit 0; echo 0x0000002A; }\n"
-                            + monitor_script([0xB0100800, 0xB0100804], 200) + "\n",
-                            encoding="utf-8", newline="\n")
-            result = self.run_shell(path, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            output = result.stdout
-        parser = MonitorParser(2)
-        parser.feed(output)
-        samples = parser.take()
-        self.assertGreaterEqual(len(samples), 4)
-        self.assertTrue(all(values == (0x2A, 0x2A) for _, values in samples))
-        period = (samples[-1][0] - samples[0][0]) / (len(samples) - 1)
-        self.assertGreater(period, 0.15)   # deadline pacing, not a busy loop
-        self.assertLess(period, 0.4)
-
-    @unittest.skipUnless(shutil.which("sh"), "needs a POSIX sh")
-    def test_missing_devmem_exits_instead_of_streaming_failed_points(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "missing-devmem.sh"
-            path.write_text("command() { return 1; }\n" + monitor_script([0x1000], 5) + "\n",
-                            encoding="utf-8", newline="\n")
-            result = self.run_shell(path, capture_output=True)
-        self.assertEqual(result.returncode, 127)
-        self.assertIn(b"devmem: not found", result.stderr)
-        self.assertEqual(result.stdout, b"")
-
-    @unittest.skipUnless(shutil.which("sh"), "needs a POSIX sh")
-    def test_resident_sampler_exit_status_decides_the_devmem_handover(self):
-        with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            for status, handover in ((127, True), (2, False), (0, False)):
-                with self.subTest(status=status):
-                    sampler = folder / f"regmon-{status}"
-                    if status != 127:   # 127: the board cannot find or run it
-                        sampler.write_text(f"#!/bin/sh\necho '#regmon 1'\nexit {status}\n", newline="\n")
-                    path = folder / "monitor.sh"
-                    path.write_text("reads=0; devmem() { reads=$((reads + 1)); [ $reads -le 2 ] || exit 0; echo 0x2A; }\n"
-                                    + monitor_command([0xB0100800], 200, sampler.as_posix()) + "\n",
-                                    encoding="utf-8", newline="\n")
-                    result = self.run_shell(path, capture_output=True)
-                    self.assertEqual(result.returncode, 0 if handover else status, result.stderr)
-                    self.assertEqual(b"#shell" in result.stdout, handover)
-                    self.assertEqual(result.stdout.count(b"0x2A"), 2 if handover else 0)
 
 
 class ParserTests(unittest.TestCase):

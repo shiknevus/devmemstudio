@@ -234,6 +234,7 @@ def run_smoke(app, directory: Path):
                 patch("devmem_studio.window.FileChoiceDialog.exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.user_data_dir", return_value=directory):
             window.import_component()
+            settle(lambda: not window._busy and not getattr(window, "_component_import_active", False))
         imported = window.type_catalog["types"]["ec_slv_pul_axis"]
         check("imported_from" in imported and
               [item["name"] for item in imported["registers"]] == ["IRQ_REG1", "IRQ_REG2", "EC_ID"],

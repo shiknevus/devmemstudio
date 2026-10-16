@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
+PORTABLE_RTL_ENV = "${DEVMEMSTUDIO_RTL}"
 sys.path.insert(0, str(ROOT))
 from devmem_studio.component_parse import (  # noqa: E402,F401
     ALIASES, CATALOG_SCHEMA, DEBUG_REG_NOTE, PLAINTEXT_MARKERS, build_type_entry,
@@ -20,6 +21,32 @@ from devmem_studio.component_parse import (  # noqa: E402,F401
 from devmem_studio.core import user_data_dir  # noqa: E402
 from devmem_studio.top_import import (  # noqa: E402
     _catalog_timestamp, find_top_files, override_imported_at, parse_top)
+
+
+def portable_rtl_root(path: Path) -> str:
+    """Encode an RTL root without putting a developer machine path in the catalog."""
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    try:
+        return candidate.resolve().relative_to(ROOT).as_posix() or "."
+    except ValueError:
+        return PORTABLE_RTL_ENV
+
+
+def resolve_recorded_rtl(value: str | os.PathLike | None) -> Path | None:
+    """Resolve a catalog source path; external trees use DEVMEMSTUDIO_RTL."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw in (PORTABLE_RTL_ENV, "$DEVMEMSTUDIO_RTL", "@env:DEVMEMSTUDIO_RTL"):
+        raw = os.environ.get("DEVMEMSTUDIO_RTL", "").strip()
+        if not raw:
+            return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate.resolve()
 
 
 def type_keys_for(tops: list[Path], report: dict, active: set | None = None) -> list[str]:
@@ -127,7 +154,7 @@ def build(rtl_root: Path, tops: list[Path], stamp: str) -> tuple[dict, dict]:
     report["types"] = len(types)
     report["registers_total"] = sum(len(entry["registers"]) for entry in types.values())
     catalog = {"schema": CATALOG_SCHEMA, "generated_at": stamp,
-               "source": {"rtl_root": str(rtl_root), "reg_addr_map": defines_path.name,
+               "source": {"rtl_root": portable_rtl_root(rtl_root), "reg_addr_map": defines_path.name,
                           "note": "由 tools/gen_component_catalog.py 生成；RTL 变更后需重新生成"},
                "types": types}
     return catalog, report
@@ -169,11 +196,23 @@ def refresh(out: Path, rtl: Path | None, stamp: str, strict: bool = False) -> in
         previous = json.loads(out.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         previous = {}
-    recorded = str(rtl or os.environ.get("DEVMEMSTUDIO_RTL") or previous.get("source", {}).get("rtl_root", ""))
-    if not recorded or not Path(recorded).is_dir():
+    source = previous.get("source", {})
+    recorded = str(rtl) if rtl is not None else str(
+        os.environ.get("DEVMEMSTUDIO_RTL") or (source.get("rtl_root", "") if isinstance(source, dict) else ""))
+    root = Path(rtl).resolve() if rtl is not None else resolve_recorded_rtl(recorded)
+    # Test fixtures and portable source trees may place the catalog beside the
+    # RTL tree.  This fallback keeps those catalogs refreshable without restoring
+    # the old absolute path in the JSON; normal releases should set the env var.
+    if root is None and recorded == PORTABLE_RTL_ENV:
+        colocated = out.parent / "include_files" / "reg_addr_pl.vh"
+        if colocated.is_file():
+            root = out.parent.resolve()
+    if root is None or not root.is_dir():
+        if strict and recorded:
+            print("FAIL: stale or unavailable RTL root; set DEVMEMSTUDIO_RTL or pass --rtl")
+            return 1
         print(f"skip: RTL root not found ({recorded or '未记录'}); bundled catalog unchanged")
         return 0
-    root = Path(recorded).resolve()
     # Type keys come from each folder's module declaration; tops only add aliases and the coverage check.
     tops = sorted(Path(item["path"]) for item in find_top_files(root / "top")[0]) if (root / "top").is_dir() else []
     catalog, report = build(root, tops, stamp)

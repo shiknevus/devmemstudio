@@ -257,20 +257,27 @@ class HostKeyDialog(ManagedDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 20)
         layout.setSpacing(12)
-        layout.addWidget(label("板卡身份已变化", "title"))
-        explanation = label(f"{change.hostname}:{change.port} 返回的 SSH 主机密钥与上次记录不一致。\n"
-                            "板卡重启后重新生成密钥可能导致此提示。请核对设备地址与指纹。", "muted")
+        layout.addWidget(label("板卡身份未建立信任" if change.expected_key is None else "板卡身份已变化", "title"))
+        explanation = label((f"{change.hostname}:{change.port} 返回的 SSH 主机密钥尚未建立信任记录。\n"
+                             "首次连接前请向设备管理员核对下方指纹。"
+                             if change.expected_key is None else
+                             f"{change.hostname}:{change.port} 返回的 SSH 主机密钥与上次记录不一致。\n"
+                             "板卡重启后重新生成密钥可能导致此提示。请核对设备地址与指纹。"), "muted")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
-        for caption, key, fingerprint in (("上次记录", change.expected_key, change.old_fingerprint),
-                                           ("本次连接", change.key, change.new_fingerprint)):
+        rows = (("上次记录", change.expected_key, change.old_fingerprint),
+                ("本次连接", change.key, change.new_fingerprint)) if change.expected_key is not None else \
+               (("本次连接", change.key, change.new_fingerprint),)
+        for caption, key, fingerprint in rows:
             layout.addWidget(label(f"{caption} · {key.get_name()}", "muted"))
             value = QLineEdit(fingerprint)
             value.setObjectName("mono")
             value.setReadOnly(True)
             value.setCursorPosition(0)
             layout.addWidget(value)
-        note = label("确认是刚重启的目标板卡后，可更新该设备的记录并重新连接。原记录会自动备份。", "muted")
+        note = label(("确认指纹后，将把该密钥加入本机信任记录并重新连接。"
+                      if change.expected_key is None else
+                      "确认是刚重启的目标板卡后，可更新该设备的记录并重新连接。原记录会自动备份。"), "muted")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.cancel_button = button("取消", self.reject)
