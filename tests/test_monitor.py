@@ -24,7 +24,8 @@ from PySide6.QtTest import QTest, QSignalSpy
 
 from devmem_studio.core import (ConfigStore, MonitorParser, monitor_command, monitor_script, resource_path,
                                 MONITOR_MIN_INTERVAL_MS, MONITOR_MAX_REGISTERS, REGMON_RESOURCE, normalize_monitor_settings)
-from devmem_studio.monitor import MonitorBuffer, MonitorDialog, MonitorPlot, nice_step, to_signed
+from devmem_studio.monitor import (MonitorBuffer, MonitorDialog, MonitorPlot, monitor_sample_limit,
+                                   nice_step, to_signed)
 
 
 def send_plot_wheel(plot, delta, modifiers=Qt.ControlModifier, pixel_delta=0, position=None):
@@ -188,6 +189,13 @@ class CommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             monitor_command([], 5, "/tmp/regmon")
 
+    def test_shell_fallback_can_use_a_safe_interval_without_slowing_regmon(self):
+        shell = monitor_command([0x1000], 1, None, 5)
+        self.assertIn("P=5000", shell)
+        native = monitor_command([0x1000], 1, "/tmp/regmon", 5)
+        self.assertIn("/tmp/regmon 1000 0x00001000", native)
+        self.assertIn("P=5000", native)
+
     def test_monitor_rejects_unaligned_addresses_and_invalid_rates(self):
         for addresses, interval in (([0x1001], 5), ([0x1000], 0), ([0x1000], float('nan')),
                                     ([0x1000] * 33, 10), ([0x1000], 60001)):
@@ -203,6 +211,16 @@ class CommandTests(unittest.TestCase):
 
 
 class BufferTests(unittest.TestCase):
+    def test_wide_runs_use_a_bounded_history_and_signed_values_are_lazy(self):
+        self.assertEqual(monitor_sample_limit(1), 200_000)
+        self.assertLess(monitor_sample_limit(32), monitor_sample_limit(1))
+        buffer = MonitorBuffer(2, limit=8, store_signed=False)
+        buffer.extend([(0.0, (0xFFFFFFFF, 0x80000000))])
+        self.assertEqual(buffer.signed, [None, None])
+        self.assertEqual(list(buffer.column(0, signed=True)), [-1])
+        buffer.extend([(1.0, (0, 1))])
+        self.assertEqual(list(buffer.column(0, signed=True)), [-1, 0])
+
     def test_compact_storage_keeps_uint32_boundaries_and_signed_values_exact(self):
         buffer = MonitorBuffer(1)
         buffer.extend([(float(i), (value,)) for i, value in enumerate((0, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF))])

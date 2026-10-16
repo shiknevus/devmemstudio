@@ -27,6 +27,8 @@ from .window_state import ManagedDialog
 
 SERIES_COLORS = ("#2463DC", "#168578", "#B57518", "#C44848", "#7A4FC4", "#1F8FB3", "#6E7F1F", "#C2477F")
 SAMPLE_LIMIT = 200_000   # per run; the oldest quarter is dropped beyond it
+MIN_SAMPLE_LIMIT = 50_000
+VALUE_MEMORY_BUDGET = 16 * 1024 * 1024   # raw values per run; signed values are lazy
 RANGE_BLOCK = 32
 SAMPLER_LABELS = {"shell": "devmem 循环（板端 CPU 占用较高）", "demo": "演示数据"}
 STATE_COLORS = {"idle": "#A3B1BF", "starting": "#2463DC", "running": "#2E9D5B", "paused": "#D59A2E"}
@@ -38,11 +40,22 @@ def to_signed(value):
     return value - (1 << 32) if value >= 0x80000000 else value
 
 
+def monitor_sample_limit(count):
+    """Keep the raw monitor history within a predictable memory budget.
+
+    A one-register run keeps the full history. Wider runs use fewer points so the
+    raw value arrays stay near the same budget; the UI reports the resulting
+    retention through ``MonitorBuffer.limit``.
+    """
+    count = max(1, int(count))
+    return max(MIN_SAMPLE_LIMIT, min(SAMPLE_LIMIT, VALUE_MEMORY_BUDGET // (4 * count)))
+
+
 class MonitorBuffer:
     """Shared time axis plus raw/signed value columns. A failed read holds the previous
     value and is indexed separately, so min()/max() run on plain C arrays."""
 
-    def __init__(self, count, limit=SAMPLE_LIMIT, addresses=()):
+    def __init__(self, count, limit=SAMPLE_LIMIT, addresses=(), store_signed=True):
         addresses = tuple(addresses)
         if addresses and len(addresses) != count:
             raise ValueError("monitor buffer address count must match column count")
@@ -51,7 +64,12 @@ class MonitorBuffer:
         self.t0 = None
         self.times = array("d")
         self.raw = [array("I") for _ in range(count)]
-        self.signed = [array("i") for _ in range(count)]
+        # Signed values are only needed when the signed plot is first selected.
+        # Keeping this lazy saves one 32-bit array per register for the common
+        # unsigned view, while preserving the old eager behavior for callers
+        # that inspect ``signed`` directly (including compatibility tests).
+        self._store_signed = bool(store_signed)
+        self.signed = [array("i") for _ in range(count)] if self._store_signed else [None] * count
         self.failures = [array("I") for _ in range(count)]   # retained sample indices
         self.total = 0
         self.failed = 0
@@ -92,7 +110,8 @@ class MonitorBuffer:
                     value = int(raw[-1]) if raw else 0
                 raw.append(value)
                 signed = to_signed(value)
-                self.signed[column].append(signed)
+                if self.signed[column] is not None:
+                    self.signed[column].append(signed)
                 for summary, candidate, minimum in zip(self._ranges[column], (value, value, signed, signed),
                                                         (True, False, True, False)):
                     if (index + self._range_offset) % RANGE_BLOCK == 0:
@@ -110,7 +129,8 @@ class MonitorBuffer:
         self.pauses = [gap for gap in self.pauses if gap[1] > self.times[0]]
         for column in range(len(self.raw)):
             del self.raw[column][:count]
-            del self.signed[column][:count]
+            if self.signed[column] is not None:
+                del self.signed[column][:count]
             failures = self.failures[column]
             self.failures[column] = array("I", (i - count for i in failures[bisect_left(failures, count):]))
             # Whole blocks remain valid. The partial leading block is scanned
@@ -125,7 +145,12 @@ class MonitorBuffer:
                 entry[0] = first
 
     def column(self, index, signed=False):
-        return (self.signed if signed else self.raw)[index]
+        if not signed:
+            return self.raw[index]
+        values = self.signed[index]
+        if values is None:
+            values = self.signed[index] = array("i", (to_signed(value) for value in self.raw[index]))
+        return values
 
     def blocks(self, column, signed, level):
         """(first absolute block, mins, maxs) of whole 2**level-sample blocks, built lazily;
@@ -2049,6 +2074,8 @@ class MonitorDialog(ManagedDialog):
         count = len(self.checked_registers())
         self.count_label.setText(f"已选 {count} / {MONITOR_MAX_REGISTERS}")
         self.clear_selection_button.setEnabled(self.state == "idle" and count > 0)
+        if hasattr(self, "start_button"):
+            self._interval_tooltip()
 
     def clear_selection(self):
         if self.state != "idle":
@@ -2093,7 +2120,8 @@ class MonitorDialog(ManagedDialog):
         self._shown_pause = 0
         self.interval_ms = self.interval_spin.value()
         self.plot.sample_interval_s = self.interval_ms / 1000
-        self.buffer = MonitorBuffer(len(chosen), addresses=[address for _, address in chosen])
+        self.buffer = MonitorBuffer(len(chosen), limit=monitor_sample_limit(len(chosen)),
+                                    addresses=[address for _, address in chosen], store_signed=False)
         self.plot.set_series(self.buffer, [name for name, _ in chosen], self.monitored_offsets)
         self._sync_highlight()
         self._launch(session, token, stop)
@@ -2161,7 +2189,8 @@ class MonitorDialog(ManagedDialog):
     def clear(self):
         if self.monitored:
             addresses = self.buffer.addresses or tuple(address for _, address in self.monitored)
-            self.buffer = MonitorBuffer(len(self.monitored), addresses=addresses)
+            self.buffer = MonitorBuffer(len(self.monitored), limit=monitor_sample_limit(len(self.monitored)),
+                                        addresses=addresses, store_signed=False)
             if self.state == "idle" and self._shown is not None:
                 self._show_selection()
             else:
@@ -2302,11 +2331,16 @@ class MonitorDialog(ManagedDialog):
 
     def _interval_tooltip(self):
         value = self.interval_spin.value()
+        count = len(self.monitored)
+        if not count and hasattr(self, "list"):
+            count = len(self.checked_registers())
+        count = count or 1
+        limit = self.buffer.limit if self.buffer is not None else monitor_sample_limit(count)
         self.interval_spin.setToolTip(f"板端采样间隔，默认 {MONITOR_INTERVAL_MS} ms，最快 {MONITOR_MIN_INTERVAL_MS} ms；"
                                       "监视与暂停期间锁定，下次开始监视时生效。")
         self.start_button.setToolTip(f"板端每 {value} ms 采样一次：aarch64 板子上由常驻采样程序一次映射、循环读取；"
                                      "无法使用时改为 devmem 循环，跟不上时按实际速度采样并在状态栏提示。"
-                                     f"最多保留约 {SAMPLE_LIMIT * value // 1000} s 数据。")
+                                     f"最多保留约 {limit * value // 1000} s 数据（{limit:,} 点）。")
 
     def _signed_changed(self, on):
         self.plot.signed = on

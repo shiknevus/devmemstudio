@@ -115,7 +115,10 @@ def main():
         if "--no-catalog" in sys.argv[1:]:
             print("  skip catalog      (--no-catalog)")
         else:
-            run("catalog", "tools/gen_component_catalog.py", "--refresh")   # before packaging: EXE ships the fresh table
+            catalog_args = ["tools/gen_component_catalog.py", "--refresh"]
+            if "--strict-catalog" in sys.argv[1:]:
+                catalog_args.append("--strict-catalog")
+            run("catalog", *catalog_args)   # before packaging: EXE ships the fresh table
             lines = (LOGS / "catalog.log").read_text(encoding="utf-8").strip().splitlines()
             print("        " + (lines[-1][:150] if lines else "(catalog.log is empty)"))
         with ThreadPoolExecutor(max_workers=3) as pool:

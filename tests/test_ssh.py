@@ -734,6 +734,19 @@ class SshTests(BoardFixture, unittest.TestCase):
         self.assertEqual(messages, [""])
         self.assertTrue(self.session.alive)
 
+    def test_shell_fallback_clamps_sub_five_ms_requests(self):
+        batches, done, stop = [], threading.Event(), threading.Event()
+        self.assertTrue(self.session.start_monitor([0xB0102200], 1, batches.append,
+                                                   lambda message: done.set(), stop))
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        command = next(command for command in self.server.exec_commands if command.startswith("echo '#shell'"))
+        self.assertIn("P=5000", command)
+        self.assertTrue(any("最小间隔为 5 ms" in text for _, text in self.logs))
+        stop.set()
+        self.assertTrue(done.wait(2))
+
     def test_monitor_reports_board_side_exit(self):
         messages, done = [], threading.Event()
         self.session.start_monitor([0xB0102FF0], 10, lambda samples: None,

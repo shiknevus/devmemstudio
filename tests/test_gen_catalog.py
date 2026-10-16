@@ -85,6 +85,11 @@ class MatchTests(unittest.TestCase):
         self.assertNotIn("ec_unknown", matched)
         self.assertEqual(ambiguous, [])
 
+    def test_strict_catalog_treats_unharvested_types_as_errors(self):
+        report = {"unparsed_files": [], "unmatched_top_types": [], "unharvested_top_types": ["ec_uut"]}
+        self.assertEqual(gen.catalog_errors(report), [])
+        self.assertEqual(gen.catalog_errors(report, strict=True), ["unharvested_top_types"])
+
 
 HARVEST_TOP = """
 module ec_uut();

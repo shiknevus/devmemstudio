@@ -74,6 +74,7 @@ BATCH_READ_CHUNK = 32
 # Register monitor: regmon reads mapped registers in microseconds, so 1 ms holds; the devmem
 # fallback forks one busybox devmem per register per sample (~1 ms each on the A53) and lags below ~5 ms.
 MONITOR_MIN_INTERVAL_MS = 1
+MONITOR_SHELL_MIN_INTERVAL_MS = 5
 MONITOR_MAX_INTERVAL_MS = 60000
 MONITOR_INTERVAL_MS = 5    # default monitor sampling period
 LIVE_INTERVAL_MS = 5       # fixed register-table period: it refreshes at ~25 Hz, faster only loads the board
@@ -244,11 +245,12 @@ def monitor_script(addresses, interval_ms) -> str:
             "done")
 
 
-def monitor_command(addresses, interval_ms, sampler=None) -> str:
+def monitor_command(addresses, interval_ms, sampler=None, shell_interval_ms=None) -> str:
     """A resident sampler the board cannot execute (shell status 126/127, e.g. /tmp mounted
     noexec) hands over to the devmem loop. Any other failure ends the run, so a faulting
     address is never retried in devmem."""
-    script = monitor_script(addresses, interval_ms)
+    shell_interval_ms = interval_ms if shell_interval_ms is None else shell_interval_ms
+    script = monitor_script(addresses, shell_interval_ms)
     if not sampler:
         return "echo '#shell'; " + script
     period = max(1, round(float(interval_ms) * 1000))
@@ -1399,10 +1401,13 @@ class SshSession:
             raise
         if stop.is_set():
             return False
+        shell_interval = max(float(interval_ms), MONITOR_SHELL_MIN_INTERVAL_MS)
+        if shell_interval != interval_ms:
+            self.log("SYSTEM", f"devmem 循环最小间隔为 {MONITOR_SHELL_MIN_INTERVAL_MS} ms，已将 {interval_ms:g} ms 调整为 {shell_interval:g} ms。")
         try:
             with self._monitor_channel(stop, keep_open=True) as channel:
                 channel.set_combine_stderr(True)
-                channel.exec_command(monitor_command(addresses, interval_ms, sampler))
+                channel.exec_command(monitor_command(addresses, interval_ms, sampler, shell_interval))
         except Exception:
             if stop.is_set():
                 return False

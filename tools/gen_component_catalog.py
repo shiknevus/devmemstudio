@@ -143,6 +143,18 @@ def carry_removed(catalog: dict, previous: dict) -> list[str]:
     return kept
 
 
+def catalog_errors(report: dict, strict: bool = False) -> list[str]:
+    """Return release-blocking catalog issues without changing the report format."""
+    errors = []
+    if report.get("unparsed_files"):
+        errors.append("unparsed_files")
+    if report.get("unmatched_top_types"):
+        errors.append("unmatched_top_types")
+    if strict and report.get("unharvested_top_types"):
+        errors.append("unharvested_top_types")
+    return errors
+
+
 def _override_time(item: Path) -> float:
     try:
         entry = json.loads(item.read_text(encoding="utf-8"))
@@ -151,7 +163,7 @@ def _override_time(item: Path) -> float:
     return override_imported_at(item, entry)
 
 
-def refresh(out: Path, rtl: Path | None, stamp: str) -> int:
+def refresh(out: Path, rtl: Path | None, stamp: str, strict: bool = False) -> int:
     """Build step: regenerate from the recorded RTL root; rewrite only when something changed."""
     try:
         previous = json.loads(out.read_text(encoding="utf-8"))
@@ -167,8 +179,9 @@ def refresh(out: Path, rtl: Path | None, stamp: str) -> int:
     catalog, report = build(root, tops, stamp)
     print("tops:", ", ".join(str(top) for top in tops) or "(none)")
     print(json.dumps(report, ensure_ascii=False))
-    if report["unparsed_files"] or report["unmatched_top_types"]:
-        print("FAIL: unparsed files or unmatched top types (see report above)")
+    errors = catalog_errors(report, strict)
+    if errors:
+        print("FAIL: " + ", ".join(errors) + " (see report above)")
         return 1
     old_types = previous.get("types", {})
     kept = carry_removed(catalog, old_types)
@@ -195,11 +208,13 @@ def main() -> int:
     parser.add_argument("--tops", default="", help="optional comma-separated top files: extra type aliases + coverage check")
     parser.add_argument("--stamp", default=None, help="override generated_at for reproducible output")
     parser.add_argument("--check", action="store_true", help="exit non-zero on unparsed files or unmatched top types")
+    parser.add_argument("--strict-catalog", action="store_true",
+                        help="also fail when a type lacks harvested top-level notes/behavior metadata")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     stamp = args.stamp or datetime.now().astimezone().isoformat(timespec="seconds")   # with UTC offset
     if args.refresh:
-        return refresh(args.out, args.rtl, stamp)
+        return refresh(args.out, args.rtl, stamp, strict=args.strict_catalog)
     if args.rtl is None:
         parser.error("--rtl is required unless --refresh is given")
     tops =[Path(item) for item in args.tops.split(",") if item.strip()]
@@ -207,7 +222,7 @@ def main() -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2 if args.verbose else None))
-    if args.check and (report["unparsed_files"] or report["unmatched_top_types"]):
+    if args.check and catalog_errors(report, args.strict_catalog):
         return 1
     return 0
 
