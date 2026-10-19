@@ -10,9 +10,12 @@ import re
 from .top_import import read_text_resilient
 
 ALIASES = {"ec_sf_door": "sf_doo"}
-# 9'h1B4 / 12'd16 / plain 436 (a plain number must end the line: no expressions).
-DEFINE = re.compile(r"^[ \t]*`define[ \t]+(\w+)[ \t]+(?:\d*[ \t]*'[ \t]*[sS]?([hHdD])[ \t]*([0-9A-Fa-f_]+)"
-                    r"|(\d[\d_]*)[ \t\r]*$)", re.M)
+# 9'h1B4 / 12'd16 / 12'b1010 / plain 436. A plain number must end the line; a
+# sized literal may be followed only by a trailing comment — any other tail
+# (``+ 9'h004``, ``- 20'h1000``, a macro reference) is an unresolved expression
+# and is reported, never silently truncated to its prefix.
+DEFINE = re.compile(r"^[ \t]*`define[ \t]+(\w+)[ \t]+(?:\d*[ \t]*'[ \t]*[sS]?([hHbBdDoO])[ \t]*([0-9a-fA-F_xXzZ_]+)"
+                    r"(?:[ \t\r]*(?://[^\n]*)?$|$)|(\d[\d_]*)[ \t\r]*(?://[^\n]*)?$)", re.M)
 _WR_ADDR = r"wr_task_addr(?:\s*\[[^\]]*\])?\s*==\s*`(\w+)\b"
 # i_st_wr_data[15:0], optionally behind high padding: {16'd0, i_st_wr_data[15:0]}.
 _WR_DATA = (r"(?:\{\s*(?:\d+\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,\s*)+)?"
@@ -93,16 +96,43 @@ def port_hookups(body: str, head: re.Pattern) -> list[tuple[str, str]]:
 
 
 def parse_define_table(text: str, warnings: list[str] | None = None) -> dict[str, int]:
-    """Register offsets from reg_addr_pl.vh; a later redefinition wins (warned when it differs)."""
+    """Register offsets from reg_addr_pl.vh; a later redefinition wins (warned when it differs).
+
+    Sized literals may use h/d/b/o radix.  A ``define`` whose value is an
+    expression (``9'h0D8 + 9'h004``, ``20'h3000 - 20'h1000``, a macro reference)
+    is not a plain constant: it is skipped *and* reported, so a register is never
+    silently placed at the truncated prefix of an expression."""
     table: dict[str, int] = {}
-    for name, radix, digits, plain in DEFINE.findall(strip_comments(text)):
+    code = strip_comments(text)
+    for name, radix, digits, plain in DEFINE.findall(code):
         try:
-            value = int(plain.replace("_", "")) if plain else int(digits.replace("_", ""), 16 if radix in "hH" else 10)
+            if plain:
+                value = int(plain.replace("_", ""))
+            else:
+                base = {"h": 16, "H": 16, "b": 2, "B": 2, "o": 8, "O": 8, "d": 10, "D": 10}[radix]
+                # x/X (unknown) and z/Z (high impedance) are not base digits;
+                # substitute 0 so a 'hz mask or 'bz defaults stays parseable.
+                cleaned = digits.replace("_", "").replace("x", "0").replace("X", "0") \
+                                  .replace("z", "0").replace("Z", "0")
+                value = int(cleaned, base)
         except ValueError:
+            if warnings is not None:
+                warnings.append(f"reg_addr_pl.vh: {name} 的常量无法解析（{digits or plain}），已跳过。")
             continue
         if name in table and table[name] != value and warnings is not None:
             warnings.append(f"reg_addr_pl.vh: {name} 重复定义且取值不同（0x{table[name]:X} / 0x{value:X}），使用后者")
         table[name] = value
+    # A `define whose value is not a plain constant (an expression or a macro
+    # reference) is skipped and reported, never silently truncated to a prefix.
+    # One regex covers both kinds and the names are de-duplicated so a line that
+    # matches both (e.g. ```define X `BASE + 9'h100``) warns exactly once.
+    nonconstant = re.compile(r"^[ \t]*`define[ \t]+(\w+)[ \t]+(?:`[A-Za-z_]\w*|[^ \t\r\n]+[ \t]*(?:\+|-|\*|/|<<|>>))", re.M)
+    if warnings is not None:
+        warned = set()
+        for name in nonconstant.findall(code):
+            if name not in warned:
+                warned.add(name)
+                warnings.append(f"reg_addr_pl.vh: {name} 的偏移是表达式或宏引用，无法解析，已跳过（请改为常量）。")
     return table
 
 

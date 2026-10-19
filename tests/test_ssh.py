@@ -850,6 +850,24 @@ class SshTests(BoardFixture, unittest.TestCase):
         self.assertEqual(kinds, [])
         self.assertFalse(any("改用 devmem 循环" in text for _, text in self.logs))
 
+    def test_resident_sampler_at_one_ms_does_not_log_the_shell_clamp(self):
+        # With the native regmon (real 1 ms sampling) the "devmem 循环最小间隔为
+        # 5 ms" note is misleading and must not appear; it belongs only to the
+        # devmem fallback loop.
+        self.server.arch = "aarch64"
+        batches, kinds, done, stop = [], [], threading.Event(), threading.Event()
+        with self.fake_board_sftp([]):
+            self.assertTrue(self.session.start_monitor(
+                [0xB0102200], 1, batches.append, lambda message: done.set(), stop,
+                on_sampler=kinds.append))
+            deadline = time.monotonic() + 3
+            while sum(map(len, batches)) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertIn("regmon", kinds)
+        self.assertFalse(any("最小间隔为 5 ms" in text for _, text in self.logs))
+        stop.set()
+        self.assertTrue(done.wait(2))
+
     def test_unexecutable_sampler_hands_over_to_the_devmem_loop(self):
         self.server.arch = "aarch64"
         self.server.regmon_mode = "noexec"

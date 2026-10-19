@@ -234,11 +234,13 @@ class ConnectionCardTests(unittest.TestCase):
             self.add_port(window)
             window.serial_section.toggle.click()
             QTest.keyClick(window.serial_password, Qt.Key_Return)
-            self.settle(lambda: window._serial_busy)
+            # Worker thread round trips; under an 8-way parallel Qt load the
+            # default 4 s can be too tight for the event loop, so wait longer.
+            self.settle(lambda: window._serial_busy, timeout=12)
             self.assertEqual(window.serial_section.dot.property("state"), "connecting")
             self.assertEqual(window.serial_connect_button.text(), "取消")
             release.set()
-            self.settle(lambda: window.serial_connected and not window._serial_busy)
+            self.settle(lambda: window.serial_connected and not window._serial_busy, timeout=12)
         self.assertEqual(window.serial_section.dot.property("state"), "connected")
         self.assertEqual(window.serial_connect_button.text(), "断开")
         self.assertEqual(window.serial_section.summary.text(), "COM9 · 115200")

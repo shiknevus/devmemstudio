@@ -48,6 +48,7 @@ from .dialogs import (BatchDialog, HostKeyDialog, BitUploadDialog, BitRollbackDi
 # Each SSH attempt is bounded; attempts continue until success or cancellation.
 # Serial keeps its existing overall timeout.
 CONNECT_TIMEOUT = 8
+WRITE_CACHE_KEYS = 32   # most-recently-used component keys retained in write_cache
 WINDOW_DEFAULT_SIZE = (1540, 960)
 WINDOW_DESKTOP_MIN_SIZE = (1180, 740)
 WINDOW_COMPACT_MIN_SIZE = (960, 620)
@@ -108,6 +109,7 @@ class MainWindow(QMainWindow):
         self.persist = persist
         self.demo = False
         self.connected = False
+        self._target = ""            # captured at connect; never re-read from live widgets
         self._busy = False
         self._closing = False
         self._window_states = WindowStateCoordinator(self)
@@ -133,6 +135,11 @@ class MainWindow(QMainWindow):
         self.pool.setMaxThreadCount(2)
         self.stream_pool = QThreadPool(self)
         self.stream_pool.setMaxThreadCount(1)
+        # COM-port enumeration is a low-frequency background probe; keep it on
+        # its own pool so a slow setupapi walk (many virtual ports) can never
+        # starve register/SSH/serial tasks waiting on the shared pool.
+        self.ports_pool = QThreadPool(self)
+        self.ports_pool.setMaxThreadCount(1)
         self._stream_workers = {}
         self._stream_cancel = threading.Event()
         self._stream_state = "stopped"
@@ -172,6 +179,8 @@ class MainWindow(QMainWindow):
         self._completion_workers = set()   # keep refs: pool.start alone lets GC drop them
         self._serial_cancel_requested = False
         self._last_ports_scan = 0.0   # COM 口枚举有开销，节流到心跳间隔的倍数
+        self._ports_scanning = False  # the enumeration itself runs on the worker pool
+        self._ports_scan_worker = None
         self._ports_changed = QTimer(self)   # WM_DEVICECHANGE bursts → one rescan
         self._ports_changed.setSingleShot(True)
         self._ports_changed.timeout.connect(lambda: self._refresh_serial_ports(force=True))
@@ -251,6 +260,27 @@ class MainWindow(QMainWindow):
             self._window_states._capture_owner_geometry()
         if self.cfg.get("window_maximized") is True:
             self.setWindowState(Qt.WindowMaximized)
+        # Consume a leftover upgrade outcome and sweep stale download/stage files
+        # once the window is painted (never block startup on the filesystem).
+        QTimer.singleShot(0, self._reconcile_updates)
+
+    def _reconcile_updates(self):
+        """Report the outcome of the last restart-and-upgrade and clean stale
+        download/stage leftovers that a crashed helper or a deferred close left."""
+        try:
+            result = updater.take_update_result()
+            if result is not None:
+                if result["success"]:
+                    self.append_log("SUCCESS", f"已升级到 {result['version']}。")
+                else:
+                    detail = result["error"] or "未知原因"
+                    if result["restored"]:
+                        self.append_log("ERROR", f"升级失败并已回滚到原版本：{detail}")
+                    else:
+                        self.append_log("ERROR", f"升级失败：{detail}")
+            updater.cleanup_update_leftovers(keep=[])
+        except Exception as exc:   # never let bookkeeping take the window down
+            self.append_log("SYSTEM", f"升级记录处理失败：{exc}")
 
     def _build(self):
         central = QWidget()
@@ -1096,7 +1126,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
         if self.type_catalog is None:
-            self.type_catalog = {"schema": 6, "types": {}}
+            self.type_catalog = {"schema": component_parse.CATALOG_SCHEMA, "types": {}}
         updated_keys = set()
         try:
             overrides = user_data_dir() / "component_overrides"
@@ -2059,8 +2089,21 @@ class MainWindow(QMainWindow):
         self.decoded_label.setVisible(self.bit_mode.isChecked() and (bool(reg["_error"]) or not definitions))
 
     def _remember_reg(self, reg):
-        self.cfg.setdefault("write_cache", {}).setdefault(self.cache_key, {})[reg["name"]] = {
-            "v": reg["_draft"], "f": reg["_fmt"], "w": reg["_access_width"]}
+        cache = self.cfg.setdefault("write_cache", {})
+        # Move the key to the end first so an already-present component counts
+        # as recently used again (true LRU): setdefault would leave it in place,
+        # and the eviction below would then drop a recently touched component
+        # before an older one.  The popped dict is the merge base: it still
+        # holds this component's other registers edited earlier, which must not
+        # be discarded when one register is re-edited.
+        previous = cache.pop(self.cache_key, None) or {}
+        cache[self.cache_key] = {**previous,
+                                 reg["name"]: {"v": reg["_draft"], "f": reg["_fmt"], "w": reg["_access_width"]}}
+        # Bound the map: every component opened with an edited field adds a key,
+        # and the whole cfg is deep-copied + re-serialised on each save.  Keep
+        # only the most recently used component keys (Python dicts stay ordered).
+        while len(cache) > WRITE_CACHE_KEYS:
+            cache.pop(next(iter(cache)))
         self._schedule_save()
 
     def _table_edited(self, item):
@@ -2271,6 +2314,9 @@ class MainWindow(QMainWindow):
                 self._pending_host_key_change = (result, request)
                 return
             self._set_connection(True)
+            # Provenance must reflect the device that was actually connected to,
+            # even if the host/port fields are edited later while disconnected.
+            self._target = f"{request[0]}:{request[1]}"
             self.append_log("SUCCESS", "SSH 连接成功。")
         self._run_task(connect, done, "SSH连接", "connect")
         self._update_connection_status()   # _busy+kind set → SSH 连接中
@@ -2612,7 +2658,7 @@ class MainWindow(QMainWindow):
         worker = Worker(lambda progress: session.list_dirs("/run/media"))
         self._bit_dir_workers.add(worker)
         worker.signals.result.connect(self._merge_bit_dirs)
-        worker.signals.finished.connect(lambda: self._bit_dir_workers.discard(worker))
+        worker.signals.finished.connect(lambda w=worker: self._probe_worker_done(w))
         self.pool.start(worker)
 
     def _merge_bit_dirs(self, found):
@@ -2918,7 +2964,7 @@ class MainWindow(QMainWindow):
                 reg["_value"] = data["value"]
                 reg["_updated"] = datetime.now().strftime("%H:%M:%S.%f")[:-3]
                 reg["_source"] = "离线演示" if self.demo else "设备实测"
-                reg["_target"] = "DEMO" if self.demo else f"{self.host.text()}:{self.port.value()}"
+                reg["_target"] = "DEMO" if self.demo else (self._target or f"{self.host.text()}:{self.port.value()}")
                 self.read_count += 1
             self._update_table_row(reg)
             if reg["name"] == "PARAM4" and "value" in data:
@@ -3003,7 +3049,11 @@ class MainWindow(QMainWindow):
                 part = records[start:start + BATCH_READ_CHUNK]
                 try:
                     # One shell round trip per chunk; per-address failures come back as errors.
-                    values = session.read_many([reg["_address"] for reg in part])
+                    # Pass each register's own access width so 8/16/64-bit registers
+                    # are read at their real width instead of always 32 bits.
+                    values = session.read_many([reg["_address"] for reg in part],
+                                               {reg["_address"]: int(reg.get("_access_width", 32))
+                                                for reg in part})
                 except Exception as exc:
                     progress({"register": part[0], "error": str(exc), "current": start + 1, "total": total})
                     raise
@@ -3131,7 +3181,7 @@ class MainWindow(QMainWindow):
         if self._closing or not self.connected:
             return
         stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        source, target = ("离线演示", "DEMO") if self.demo else ("设备实测", f"{self.host.text()}:{self.port.value()}")
+        source, target = ("离线演示", "DEMO") if self.demo else ("设备实测", self._target or f"{self.host.text()}:{self.port.value()}")
         changed = []
         for reg in self.regs:
             if reg["_address"] not in values or any(reg.get(flag) for flag in NO_LIVE_FLAGS):
@@ -3201,14 +3251,28 @@ class MainWindow(QMainWindow):
         port when its device disappears from the system.
 
         The enumeration walks the Windows setupapi tree, so the heartbeat
-        throttles it; a device-change notification forces it at once."""
-        if self._closing:
+        throttles it; a device-change notification forces it at once.  The
+        actual ``list_ports.comports()`` walk runs on the worker pool — with
+        many virtual COM ports it can take hundreds of milliseconds and must
+        never stall the GUI on the 1 Hz heartbeat."""
+        if self._closing or self._ports_scanning:
             return
         now = time.monotonic()
         if not force and now - self._last_ports_scan < 20:
             return
         self._last_ports_scan = now
-        ports = list_serial_ports()
+        self._ports_scanning = True
+        worker = Worker(lambda progress: list_serial_ports())
+        self._ports_scan_worker = worker
+        worker.signals.result.connect(self._serial_ports_scanned)
+        worker.signals.finished.connect(self._ports_scan_done)
+        # Dedicated pool: the enumeration must never compete with register/SSH/
+        # serial tasks for the main pool's threads.
+        self.ports_pool.start(worker)
+
+    def _serial_ports_scanned(self, ports):
+        if self._closing:
+            return
         devices = [device for device, _ in ports]
         if self.serial_connected and self._serial_device and self._serial_device not in devices:
             self._serial_dropped(f"serial {self._serial_device} 已拔出，连接已断开。")
@@ -3224,6 +3288,10 @@ class MainWindow(QMainWindow):
             self.serial_port.blockSignals(False)
             self._refresh_selector_tooltips()
             self._refresh_channel_summaries()
+
+    def _ports_scan_done(self):
+        self._ports_scanning = False
+        self._ports_scan_worker = None
 
     def send_command(self, text=""):
         """Run a shell command typed in the terminal prompt (routes by source)."""
@@ -3265,7 +3333,7 @@ class MainWindow(QMainWindow):
         self._completion_workers.add(worker)
         worker.signals.result.connect(lambda remote: self._closing or reply(sorted(set(local) | set(remote))))
         worker.signals.failed.connect(lambda message: self._closing or reply(local))
-        worker.signals.finished.connect(lambda: self._completion_workers.discard(worker))
+        worker.signals.finished.connect(lambda w=worker: self._probe_worker_done(w))
         self.pool.start(worker)
 
     def _reboot_channel(self):
@@ -3373,6 +3441,14 @@ class MainWindow(QMainWindow):
     def _stream_worker_finished(self, token):
         self._stream_workers.pop(token, None)
         if self._closing:
+            QTimer.singleShot(0, self.close)
+
+    def _probe_worker_done(self, worker):
+        """A gate-exempt probe (Tab completion / board-directory listing) finished;
+        if the window was closing, finish the close once the shared pool is empty."""
+        self._completion_workers.discard(worker)
+        self._bit_dir_workers.discard(worker)
+        if self._closing and not (self._completion_workers or self._bit_dir_workers):
             QTimer.singleShot(0, self.close)
 
     @Slot(int, str)
@@ -3655,6 +3731,11 @@ class MainWindow(QMainWindow):
         self.cancel.set()
         self.live.stop()
         self._stop_stream()
+        # Drop a queued/in-flight COM enumeration: its result is discarded via
+        # the _closing guard and it must not hold the window's destruction.
+        self.ports_pool.clear()
+        self._ports_scanning = False
+        self._ports_scan_worker = None
         if self.monitor_dialog is not None:
             self.monitor_dialog.shutdown()
         self.session.close()
@@ -3666,7 +3747,10 @@ class MainWindow(QMainWindow):
             self.bit_pack_dialog.close()
         if self.update_dialog is not None:
             self.update_dialog.close()   # cancels a check/download immediately
-        if self._busy or self._stream_workers or self._serial_busy or packing:
+        workers_in_flight = bool(self._completion_workers or self._bit_dir_workers)
+        if self._busy or self._stream_workers or self._serial_busy or packing or workers_in_flight:
+            # Tab-completion / board-directory probes run outside the busy gate;
+            # they still hold the shared pool, so wait for them before leaving.
             self.setEnabled(False)
             event.ignore()
             return
@@ -3677,7 +3761,10 @@ class MainWindow(QMainWindow):
             return
         if self._pending_update:
             try:
-                updater.start_install(self._pending_update)
+                # Keep the event loop alive while the helper starts, so the
+                # window repaints instead of showing "无响应" for up to 10 s.
+                updater.start_install(self._pending_update,
+                                      pump=lambda: QApplication.processEvents())
             except OSError as exc:
                 self._abort_update_close(str(exc))
                 event.ignore()

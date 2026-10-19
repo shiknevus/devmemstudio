@@ -544,11 +544,16 @@ class ReviewRegressionTests(unittest.TestCase):
             "`define REG_D 12'd16\n"
             "`define REG_P 436 // plain\n"
             "`define REG_E 12 + 4\n"
+            "`define REG_B 12'b0000_1000_0000\n"
+            "`define REG_O 12'o1000\n"
             "`ifdef ALT\n`define REG_Z 9'h010\n`else\n`define REG_Z 9'h020\n`endif\n"
             "`define REG_S 9'h0F0\n`define REG_S 9'h0F0\n", warnings)
-        self.assertEqual(table, {"REG_X": 0x100, "REG_D": 16, "REG_P": 436, "REG_Z": 0x020, "REG_S": 0x0F0})
-        self.assertEqual(len(warnings), 1)                 # same value twice is not a conflict
+        self.assertEqual(table, {"REG_X": 0x100, "REG_D": 16, "REG_P": 436,
+                                 "REG_B": 0x80, "REG_O": 0x200, "REG_Z": 0x020, "REG_S": 0x0F0})
+        # Same value twice is not a conflict; the 12 + 4 expression is skipped
+        # with a warning (never silently truncated to its prefix).
         self.assertIn("REG_Z", warnings[0])
+        self.assertTrue(any("REG_E" in item for item in warnings))
 
     def test_build_reports_define_conflicts(self):
         with tempfile.TemporaryDirectory() as directory:

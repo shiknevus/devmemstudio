@@ -225,6 +225,19 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(list(buffer.times), [3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
         self.assertEqual(list(buffer.failures[0]), [4])
         self.assertEqual(buffer.total, 9)
+        # The counter must agree with the retained failure arrays: the failure at
+        # index 1 was dropped, so only the index-7 failure (now relative 4) counts.
+        self.assertEqual(buffer.failed, len(buffer.failures[0]))
+
+    def test_failed_counter_tracks_dropped_failures(self):
+        # A failure inside the dropped window must not keep inflating the counter
+        # (previously failed==1 while failures[] was empty).
+        buffer = MonitorBuffer(1, limit=8)
+        buffer.extend([(0.0, (None,))])
+        for i in range(1, 9):
+            buffer.extend([(float(i), (i,))])
+        self.assertEqual(buffer.failed, 0)
+        self.assertEqual(list(buffer.failures[0]), [])
 
 
 class DialogTests(unittest.TestCase):

@@ -300,7 +300,15 @@ class UpdateTransportTests(unittest.TestCase):
         uploading["assets"] = []
         older = release_payload()
         older["tag_name"] = "v98.0.0"
+        # A newer release whose package is missing/renamed must NOT read as
+        # "up to date": the user is told the release is not ready to install.
         with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps([uploading, older]).encode())):
+            with self.assertRaises(updater.MissingAsset):
+                updater.check_release(current="97.0.0")
+        # When the newest formal release is not newer than the running version,
+        # a missing asset is simply "no update" (nothing newer to announce).
+        uploading["tag_name"] = "v97.0.0"
+        with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps([uploading]).encode())):
             self.assertIsNone(updater.check_release(current="97.0.0"))
         foreign = release_payload()
         foreign["assets"][0]["browser_download_url"] = "https://github.com/other/repo/releases/download/v99.0.0/x.zip"
@@ -400,6 +408,32 @@ class UpdateTransportTests(unittest.TestCase):
         error, seconds, _ = self.start_with("import time; time.sleep(30)", timeout=1)   # hung helper is killed
         self.assertIsInstance(error, OSError)
         self.assertLess(seconds, 6)
+
+    def test_pump_callback_keeps_the_poll_throttled_not_a_busy_wait(self):
+        # The pump must only keep the caller's UI repainting; it must NOT replace
+        # the 50 ms sleep and turn the marker-stat loop into a CPU-burning spin
+        # while PowerShell takes a couple of seconds to start.
+        directory = Path(tempfile.mkdtemp(prefix="devmem-pump-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        marker = directory / "started.flag"
+        job_path = directory / "install.json"
+        job_path.write_text(json.dumps({"started": str(marker)}), encoding="utf-8")
+        script = "import time; time.sleep(0.3); open(%r, 'w').close()" % str(marker)
+        real = subprocess.Popen
+
+        def popen(command, **options):
+            return real([sys.executable, "-c", script], **options)
+
+        pump_count = [0]
+
+        def pump():
+            pump_count[0] += 1
+
+        with patch.object(updater.subprocess, "Popen", side_effect=popen):
+            updater.start_install(job_path, timeout=5.0, pump=pump)
+        # 0.3 s at a 50 ms cadence is ~6-8 polls; an unthrottled busy wait would
+        # run thousands of times.  Keep a generous bound to stay robust on slow CI.
+        self.assertLessEqual(pump_count[0], 40)
 
 
 @unittest.skipUnless(sys.platform == "win32" and shutil.which("gcc") and shutil.which("windres"), "MinGW required")

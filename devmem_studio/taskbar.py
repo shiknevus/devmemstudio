@@ -54,6 +54,8 @@ def _with_taskbar(action):
     try:
         clsid = _Guid.parse("{56FDF344-FD6D-11d0-958A-006097C9A090}")
         iid = _Guid.parse("{56FDF342-FD6D-11d0-958A-006097C9A090}")
+        # OleDLL raises OSError on a failing HRESULT, so a NULL taskbar below is
+        # unreachable in production; the guard is defensive hardening only.
         if ole32.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(taskbar)):
             return False
         try:
@@ -62,7 +64,8 @@ def _with_taskbar(action):
                 return False
             return action(taskbar)
         finally:
-            _method(taskbar, 2)(taskbar)
+            if taskbar:   # never call Release on a null interface
+                _method(taskbar, 2)(taskbar)
     except OSError:
         return False
     finally:
@@ -112,6 +115,8 @@ def _method(store, index, *argtypes):
 
 def _with_store(hwnd, action):
     ole32, shell32 = ctypes.OleDLL("ole32"), ctypes.WinDLL("shell32")
+    shell32.SHGetPropertyStoreForWindow.argtypes = [wintypes.HWND, ctypes.POINTER(_Guid), ctypes.POINTER(ctypes.c_void_p)]
+    shell32.SHGetPropertyStoreForWindow.restype = ctypes.c_long   # HRESULT
     initialized = ctypes.windll.ole32.CoInitializeEx(None, 2) >= 0
     store = ctypes.c_void_p()
     try:
@@ -121,7 +126,8 @@ def _with_store(hwnd, action):
         try:
             return action(store, ole32)
         finally:
-            _method(store, 2)(store)   # IUnknown::Release
+            if store:
+                _method(store, 2)(store)   # IUnknown::Release
     finally:
         if initialized:
             ctypes.windll.ole32.CoUninitialize()

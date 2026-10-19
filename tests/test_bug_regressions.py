@@ -271,5 +271,116 @@ class DemoValidationRegressions(unittest.TestCase):
             self.assertEqual(session.memory, {})
 
 
+class Review2026Fixes(unittest.TestCase):
+    """Regressions for the 2026 review fixes: output parsing, DPAPI migration,
+    parameterless ec_ instances, binary/octal biases, and read widths."""
+
+    def test_devmem_output_diagnostic_is_not_read_as_the_value(self):
+        from devmem_studio.core import parse_devmem_read_output
+        # A trailing diagnostic must never replace the real value.
+        value, _ = parse_devmem_read_output("0x0000002A\nread error: 13", 0xB0102208)
+        self.assertEqual(value, 0x2A)
+        # A line whose only number is a diagnostic is not a value at all.
+        for text in ("devmem: read error: 13", "Bus error: data = 0x0",
+                     "Error 13: Permission denied", "read error: 9"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_devmem_read_output(text), (None, None))
+        # Legitimate forms keep working.
+        self.assertEqual(parse_devmem_read_output("Value at address 0xB0102208: 0xF0")[0], 0xF0)
+        self.assertEqual(parse_devmem_read_output("0xB0102208: 0x2A")[0], 0x2A)
+
+    def test_legacy_dpapi_ciphertext_is_blanked_not_used_as_password(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registers.json"
+            path.write_text(json.dumps({"password": "dpapi:AAAA", "remember_password": True}),
+                            encoding="utf-8")
+            store = ConfigStore(path)
+            cfg = store.load()
+            self.assertEqual(cfg["password"], "")
+            self.assertIn("无法", store.warning)
+
+    def test_legacy_serial_password_is_migrated_not_dropped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "registers.json"
+            path.write_text(json.dumps({"serial_password": "uart-secret",
+                                        "password": "ssh-secret", "remember_password": True}),
+                            encoding="utf-8")
+            cfg = ConfigStore(path).load()
+            self.assertEqual(cfg["serial_password"], "uart-secret")
+            self.assertIs(cfg["remember_serial_password"], True)
+
+    def test_parameterless_ec_instance_is_not_silently_lost(self):
+        info = top_import.parse_top("module top; ec_a ec_a_1 ( .clk_i(clk) ); endmodule")
+        self.assertEqual([c["instance"] for c in info["components"]], ["ec_a_1"])
+        self.assertTrue(info["warnings"])   # bias unknown: flagged, not dropped
+
+    def test_binary_and_octal_bias_are_accepted(self):
+        for text, expected in (("module top; ec_a #(.REG_SPACE_BIAS(20'b0000_1000_0000_0000)) ec_a_1 (); endmodule", 0x800),
+                               ("module top; ec_a #(.REG_SPACE_BIAS(20'o4000)) ec_a_1 (); endmodule", 0x800)):
+            with self.subTest(text=text):
+                info = top_import.parse_top(text)
+                self.assertEqual(info["components"][0]["bias"], expected)
+
+    def test_define_expression_is_not_silently_truncated(self):
+        from devmem_studio import component_parse
+        warnings = []
+        table = component_parse.parse_define_table("`define REG_X 9'h0D8 + 9'h004\n", warnings)
+        self.assertEqual(table, {})
+        self.assertTrue(any("REG_X" in item for item in warnings))
+        self.assertEqual(component_parse.parse_define_table("`define REG_B 12'b0000_1000_0000\n"),
+                         {"REG_B": 0x80})
+        self.assertEqual(component_parse.parse_define_table("`define REG_O 12'o1000\n"),
+                         {"REG_O": 0x200})
+
+    def test_define_z_and_x_unknown_bits_are_parseable_not_silently_dropped(self):
+        from devmem_studio import component_parse
+        # x/X (unknown) and z/Z (high impedance) are not base digits; they must
+        # be substituted with 0 so the constant parses (never a silent ValueError
+        # drop) and the value is the lower known bits.
+        self.assertEqual(component_parse.parse_define_table("`define REG_Z 12'h0z0\n"),
+                         {"REG_Z": 0})
+        self.assertEqual(component_parse.parse_define_table("`define REG_H 12'h1xZ0\n"),
+                         {"REG_H": 0x1000})
+        self.assertEqual(component_parse.parse_define_table("`define REG_B 12'bzz0\n"),
+                         {"REG_B": 0})
+
+    def test_define_expression_warns_once_for_macro_arithmetic(self):
+        from devmem_studio import component_parse
+        # A line matching both the macro-reference and the arithmetic shape must
+        # produce exactly one warning (previously duplicated).
+        warnings = []
+        component_parse.parse_define_table("`define REG_M `BASE + 9'h100\n", warnings)
+        self.assertEqual(len([w for w in warnings if "REG_M" in w]), 1)
+
+    def test_duplicate_parameterless_instance_is_not_listed_twice(self):
+        info = top_import.parse_top(
+            "module top; ec_a ec_a_1 ( .clk_i(clk) ); ec_a ec_a_1 ( .clk_i(clk) ); endmodule")
+        self.assertEqual([c["instance"] for c in info["components"]], ["ec_a_1"])
+
+    def test_block_commented_bias_is_not_read_as_live(self):
+        text = """module top;
+ec_a
+#(
+ /* .REG_SPACE_BIAS(20'hA00)
+    .REG_SPACE_BIAS(20'hB00) */
+ .REG_SPACE_BIAS(20'h800)
+)
+ec_a_1
+(
+);
+endmodule"""
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["instance"], c["bias"]) for c in info["components"]], [("ec_a_1", 0x800)])
+
+    def test_read_respects_access_width(self):
+        from devmem_studio.core import DemoSession
+        session = DemoSession()
+        session.alive = True
+        session.memory[0xB0100000] = 0x1FF
+        self.assertEqual(session.read(0xB0100000, width=8), 0xFF)
+        self.assertEqual(session.read(0xB0100000, width=16), 0x1FF)
+        self.assertEqual(session.read(0xB0100000, width=32), 0x1FF)
+
+
 if __name__ == "__main__":
     unittest.main()

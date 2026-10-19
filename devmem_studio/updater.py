@@ -262,10 +262,17 @@ def check_release(cancel=None, current=__version__):
     formal = [payload for payload in payloads if _formal_version(payload) is not None]
     if not formal:
         raise NotFound("未找到正式发布版本；请检查 GitHub Releases 是否已发布。")
+    newest = max(formal, key=_formal_version)
     try:
-        release = parse_release(max(formal, key=_formal_version), current)
+        release = parse_release(newest, current)
     except MissingAsset:
-        return None   # assets still uploading: no update yet, never an older fallback
+        # A newer version exists but its package/checksum is missing or renamed.
+        # This is NOT "up to date": the user must be told the release is broken,
+        # not silently offered nothing (the previous behaviour).
+        latest = _formal_version(newest)
+        if latest > version_tuple(current):
+            raise
+        return None
     if release is None:
         return None
     return replace(release, notes=combined_notes(formal, current, release.version)[:100000])
@@ -413,8 +420,12 @@ def prepare_install(download, target=None):
         raise
 
 
-def start_install(job_path, timeout=10.0):
-    """Start the helper; return only once it runs in FullLanguage, else raise OSError so the app stays open."""
+def start_install(job_path, timeout=10.0, pump=None):
+    """Start the helper; return only once it runs in FullLanguage, else raise OSError so the app stays open.
+
+    ``pump`` (a zero-argument callable) is invoked between polls so a caller that
+    is about to close can keep the GUI repainting instead of freezing for the
+    whole helper start-up."""
     job_path = Path(job_path)
     marker = Path(json.loads(job_path.read_text(encoding="utf-8"))["started"])
     marker.unlink(missing_ok=True)
@@ -437,7 +448,13 @@ def start_install(job_path, timeout=10.0):
                 process.wait(5)
             raise OSError("升级助手未能启动（PowerShell 可能被组策略 AllSigned 或 AppLocker 限制），已取消升级。"
                           "可打开发布页手动下载新版本。")
+        # The poll cadence is fixed regardless of `pump`: the pump only keeps
+        # the caller's UI repainting, it must never replace the sleep and turn
+        # the marker->stat loop into a CPU-burning busy wait while PowerShell
+        # takes a few seconds to start.
         time.sleep(0.05)
+        if pump is not None:
+            pump()
     return process
 
 

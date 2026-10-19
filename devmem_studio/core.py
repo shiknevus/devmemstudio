@@ -79,6 +79,9 @@ MONITOR_MAX_INTERVAL_MS = 60000
 MONITOR_INTERVAL_MS = 5    # default monitor sampling period
 LIVE_INTERVAL_MS = 5       # fixed register-table period: it refreshes at ~25 Hz, faster only loads the board
 MONITOR_MAX_REGISTERS = 32
+# A newline-less faulting/looping sampler must not grow the reader's pending
+# buffer without bound; 1 MB is far beyond any legitimate 40 ms flush window.
+MAX_MONITOR_PENDING = 1024 * 1024
 # Resident sampler (tools/regmon): maps the register pages once and loops on board deadlines.
 REGMON_RESOURCE = "assets/regmon/regmon-aarch64"
 MONITOR_START_TIMEOUT_S = 5.0
@@ -149,8 +152,10 @@ def write_value(text: str, fmt: str, width: int) -> int:
     return value
 
 
-def read_command(address: int) -> str:
+def read_command(address: int, width: int = 32) -> str:
     validated_address(hex(address))
+    if width in (8, 16, 64):
+        return f"devmem 0x{address:08x} {width}"
     return f"devmem 0x{address:08x}"
 
 
@@ -167,18 +172,29 @@ def _strip_shell_prompt(line: str) -> str:
 
     The interactive shell prints PS1 before each line of a multi-line batch, and
     the batch's printf outputs no trailing newline, so prompt and value land on
-    the same line: ``root@host:~# __Rb01102dc 0x001E3660``."""
-    return re.sub(r"^(?:\S+@\S+:[^#\n]*|[^\s]*) ?[#$>]\s+", "", line, count=1)
+    the same line: ``root@host:~# __Rb01102dc 0x001E3660``.  Bracketed/virtualenv
+    prefixes (``[user@host dir]#``, ``(venv) root@…:#``) and a prompt with no
+    trailing space (``root@board:~#0x2A``) are handled too."""
+    return re.sub(r"^(?:\[[^\]]*\]|\([^)]*\)\s*)*(?:\S+@\S+:[^#\n]*|[^\s]*?)?\s*[#$>]\s*",
+                  "", line, count=1)
 
 
 def parse_devmem_read_output(text, addr_val=None):
-    """Accept a value line or 'Value at address (...) : / = value'; reject echoes/errors."""
+    """Accept a value line or 'Value at address (...) : / = value'; reject echoes/errors.
+
+    The last match used to win, so a trailing diagnostic such as ``read error: 13``
+    or ``Bus error: data = 0x0`` silently replaced the real register value.  Now a
+    line that contains an error token (error/denied/fault/not found/invalid/segfault)
+    is rejected outright, and a plain value line beats a ``value|read|data:`` one."""
     if not text:
         return None, None
     candidates = []
+    error = re.compile(r"\b(error|denied|fault|not\s+found|invalid|segfault|permission)\b", re.I)
     number = r"(0[xX][0-9a-fA-F]+|[0-9]+)"
     for line in strip_ansi(text).splitlines():
         line = _strip_shell_prompt(line.strip())
+        if error.search(line):
+            continue
         match = re.fullmatch(number, line)
         if not match and re.search(r"\b(value|read|data)\b", line, re.I):
             match = re.search(r"[:=]\s*" + number + r"\s*$", line)
@@ -276,13 +292,21 @@ class MonitorParser:
         self._skew = 0.0    # shell wall clock stepped back: keep the axis monotonic
 
     def _host_stamp(self):
-        """No board clock (busybox date without %N): space a burst at the nominal interval."""
+        """No board clock (busybox date without %N): space a burst at the nominal interval.
+
+        ``time.time()`` granularity (~15.6 ms on Windows) exceeds the default
+        5 ms interval, so several samples can share one wall-clock reading.
+        Never collapse them onto the *same* timestamp: clamp forward only, so
+        the axis stays monotonic and the plot keeps its width."""
         now = self.clock()
         if self.interval_s and self._last_stamp is not None:
-            return min(now, max(self._last_stamp + self.interval_s, now - 1.0))
+            return max(self._last_stamp + self.interval_s, now)
         return now
 
     def feed(self, data):
+        if len(self._buffer) + len(data) > MAX_MONITOR_PENDING:
+            self.note = "板端输出积压超过上限，监视已停止。"
+            raise ValueError(self.note)
         *lines, self._buffer = (self._buffer + data).split(b"\n")
         for raw in lines:
             line = raw.decode("utf-8", "replace").strip()
@@ -423,14 +447,35 @@ def unprotect_secret(enc: str) -> str:
         in_blob = DATA_BLOB(len(raw), ctypes.cast(ctypes.create_string_buffer(raw), ctypes.POINTER(ctypes.c_byte)))
         out_blob = DATA_BLOB()
         if not ctypes.windll.crypt32.CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)):
-            return enc
+            return enc    # legitimately encrypted, but not ours (other user/machine)
         try:
             buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
         finally:
             ctypes.windll.kernel32.LocalFree(out_blob.pbData)
         return buf.decode("utf-8")
     except Exception:
+        # A malformed marker (a literal password that merely starts with 'dpapi:')
+        # stays as-is; a well-formed but undecryptable blob must not be handed to
+        # the SSH/login as a password, so its *caller* blanks it.
         return enc
+
+
+def _looks_like_dpapi_blob(enc) -> bool:
+    """True when ``enc`` carries a DPAPI marker with valid base64, so an
+    undecryptable value is ciphertext for another user/machine rather than a
+    literal password that happens to begin with ``dpapi:``."""
+    if not isinstance(enc, str):
+        return False
+    if enc.startswith(DPAPI_PREFIX):
+        payload = enc[len(DPAPI_PREFIX):]
+    elif enc.startswith("dpapi:") and not enc.startswith(DPAPI_PREFIX):
+        payload = enc[6:]
+    else:
+        return False
+    try:
+        return bool(base64.b64decode(payload, validate=True))
+    except Exception:
+        return False
 
 
 class ConfigStore:
@@ -465,6 +510,10 @@ class ConfigStore:
                 cfg.update({k: v for k, v in data.items() if k not in ("types", "categories")})
                 if "remember_password" not in data:
                     cfg["remember_password"] = bool(data.get("password"))
+                if "remember_serial_password" not in data:
+                    # Mirror the legacy plaintext opt-in for the UART credential too,
+                    # so an old config keeps its serial password instead of dropping it.
+                    cfg["remember_serial_password"] = bool(data.get("serial_password"))
             except (OSError, ValueError) as exc:
                 self.warning = f"配置读取失败，已使用默认值：{exc}"
                 # Keep a recovery copy before any later save.
@@ -492,7 +541,9 @@ class ConfigStore:
             cfg[field] = str(cfg.get(field) or "")
         for secret in ("password", "serial_password"):
             cfg[secret] = unprotect_secret(cfg[secret])
-            if cfg[secret].startswith(DPAPI_PREFIX):   # other user/machine: ciphertext is unusable
+            if _looks_like_dpapi_blob(cfg[secret]):
+                # Ciphertext for another user/machine (or an undecryptable v0
+                # blob): never hand it to the SSH/login as a literal password.
                 cfg[secret] = ""
                 self.warning = "已保存的密码无法在当前用户下解密，请重新输入。"
         for flag, secret in (("remember_password", "password"),
@@ -714,6 +765,7 @@ SSH_RETRY_TCP_TIMEOUT_S = 2.0
 SSH_RETRY_BANNER_TIMEOUT_S = 1.0
 SSH_RETRY_DELAY_S = 0.1
 SSH_RETRY_MAX_DELAY_S = 2.0   # exponential backoff ceiling between attempts
+CONNECT_TIMEOUT_DEFAULT = 8.0  # fallback when a connect request lacks a timeout
 
 
 def connect_ssh_until_cancelled(session, request, cancel, progress, retry_delay=SSH_RETRY_DELAY_S):
@@ -730,9 +782,17 @@ def connect_ssh_until_cancelled(session, request, cancel, progress, retry_delay=
         attempt += 1
         try:
             if isinstance(session, SshSession):
-                handshake_timeout = min(max(float(request[-1]), 1.0), SSH_HANDSHAKE_TIMEOUT_S)
+                # request is (host, port, username, password, timeout); derive the
+                # timeouts explicitly so a 4-tuple caller cannot make float() of
+                # the password and crash the worker with a confused message.
+                *_, timeout = request
+                try:
+                    timeout_s = float(timeout)
+                except (TypeError, ValueError):
+                    timeout_s = CONNECT_TIMEOUT_DEFAULT
+                handshake_timeout = min(max(timeout_s, 1.0), SSH_HANDSHAKE_TIMEOUT_S)
                 session.connect(*request, handshake_timeout=handshake_timeout,
-                                tcp_timeout=min(float(request[-1]), SSH_RETRY_TCP_TIMEOUT_S),
+                                tcp_timeout=min(timeout_s, SSH_RETRY_TCP_TIMEOUT_S),
                                 banner_timeout=min(handshake_timeout, SSH_RETRY_BANNER_TIMEOUT_S))
             else:
                 session.connect(*request)
@@ -933,7 +993,9 @@ class SshSession:
               or not any(key == change.expected_key for key in current.values())):
             raise CommandError("已保存的主机密钥记录已变化，请重新连接并核对指纹。")
         retained = []
-        for line in original.decode("utf-8").splitlines(keepends=True):
+        # Another tool (or OpenSSH) may have written non-UTF-8 comment bytes into
+        # known_hosts; decoding strictly and re-encoding would corrupt or raise.
+        for line in original.decode("utf-8", "surrogateescape").splitlines(keepends=True):
             match = re.match(r"^([ \t]*)(\S+)([ \t]+)(.*?)(\r?\n)?$", line)
             if match is None or match[2].startswith("#"):
                 retained.append(line)
@@ -953,7 +1015,7 @@ class SshSession:
         try:
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix="known_hosts.", suffix=".tmp", delete=False) as handle:
                 temp_name = handle.name
-                handle.write(content.encode("utf-8"))
+                handle.write(content.encode("utf-8", "surrogateescape"))
                 handle.flush()
                 os.fsync(handle.fileno())
             # Do not overwrite a record another process changed during review.
@@ -1078,32 +1140,43 @@ class SshSession:
                 raise CommandError(f"命令退出码 {self.last_exit}：{result or command}")
             return result
 
-    def read(self, address: int, quiet=False) -> int:
-        output = self.run(read_command(address), quiet=quiet)
+    def read(self, address: int, quiet=False, width: int = 32) -> int:
+        output = self.run(read_command(address, width), quiet=quiet)
         value, _ = parse_devmem_read_output(output, address)
         if value is None:
             raise CommandError("未识别到寄存器数值：" + (output[:240] or "设备未返回数据"))
+        # Mask to the requested access width: a 64-bit register read as one word
+        # above 32 bits must not leak sign-extended digits into the table.
+        if width in (8, 16):
+            value &= (1 << width) - 1
         return value
 
-    def read_many(self, addresses):
+    def read_many(self, addresses, widths=None):
         """Batch read in one shell round trip; returns {address: (value, error)}.
 
         Each address is echoed as a __Rxxxxxxxx tag right before its devmem value,
         so a failing or silent devmem only marks its own register, never the batch.
         The session log condenses a multi-register batch to one CMD + one result
-        line instead of echoing every printf/devmem pair."""
-        addresses = [validated_address(hex(address)) for address in addresses]
-        if not addresses:
+        line instead of echoing every printf/devmem pair.
+        ``widths`` maps address -> access width (default 32 per address)."""
+        address_list = list(addresses)
+        validated = [validated_address(hex(a)) for a in address_list]
+        widths = widths or {}
+        if not validated:
             return {}
-        if len(addresses) == 1:
+        if len(validated) == 1:
+            address = validated[0]
             try:
-                value = self.read(addresses[0])
-                return {addresses[0]: (value, None)}
+                value = self.read(address, width=widths.get(address, 32))
+                return {address: (value, None)}
             except Exception as exc:
-                return {addresses[0]: (None, str(exc))}
-        lines = [f"printf '__R{a:08x} '; devmem 0x{a:08x} || true" for a in addresses]
-        address_list = " ".join(f"0x{a:08x}" for a in addresses)
-        self.log("CMD", f"读取 {len(addresses)} 个寄存器 {address_list}")
+                return {address: (None, str(exc))}
+        lines = []
+        for a in validated:
+            width = widths.get(a, 32)
+            lines.append(f"printf '__R{a:08x} '; {read_command(a, width)} || true")
+        address_list_text = " ".join(f"0x{a:08x}" for a in validated)
+        self.log("CMD", f"读取 {len(validated)} 个寄存器 {address_list_text}")
         output = self.run("\n".join(lines), quiet=True)
         found = {}
         # Split on tags, not lines: a silent devmem puts the next tag on the same line.
@@ -1111,18 +1184,21 @@ class SshSession:
         for tag, text in zip(parts[1::2], parts[2::2]):
             found[int(tag, 16)] = next((line.strip() for line in text.splitlines() if line.strip()), "")
         results = {}
-        for address in addresses:
+        for address in validated:
             text = found.get(address)
             value, _ = parse_devmem_read_output(text, address) if text else (None, None)
             if value is None:
                 results[address] = (None, "未识别到寄存器数值：" + (text[:240] if text else "设备未返回数据"))
             else:
+                width = widths.get(address, 32)
+                if width in (8, 16):
+                    value &= (1 << width) - 1
                 results[address] = (value, None)
         failed = [f"0x{address:08X}" for address, (value, _) in results.items() if value is None]
         if failed:
             self.log("ERROR", f"读取 {len(results) - len(failed)}/{len(results)} 成功，失败：{'、'.join(failed)}")
         else:
-            values = "  ".join(f"0x{address:08x}=0x{results[address][0]:08X}" for address in addresses)
+            values = "  ".join(f"0x{address:08x}=0x{results[address][0]:08X}" for address in validated)
             self.log("INFO", values)
         return results
 
@@ -1183,12 +1259,14 @@ class SshSession:
                 backup_path = None  # no previous bit to back up
             try:
                 sftp.rename(staging_path, remote_path)
-            except Exception:
+            except Exception as exc:
                 if backup_path:
                     try:
                         sftp.rename(backup_path, remote_path)  # put the old bit back
-                    except Exception:
-                        pass
+                    except Exception as restore_exc:
+                        raise CommandError(
+                            f"上传失败且恢复原 bit 也失败：板端可能没有 {dest_name}。"
+                            f"原 bit 备份在 {backup_name}（{restore_exc}）") from exc
                 raise
             try:
                 attrs = sftp.stat(remote_path)
@@ -1253,12 +1331,14 @@ class SshSession:
             self.log("CMD", f"rename {backup_name} -> {dest_name}")
             try:
                 sftp.rename(backup, dest)
-            except Exception:
+            except Exception as exc:
                 if aside:
                     try:
                         sftp.rename(aside, dest)  # never leave the board without a bit
-                    except Exception:
-                        pass
+                    except Exception as restore_exc:
+                        raise CommandError(
+                            f"回退失败且恢复原 bit 也失败：板端可能没有 sunny_fpga.bit。"
+                            f"原 bit 备份在 {aside_name}（{restore_exc}）") from exc
                 raise
             if progress:
                 progress(100, 100)
@@ -1541,7 +1621,10 @@ class SshSession:
         if stop.is_set():
             return False
         shell_interval = max(float(interval_ms), MONITOR_SHELL_MIN_INTERVAL_MS)
-        if shell_interval != interval_ms:
+        if not sampler and shell_interval != interval_ms:
+            # Only the devmem loop is clamped: the resident sampler reads mapped
+            # registers in microseconds and really honours 1 ms, so it must not
+            # log a misleading "raised to 5 ms" note.
             self.log("SYSTEM", f"devmem 循环最小间隔为 {MONITOR_SHELL_MIN_INTERVAL_MS} ms，已将 {interval_ms:g} ms 调整为 {shell_interval:g} ms。")
         try:
             with self._monitor_channel(stop, keep_open=True) as channel:
@@ -1553,7 +1636,7 @@ class SshSession:
             raise
         self.log("CMD", f"监视 {len(addresses)} 个寄存器，间隔 {interval_ms:g} ms"
                  f"（{'板端常驻采样' if sampler else 'devmem 循环'}）：" + " ".join(f"0x{a:08x}" for a in addresses))
-        parser = MonitorParser(len(addresses), interval_s=float(interval_ms) / 1000)
+        parser = MonitorParser(len(addresses), interval_s=shell_interval / 1000)
         dead_after = max(MONITOR_DEAD_TIMEOUT_S, 3 * float(interval_ms) / 1000)
 
         def reader():
@@ -1631,6 +1714,9 @@ class SshSession:
                     pass
         channel, client = self.chan, self.client
         self.chan = self.client = None
+        # Drop the cached (transport, arch) pair: it keeps a strong reference to
+        # the closed Transport and its socket until the next monitor start.
+        self._regmon = (None, None)
         if channel:
             channel.close()
         if client:
@@ -1774,10 +1860,10 @@ class DemoSession:
         time.sleep(0.08)
         self.alive = True
 
-    def read(self, address, quiet=False):
+    def read(self, address, quiet=False, width: int = 32):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
-        command = read_command(address)
+        command = read_command(address, width)
         if not quiet:
             self.log("CMD", command)
         time.sleep(self.read_delay)
@@ -1785,9 +1871,12 @@ class DemoSession:
             offset = address & 0x1FF
             self.memory[address] = {0: 0x00140201, 4: 0x08000000, 8: 1, 0x68: 0x03080100,
                                     0x90: 0x02040000, 0xB8: 0x01020000, 0x178: 125840}.get(offset, 0)
+        value = self.memory[address]
+        if width in (8, 16):
+            value &= (1 << width) - 1
         if not quiet:
-            self.log("INFO", f"0x{self.memory[address]:08X}")
-        return self.memory[address]
+            self.log("INFO", f"0x{value:08X}")
+        return value
 
     def write(self, address, width, value, quiet=False):
         if not self.alive:
@@ -1798,10 +1887,11 @@ class DemoSession:
         self.memory[address] = value
         return self.read(address, quiet=quiet)
 
-    def read_many(self, addresses):
+    def read_many(self, addresses, widths=None):
         if not self.alive:
             raise CommandError("演示会话已关闭。")
         addresses = list(addresses)
+        widths = widths or {}
         if not addresses:
             return {}
         batch = len(addresses) > 1
@@ -1811,7 +1901,7 @@ class DemoSession:
         results = {}
         for address in addresses:
             try:
-                results[address] = (self.read(address, quiet=batch), None)
+                results[address] = (self.read(address, quiet=batch, width=widths.get(address, 32)), None)
             except Exception as exc:
                 results[address] = (None, str(exc))
         if batch:
@@ -1915,6 +2005,15 @@ def session_logger(directory: Path):
     logger = logging.getLogger("devmem-studio.session")
     logger.setLevel(logging.INFO)
     logger.propagate = False
+    directory = Path(directory)
+    # Rebind to the requested directory when it differs from the one a previous
+    # window already bound (config can move between portable and %LOCALAPPDATA%).
+    expected = str((directory / "session.log").resolve())
+    if logger.handlers and not any(getattr(handler, "baseFilename", None) == expected
+                                   for handler in logger.handlers):
+        for handler in logger.handlers[:]:
+            handler.close()
+            logger.removeHandler(handler)
     if not logger.handlers:
         directory.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(directory / "session.log", maxBytes=2 * 1024 * 1024,

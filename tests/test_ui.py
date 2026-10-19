@@ -237,7 +237,7 @@ class UiTests(UiTestBase):
 
     def test_device_error_marks_failed_row(self):
         class FailedDevice(DemoSession):
-            def read(self, address, quiet=False):
+            def read(self, address, quiet=False, width=32):
                 raise RuntimeError("simulated device error")
         self.window.session.close()
         self.window.session = FailedDevice(self.window._log_emit("ssh"))
@@ -249,7 +249,7 @@ class UiTests(UiTestBase):
 
     def test_live_read_start_failure_stops_live_mode(self):
         class FailedDevice(DemoSession):
-            def read(self, address, quiet=False):
+            def read(self, address, quiet=False, width=32):
                 raise RuntimeError("simulated device error")
         self.window.session.close()
         self.window.session = FailedDevice(self.window._log_emit("ssh"))
@@ -338,7 +338,8 @@ class UiTests(UiTestBase):
             self.window.serial_user.setText("root")
             self.window.serial_password.setText("secret")
             self.window._toggle_serial()
-            self.settle(lambda: self.window.serial_connected and not self.window._busy)
+            # worker round trip; see _fake_serial_connected for the timeout note
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy, timeout=12)
         self.assertTrue(self.window.serial_connected)
         self.assertEqual(connected_serial, {"port": "COM9", "baud": 115200,
                                             "username": "root", "password": "secret"})
@@ -408,7 +409,10 @@ class UiTests(UiTestBase):
             self.window._serial_devices = [self.window.serial_port.itemData(i)
                                            for i in range(self.window.serial_port.count())]
             self.window._toggle_serial()
-            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy)
+            # The serial connect runs on a worker thread; under an 8-way parallel
+            # Qt load the 4 s default can be too tight for the event loop to
+            # deliver the result.  Wait up to 12 s for this real worker round trip.
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy, timeout=12)
         return armed
 
     def test_serial_unplug_drops_the_session_at_once(self):
@@ -423,6 +427,8 @@ class UiTests(UiTestBase):
         self._fake_serial_connected("COM8")
         with patch("devmem_studio.window.list_serial_ports", return_value=[]):
             self.window._refresh_serial_ports(force=True)
+            # The COM enumeration now runs on the worker pool; wait for it to land.
+            self.settle(lambda: not self.window.serial_connected, timeout=4)
         self.assertFalse(self.window.serial_connected)
         self.assertEqual(self.window.serial_port.count(), 0)
 
@@ -503,7 +509,7 @@ class UiTests(UiTestBase):
             release.set()
             # result marks the connection ready before finished hides the shared bar.
             self.settle(lambda: self.window.serial_connected and not self.window._serial_busy
-                        and self.window._serial_worker is None and not self.window._busy)
+                        and self.window._serial_worker is None and not self.window._busy, timeout=12)
         self.assertTrue(self.window.progress.isHidden())
         self.assertIn("已连接", self.window.serial_section.dot.toolTip())
         self.assertEqual(self.window.serial_section.dot.property("state"), "connected")
@@ -646,6 +652,57 @@ class UiTests(UiTestBase):
         self.assertEqual(rows[1][0], "离线演示")
         self.assertEqual(rows[1][1], "DEMO")
         self.assertEqual(rows[1][-1], "离线缓存")
+
+    def test_real_device_provenance_is_captured_at_connect_not_read_from_fields(self):
+        from devmem_studio.core import SshSession
+        from unittest.mock import patch as _patch
+        addresses = [reg["_address"] for reg in self.window.visible_regs]
+        session = SshSession(self.window._log_emit("ssh"))
+        with _patch.object(session, "read_many",
+                           return_value={addr: (0x1234, None) for addr in addresses}):
+            self.window.session = session
+            self.window.demo = False
+            self.window._set_connection(True)
+            self.window._target = "192.0.2.10:22"
+            self.window.read_all()
+            self.settle(lambda: not self.window._busy)
+        rows = list(csv.reader(io.StringIO(self.window.snapshot_csv())))
+        self.assertEqual(rows[1][0], "设备实测")
+        self.assertEqual(rows[1][1], "192.0.2.10:22")
+        # Editing the host field after disconnect must not rewrite provenance.
+        self.window.disconnect()
+        self.window.host.setText("other-target")
+        rows = list(csv.reader(io.StringIO(self.window.snapshot_csv())))
+        self.assertEqual(rows[1][1], "192.0.2.10:22")
+
+    def test_write_cache_recently_used_key_moves_to_the_end(self):
+        # _remember_reg must implement true LRU: re-writing an existing
+        # component's draft moves its key to the end of the dict, so the
+        # WRITE_CACHE_KEYS cap evicts the truly-oldest key next.
+        window = self.window
+        window.cfg["write_cache"] = {"top:ec_a@0x800": {}, "top:ec_b@0xa00": {}}
+        window.cache_key = "top:ec_a@0x800"
+        window._remember_reg({"name": "RST_EN", "_draft": "1", "_fmt": "H", "_access_width": 32})
+        self.assertEqual(list(window.cfg["write_cache"]), ["top:ec_b@0xa00", "top:ec_a@0x800"])
+        # And the cap still evicts from the front (the oldest key).
+        for i in range(40):
+            window.cache_key = f"top:ec_x{i}@0x{i:04x}"
+            window._remember_reg({"name": "RST_EN", "_draft": "1", "_fmt": "H", "_access_width": 32})
+        self.assertLessEqual(len(window.cfg["write_cache"]), 32)
+        self.assertNotIn("top:ec_b@0xa00", window.cfg["write_cache"])
+
+    def test_write_cache_keeps_other_registers_of_the_same_component(self):
+        # Moving the key for LRU must not discard drafts of the *other*
+        # registers already edited under the same component key: editing
+        # RST_EN, then EC_ID, then RST_EN again must keep both.
+        window = self.window
+        window.cache_key = "top:ec_a@0x800"
+        window._remember_reg({"name": "RST_EN", "_draft": "1", "_fmt": "H", "_access_width": 32})
+        window._remember_reg({"name": "EC_ID", "_draft": "5", "_fmt": "H", "_access_width": 32})
+        window._remember_reg({"name": "RST_EN", "_draft": "2", "_fmt": "H", "_access_width": 32})
+        saved = window.cfg["write_cache"]["top:ec_a@0x800"]
+        self.assertEqual(saved["RST_EN"]["v"], "2")
+        self.assertEqual(saved["EC_ID"]["v"], "5")
 
     def test_preset_stays_synchronized_with_numeric_editor(self):
         self.window.table.selectRow(self.row_of("A_BHV_ID"))

@@ -132,7 +132,13 @@ class MonitorBuffer:
             if self.signed[column] is not None:
                 del self.signed[column][:count]
             failures = self.failures[column]
-            self.failures[column] = array("I", (i - count for i in failures[bisect_left(failures, count):]))
+            kept = failures[bisect_left(failures, count):]
+            self.failures[column] = array("I", (i - count for i in kept))
+            # The failure counter must track the retained arrays: a failure whose
+            # index fell inside the dropped window is gone from `failures` and must
+            # not keep inflating `self.failed` (the chart red ticks and the export
+            # both derive from the arrays, and _summary reports the counter).
+            self.failed -= len(failures) - len(kept)
             # Whole blocks remain valid. The partial leading block is scanned
             # directly by extrema(), so discarded values cannot affect its result.
             for summary in self._ranges[column]:
@@ -1018,6 +1024,10 @@ class MonitorPlot(QWidget):
         lanes = self.lanes()
         times = self.buffer.times if self.buffer else array("d")
         count = self._frame_count if frame is None else frame["count"]
+        # A frame captured before the buffer shrank (a drop commits between the
+        # snapshot and this paint) must never index past the retained arrays.
+        if count > len(times):
+            count = len(times)
         revision = self._scene_revision if frame is None else frame["revision"]
         paths = self._trace_cache if frame is None else frame["paths"]
         first = max(0, bisect_right(times, start, hi=count) - 1)   # the sample held into view
@@ -2449,6 +2459,11 @@ class MonitorDialog(ManagedDialog):
         self._epoch += 1
         self._stop.set()
         self._set_state("idle")
+        # An in-flight CSV/zip export holds the export_pool; drop queued work and
+        # stop waiting on it so the dialog can be destroyed without a hang.
+        self.export_pool.clear()
+        self.export_pool.waitForDone(50)
+        self._exporting = False
 
     def closeEvent(self, event):
         self.stop()

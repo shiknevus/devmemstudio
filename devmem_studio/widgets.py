@@ -231,7 +231,10 @@ class IpAddressField(QWidget):
         if not any(parts):
             return ""
         # "010" would resolve as octal 8 in inet_aton; drop leading zeros.
-        return ".".join(str(int(part)) if part.isdigit() else part for part in parts)
+        # Only ASCII digits may be converted: '²'.isdigit() is True but
+        # int('²') raises, and a pasted Unicode superscript would crash the
+        # Connect slot (pasting bypasses QIntValidator).
+        return ".".join(str(int(part)) if part.isascii() and part.isdigit() else part for part in parts)
 
     def is_complete(self):
         return all(edit.text().strip() for edit in self.octets)

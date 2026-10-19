@@ -16,8 +16,8 @@ REG_GRID_STEP = 0x200
 CATALOG_RELPATH = "devmem_studio/data/component_catalog.json"
 
 _HEADER = re.compile(r"^[ \t]*//[ \t]*(?:/[ \t]*)*-{3,}[ \t]*flow_comp_(\d+)(?:[ \t]+\-+)*[ \t]*(.*?)[ \t]*\-*[ \t\r]*$", re.M)
-# 20'h3000 / 20'H3000 / 'h3000 / 20'sd25600 / plain 25600
-_BIAS = re.compile(r"\.REG_SPACE_BIAS\b\s*\(\s*(?:\d*\s*'\s*[sS]?([dDhH])\s*([0-9a-fA-F_]+)|(\d[\d_]*))\s*\)")
+# 20'h3000 / 20'H3000 / 'h3000 / 20'sd25600 / 20'b1010 / 20'o6000 / plain 25600
+_BIAS = re.compile(r"\.REG_SPACE_BIAS\b\s*\(\s*(?:\d*\s*'\s*[sS]?([dDhHbBoO])\s*([0-9a-fA-F_xXzZ_]+)|(\d[\d_]*))\s*\)")
 _BASE_ADDR = re.compile(r"^[ \t]*`define[ \t]+PL_CFG_BASE_ADDR[ \t]+"
                         r"(?:\{\s*32\s*'\s*[hH]\s*([0-9a-fA-F_]+)\s*\}|"
                         r"32\s*'\s*[hH]\s*([0-9a-fA-F_]+))[ \t\r]*$", re.M)
@@ -129,7 +129,12 @@ def read_text_resilient(path: Path) -> str:
 
 
 def _decode_verilog_number(radix: str, digits: str) -> int:
-    return int(digits.replace("_", ""), 16 if radix.lower() == "h" else 10)
+    base = {"h": 16, "H": 16, "b": 2, "B": 2, "o": 8, "O": 8, "d": 10, "D": 10}[radix]
+    # x/X (unknown) and z/Z (high impedance) are not base digits; substitute 0
+    # so a 'hz mask or 'bz defaults stays parseable instead of raising.
+    cleaned = digits.replace("_", "").replace("x", "0").replace("X", "0") \
+                    .replace("z", "0").replace("Z", "0")
+    return int(cleaned, base)
 
 
 def _bias_value(found) -> int:
@@ -320,7 +325,10 @@ def _parse_unheaded(text: str, skip_instances: frozenset[str] | None = None, fin
     components, warnings = [], []
     # Blank // comments (same length) so commented instances, biases and stray
     # parens in comments never count; offsets stay valid for line numbers.
-    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+    # Block comments are first rewritten to // lines (same line count) so a
+    # stale ``.REG_SPACE_BIAS`` inside /* */ can never be read as the live bias.
+    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)),
+                  _block_comments_as_line_comments(text))
     for match in _EC_INSTANCE_HEAD.finditer(code):
         module_type = match.group(1)
         depth, cursor = 1, match.end()
@@ -361,6 +369,45 @@ def _parse_unheaded(text: str, skip_instances: frozenset[str] | None = None, fin
                            "instance": instance, "bias": bias,
                            "address": f"0x{bias:04x}", "index": index,
                            "disabled": False, "line": line})
+    # Parameterless instances ``ec_a ec_a_1 ( ... )`` carry no #( list, but the
+    # port list still begins at the instance name's ``(``.  They are real active
+    # controls and must not vanish silently; the bias is looked up from the body
+    # of the parameterless instantiation (usually a later ``.REG_SPACE_BIAS`` is
+    # absent, so a default-based warning is emitted instead of a silent drop).
+    # `seen` is a live set: every component appended below (headed or plain) is
+    # recorded immediately so a repeated instance name in the same file is
+    # never listed twice.
+    seen = {c["instance"] for c in components} | set(skip_instances)
+    plain = re.compile(r"\b(ec_\w+)\s+([A-Za-z_]\w*)\s*\(")
+    for match in plain.finditer(code):
+        module_type, instance = match.group(1), match.group(2)
+        if not instance.startswith("ec_") or instance in seen or module_type == instance:
+            continue   # instance name, not a module type, or already handled
+        # The port list follows the instance name: find its matching ')' so the
+        # parameter body below (if any) is not mistaken for the ports.
+        depth, cursor = 1, match.end()
+        while cursor < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[cursor], 0)
+            cursor += 1
+        if depth:
+            continue
+        ports = code[match.end():cursor - 1]
+        bias = None
+        found = _BIAS.search(ports)
+        if found:
+            try:
+                bias = _bias_value(found)
+            except ValueError:
+                pass
+        seq = _instance_seq(instance)
+        line = text.count("\n", 0, match.start()) + 1
+        seen.add(instance)   # record before appending so later matches skip it
+        components.append({"seq": seq if seq >= 0 else len(components) + 1,
+                           "label": instance, "code": "", "module_type": module_type,
+                           "instance": instance, "bias": bias, "address": f"0x{bias or 0:04x}",
+                           "index": None, "disabled": False, "line": line})
+        if bias is None:
+            warnings.append(f"{instance} 无 .REG_SPACE_BIAS 参数，已按默认偏移记载；请人工核对地址。")
     if finalize:
         _warn_duplicate_bias(components, warnings)
     return {"components": components, "warnings": warnings}
