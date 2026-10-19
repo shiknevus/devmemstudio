@@ -39,9 +39,9 @@ class LiveReader(QObject):
         token = self._token
         stop = self._stop = threading.Event()
         # A resident monitor run is blocking and only covers up to
-        # MONITOR_MAX_REGISTERS addresses; anything beyond the first chunk would
-        # never refresh (start_monitor never returns for the first chunk), so it
-        # is cut here as a hard guarantee — callers are expected to cap earlier.
+        # MONITOR_MAX_REGISTERS addresses; anything beyond that would never
+        # refresh (start_monitor never returns), so it is cut here as a hard
+        # guarantee — callers are expected to cap earlier.
         addresses = list(dict.fromkeys(addresses))[:MONITOR_MAX_REGISTERS]
 
         def run(_progress):

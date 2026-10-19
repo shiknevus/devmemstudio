@@ -1738,7 +1738,7 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(dialog.checked_addresses(), [self.window.regs[0]["_address"]])   # selected row preselected
         for index in range(dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Checked)
-        self.assertEqual(len(dialog.checked_addresses()), 32)                              # capped
+        self.assertEqual(len(dialog.checked_addresses()), 64)                              # capped at MONITOR_MAX_REGISTERS
         for index in range(2, dialog.list.count()):
             dialog.list.item(index).setCheckState(Qt.Unchecked)
         self.assertEqual(dialog.interval_spin.value(), 5)                                 # default period

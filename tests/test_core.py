@@ -164,7 +164,7 @@ class ConfigTests(unittest.TestCase):
                                         "types": {"t": [4, 4, "8"], "u": None}}}), encoding="utf-8")
             cfg = ConfigStore(path).load()
             self.assertEqual(cfg['monitor_settings'], {'signed': False, 'interval_ms': 5,
-                                                       'selections': {'A': [4096], 'B': list(range(32))},
+                                                       'selections': {'A': [4096], 'B': list(range(40))},
                                                        'types': {'t': [4]}})
 
     def test_basic_category_selection_and_write_cache_survive_restart(self):

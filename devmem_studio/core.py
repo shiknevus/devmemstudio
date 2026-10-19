@@ -78,7 +78,7 @@ MONITOR_SHELL_MIN_INTERVAL_MS = 5
 MONITOR_MAX_INTERVAL_MS = 60000
 MONITOR_INTERVAL_MS = 5    # default monitor sampling period
 LIVE_INTERVAL_MS = 5       # fixed register-table period: it refreshes at ~25 Hz, faster only loads the board
-MONITOR_MAX_REGISTERS = 32
+MONITOR_MAX_REGISTERS = 64   # regmon.c MAX_REGS is also 64; shell fallback auto-throttles
 # A newline-less faulting/looping sampler must not grow the reader's pending
 # buffer without bound; 1 MB is far beyond any legitimate 40 ms flush window.
 MAX_MONITOR_PENDING = 1024 * 1024

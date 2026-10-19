@@ -49,19 +49,19 @@ class SamplerScriptTests(unittest.TestCase):
         self.assertIn("exit 127", script)
         self.assertIn('echo "@$t" || exit;', script)  # channel closure must end the board loop
         self.assertEqual(MONITOR_MIN_INTERVAL_MS, 1)
-        self.assertEqual(MONITOR_MAX_REGISTERS, 32)
+        self.assertEqual(MONITOR_MAX_REGISTERS, 64)
         with self.assertRaises(ValueError):
             monitor_script([], 5)
         with self.assertRaises(ValueError):
             monitor_script([0x1_0000_0000], 5)
 
-    def test_sampler_accepts_32_registers_and_rejects_33(self):
-        addresses = [0xB0100800 + i * 4 for i in range(32)]
+    def test_sampler_accepts_64_registers_and_rejects_65(self):
+        addresses = [0xB0100800 + i * 4 for i in range(64)]
         script = monitor_script(addresses, 5)
-        self.assertEqual(script.count(" || echo x"), 32)
+        self.assertEqual(script.count(" || echo x"), 64)
         command = monitor_command(addresses, 5, "/tmp/regmon")
         self.assertTrue(command.startswith("/tmp/regmon 5000 " + " ".join(f"0x{a:08x}" for a in addresses)))
-        with self.assertRaisesRegex(ValueError, "最多同时监视 32 个"):
+        with self.assertRaisesRegex(ValueError, "最多同时监视 64 个"):
             monitor_script(addresses + [0xB0100880], 5)
 
 
@@ -131,7 +131,7 @@ class CommandTests(unittest.TestCase):
 
     def test_monitor_rejects_unaligned_addresses_and_invalid_rates(self):
         for addresses, interval in (([0x1001], 5), ([0x1000], 0), ([0x1000], float('nan')),
-                                    ([0x1000] * 33, 10), ([0x1000], 60001)):
+                                    ([0x1000] * 65, 10), ([0x1000], 60001)):
             with self.subTest(addresses=addresses, interval=interval), self.assertRaises(ValueError):
                 monitor_command(addresses, interval)
 
@@ -629,30 +629,30 @@ class DialogTests(unittest.TestCase):
                 QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
                 self.assertEqual(self.dialog.checked_addresses(), [0x1000])
                 self.assertEqual(self.dialog.settings["selections"]["A"], [0x1000])
-                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
+                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 64")
                 QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=position)
                 self.assertEqual(self.dialog.checked_addresses(), [])
                 self.assertEqual(self.dialog.settings["selections"]["A"], [])
                 self.assertEqual(changes.count(), before + 2)
 
     def test_row_click_preserves_selection_limit(self):
-        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(33)]
-        chosen = [reg["_address"] for reg in registers[:32]]
+        registers = [dict(name=f"R{i}", offset=i * 4, _address=0x1000 + i * 4) for i in range(65)]
+        chosen = [reg["_address"] for reg in registers[:64]]
         self.dialog.set_registers("A", registers, chosen)
         view = self.show_register_list()
-        view.scrollToItem(view.item(32))
+        view.scrollToItem(view.item(64))
         self.app.processEvents()
-        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(32)).center())
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(64)).center())
         self.assertEqual(self.dialog.checked_addresses(), chosen)
         self.assertEqual(self.dialog.settings["selections"]["A"], chosen)
-        self.assertIn("最多同时监视 32 个", self.dialog.status.text())
+        self.assertIn("最多同时监视 64 个", self.dialog.status.text())
         view.scrollToItem(view.item(0))
         self.app.processEvents()
         QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(0)).center())
-        view.scrollToItem(view.item(32))
+        view.scrollToItem(view.item(64))
         self.app.processEvents()
-        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(32)).center())
-        self.assertEqual(self.dialog.checked_addresses(), chosen[1:] + [0x1080])
+        QTest.mouseClick(view.viewport(), Qt.LeftButton, pos=view.visualItemRect(view.item(64)).center())
+        self.assertEqual(self.dialog.checked_addresses(), chosen[1:] + [0x1000 + 64 * 4])
 
     def test_register_check_responds_on_press_before_release(self):
         self.dialog.set_registers("A", self.registers)
@@ -660,7 +660,7 @@ class DialogTests(unittest.TestCase):
         position = view.visualItemRect(view.item(0)).center()
         QTest.mousePress(view.viewport(), Qt.LeftButton, pos=position)
         self.assertEqual(self.dialog.checked_addresses(), [0x1000])
-        self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
+        self.assertEqual(self.dialog.count_label.text(), "已选 1 / 64")
         QTest.mouseRelease(view.viewport(), Qt.LeftButton, pos=position)
         self.assertEqual(self.dialog.checked_addresses(), [0x1000])
 
@@ -688,7 +688,7 @@ class DialogTests(unittest.TestCase):
             time.sleep(.005)
         self.assertEqual(self.dialog.state, "running")
         self.assertEqual(len(self.dialog.buffer), 10)
-        self.assertEqual(self.dialog.count_label.text(), "已选 32 / 32")
+        self.assertEqual(self.dialog.count_label.text(), "已选 32 / 64")
         self.assertEqual(self.dialog.height(), 680)
         scrollbar = self.dialog.plot_scroll.verticalScrollBar()
         self.assertGreater(scrollbar.maximum(), 0)
@@ -777,7 +777,7 @@ class DialogTests(unittest.TestCase):
         self.assertGreater(control.geometry().left(), self.dialog.count_label.geometry().right())
         QTest.mouseClick(control, Qt.LeftButton)
         self.assertTrue(all(view.item(i).checkState() == Qt.Unchecked for i in range(view.count())))
-        self.assertEqual(self.dialog.count_label.text(), "已选 0 / 32")
+        self.assertEqual(self.dialog.count_label.text(), "已选 0 / 64")
         self.assertEqual(self.dialog.settings["selections"]["A"], [])
         self.assertEqual(changes.count(), 1)
         self.assertFalse(control.isEnabled())
@@ -1026,7 +1026,7 @@ class DialogTests(unittest.TestCase):
                 QTest.keyClick(view, Qt.Key_Space)
                 self.assertEqual(self.dialog.checked_addresses(), [0x1000])
                 self.assertNotIn("A", self.dialog.settings["selections"])   # viewing alone saves nothing
-                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 32")
+                self.assertEqual(self.dialog.count_label.text(), "已选 1 / 64")
                 self.assertEqual(changes.count(), 0)
         self.dialog.stop()
         self.assertFalse(view.item(1).flags() & Qt.ItemIsEnabled)

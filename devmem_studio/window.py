@@ -3170,10 +3170,10 @@ class MainWindow(QMainWindow):
             return []
         live = list(dict.fromkeys(reg["_address"] for reg in self.visible_regs
                                   if not any(reg.get(flag) for flag in NO_LIVE_FLAGS)))
-        if len(live) > MONITOR_MAX_REGISTERS:
-            self.append_log("SYSTEM", f"实时读取最多覆盖 {MONITOR_MAX_REGISTERS} 个寄存器，其余按手动读取刷新。")
-            return live[:MONITOR_MAX_REGISTERS]
-        return live
+        # Cap at MONITOR_MAX_REGISTERS: a resident monitor run is blocking and
+        # only covers that many addresses.  Beyond it the extra rows simply stay
+        # on manual reads — no repeated log note for a routine overflow.
+        return live[:MONITOR_MAX_REGISTERS]
 
     def _sync_live(self):
         addresses = self._live_addresses()
