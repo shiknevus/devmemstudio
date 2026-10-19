@@ -123,6 +123,10 @@ def sha256_of(path):
 commit = subprocess.run(["git", "rev-parse", f"{tag}^{{commit}}"], capture_output=True, text=True, cwd=ROOT, check=True).stdout.strip()
 try:
     release = api("GET", f"https://api.github.com/repos/{REPO}/releases/tags/{tag}")   # rerun: keep the release
+    if mode == "publish" and body_file is not None:
+        release = api("PATCH", f"https://api.github.com/repos/{REPO}/releases/{release['id']}", json.dumps({
+            "target_commitish": commit, "name": f"DevmemStudio {version}",
+            "body": body_file.read_text(encoding="utf-8")}).encode())
 except urllib.error.HTTPError as exc:
     if exc.code != 404:
         raise
@@ -173,6 +177,12 @@ for path, content_type in ((archive, "application/zip"), (checksum, "text/plain"
         uploaded.append({"asset": stale["name"], "size": stale["size"], "state": stale["state"],
                          "digest": stale.get("digest")})
         continue
+    # Drop any dangling replacement assets left by interrupted runs
+    for dangling in [a for a in release.get("assets", []) if a["name"].startswith(f"{path.name}.replacement-")]:
+        try:
+            api("DELETE", dangling["url"])
+        except Exception:
+            pass
     replacement = None
     if stale:
         # GitHub rejects an upload while the old asset has the same name.  Stage
