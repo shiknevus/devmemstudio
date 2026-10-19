@@ -38,18 +38,20 @@ class LiveReader(QObject):
         self.key = key
         token = self._token
         stop = self._stop = threading.Event()
-        chunks = [addresses[i:i + MONITOR_MAX_REGISTERS] for i in range(0, len(addresses), MONITOR_MAX_REGISTERS)]
+        # A resident monitor run is blocking and only covers up to
+        # MONITOR_MAX_REGISTERS addresses; anything beyond the first chunk would
+        # never refresh (start_monitor never returns for the first chunk), so it
+        # is cut here as a hard guarantee — callers are expected to cap earlier.
+        addresses = list(dict.fromkeys(addresses))[:MONITOR_MAX_REGISTERS]
 
         def run(_progress):
             sampler = session.monitor_sampler(stop) if hasattr(session, "monitor_sampler") else None   # probed once per run
-            for chunk in chunks:
-                def on_samples(samples, chunk=chunk):
-                    self._samples.emit(token, dict(zip(chunk, samples[-1][1])))
-                kwargs = {"sampler": sampler if sampler is not None else ""} if hasattr(session, "monitor_sampler") else {}
-                if not session.start_monitor(chunk, interval_ms, on_samples,
-                                             lambda message: self._ended.emit(token, message), stop,
-                                             **kwargs):
-                    return
+            def on_samples(samples):
+                self._samples.emit(token, dict(zip(addresses, samples[-1][1])))
+            kwargs = {"sampler": sampler if sampler is not None else ""} if hasattr(session, "monitor_sampler") else {}
+            session.start_monitor(addresses, interval_ms, on_samples,
+                                  lambda message: self._ended.emit(token, message), stop,
+                                  **kwargs)
         worker = Worker(run)
         worker.signals.failed.connect(lambda message: self._ended.emit(token, f"启动失败：{message}"))
         worker.signals.finished.connect(lambda: self._workers.discard(worker))

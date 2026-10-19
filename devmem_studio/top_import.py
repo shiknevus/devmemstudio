@@ -297,6 +297,12 @@ def parse_top(text: str) -> dict:
         components.sort(key=lambda item: (item["line"], item["instance"]))
         warnings.extend(message for message in loose["warnings"] if "寄存器空间重叠" not in message)
     _warn_duplicate_bias(components, warnings)
+    # Conditional compilation (``ifdef / else / endif``) can swap which ec_*
+    # instances are actually synthesized; the line-based parser reads every
+    # branch.  Flag it so a mismatch between the parsed table and the real
+    # hardware is noticed instead of silently debugging the wrong addresses.
+    if re.search(r"^\s*`(?:ifdef|ifndef|else|elsif|endif)\b", text, re.M):
+        warnings.append("顶层文件含条件编译宏（`ifdef/`endif 等），组件列表可能包含未实际生成的实例，请人工核对。")
     return {"components": components, "warnings": warnings}
 
 

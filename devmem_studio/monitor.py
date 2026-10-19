@@ -1954,6 +1954,14 @@ class MonitorDialog(ManagedDialog):
             readable = not any(reg.get(flag) for flag in ("write_only", "read_clear", "read_to_clear", "read_side_effect"))
             if not readable and not mode:
                 mode = " · 读取有副作用"
+            # The board sampler reads 32-bit words; a register accessed at a
+            # wider width cannot be monitored meaningfully (a 64-bit read would
+            # need two words and the parser rejects values above 32 bits).
+            too_wide = (reg.get("_access_width") or reg.get("width") or 32) > 32
+            if too_wide:
+                readable = False
+                if not mode:
+                    mode = " · 仅 32 位可监视"
             item = QListWidgetItem(f'{reg["name"]}   +0x{parse_addr(reg["offset"]):03X}{mode}')
             item.setData(Qt.UserRole, reg["_address"])
             item.setData(Qt.UserRole + 1, reg["name"])
@@ -1961,7 +1969,8 @@ class MonitorDialog(ManagedDialog):
             item.setToolTip(f'{reg["name"]}\n0x{reg["_address"]:08X}')
             item.setFlags((Qt.ItemIsEnabled | Qt.ItemIsUserCheckable) if readable else Qt.NoItemFlags)
             if not readable:
-                item.setToolTip(item.toolTip() + "\n不支持持续监视此寄存器。")
+                reason = "仅支持 32 位及以下寄存器。" if too_wide else "不支持持续监视此寄存器。"
+                item.setToolTip(item.toolTip() + f"\n{reason}")
             item.setCheckState(Qt.Checked if readable and reg["_address"] in chosen else Qt.Unchecked)
             self.list.addItem(item)
         self.list.blockSignals(False)

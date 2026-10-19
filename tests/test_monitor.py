@@ -439,6 +439,17 @@ class DialogTests(unittest.TestCase):
             self.dialog.list.item(index).setCheckState(Qt.Checked)
         self.assertEqual(self.dialog.checked_addresses(), [0x1008])
 
+    def test_registers_wider_than_32_bits_are_not_monitorable(self):
+        # The board sampler reads 32-bit words; a register accessed at a wider
+        # width must be greyed out in the picker with an explanatory tooltip,
+        # never silently selected and then rejected by the parser.
+        wide = dict(self.registers[0], _access_width=64)
+        self.registers[0] = wide
+        self.dialog.set_registers('A', self.registers, [0x1000, 0x1004, 0x1008])
+        self.assertFalse(self.dialog.list.item(0).flags() & Qt.ItemIsUserCheckable)
+        self.assertIn("仅支持 32 位", self.dialog.list.item(0).toolTip())
+        self.assertEqual(self.dialog.checked_addresses(), [0x1004, 0x1008])
+
     def test_quiet_run_shows_a_pause_and_resumes_on_new_samples(self):
         self.dialog.interval_ms = 10
         self.dialog.sampler = "regmon"

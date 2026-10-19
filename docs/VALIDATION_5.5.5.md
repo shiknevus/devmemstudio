@@ -13,7 +13,7 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 完整回归（`--full`） | 执行 613 项，613 项全部通过（54.1 s） |
+| 完整回归（`--full`） | 执行 615 项，615 项全部通过（66.9 s） |
 | 源码离线验收 | 通过（8.7 s） |
 | 单 EXE 隔离验收 | 通过（14.7 s）；首次解压及验收，损坏缓存自动修复及验收；陈旧缓存自动清理 |
 | 组件目录 | 沿用当前表（无变化不改写） |
@@ -25,7 +25,7 @@
 
 | 文件 | 大小 | SHA-256 |
 | --- | --- | --- |
-| `dist/DevmemStudio.exe` | 21,263,872 字节 | `5ed86987331def04d9f74b591e68a943d975a4abae55f5ee5e17b58523e16dec` |
-| `dist/DevmemStudio-5.5.5-win64.zip` | 21,154,018 字节 | `9c3e8c04775436a5cf3d817780409cd5afcc38480a40f3d7f88003ee62cc1d8d` |
+| `dist/DevmemStudio.exe` | 21,262,848 字节 | `37a67e28d9f709c64168fe08bc43dc11934e531bd3b2e1337cf2625b79ad4493` |
+| `dist/DevmemStudio-5.5.5-win64.zip` | 21,153,556 字节 | `66bd324fdd53ac3b6804860977db6e04a1a468ae7d96667a8961cb5cda0b08cb` |
 
 GitHub 正式发布地址：[v5.5.5](https://github.com/shiknevus/devmemstudio/releases/tag/v5.5.5)，发布资产为 ZIP 与 `DevmemStudio-5.5.5-win64.zip.sha256`。

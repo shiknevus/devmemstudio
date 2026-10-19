@@ -262,9 +262,13 @@ class UiTests(UiTestBase):
 
     def test_live_read_streams_current_view_and_leaves_writes_free(self):
         window = self.window
+        from devmem_studio.core import MONITOR_MAX_REGISTERS
         side = next((r for r in window.visible_regs if r.get("read_side_effect")), None)
         window.poll_check.setChecked(True)
-        expected = [r["_address"] for r in window.visible_regs if r is not side]
+        # The live sampler is capped at MONITOR_MAX_REGISTERS addresses; beyond
+        # that the extra rows stay on manual reads (a blocking resident monitor
+        # could not refresh them, so the list is truncated at the source).
+        expected = [r["_address"] for r in window.visible_regs if r is not side][:MONITOR_MAX_REGISTERS]
         self.assertEqual(list(window.live.key[1]), list(dict.fromkeys(expected)))
         self.assertFalse(window._busy)   # streaming is not a register task
         target = next(r for r in window.visible_regs if not r.get("readonly") and not r.get("action")
@@ -313,6 +317,22 @@ class UiTests(UiTestBase):
         first = next(r for r in window.visible_regs if not r.get("read_side_effect"))
         self.settle(lambda: first["_error"] == "实时读取失败")
         self.assertEqual(window.table.item(first["_row"], 3).text(), "读取错误")
+
+    def test_live_read_caps_addresses_at_monitor_max_registers(self):
+        # The resident monitor run is blocking and covers at most
+        # MONITOR_MAX_REGISTERS addresses; a wider view must keep only the
+        # first 32 live (the old code started a serial list of monitors and the
+        # 33rd+ register never refreshed).
+        from devmem_studio.core import MONITOR_MAX_REGISTERS
+        window = self.window
+        side = next((r for r in window.visible_regs if r.get("read_side_effect")), None)
+        visible = [r for r in window.visible_regs if r is not side]
+        self.assertGreater(len(visible), MONITOR_MAX_REGISTERS)   # fixture: 全部 view
+        window.poll_check.setChecked(True)
+        self.assertIsNotNone(window.live.key)
+        self.assertEqual(len(window.live.key[1]), MONITOR_MAX_REGISTERS)
+        expected = [r["_address"] for r in visible][:MONITOR_MAX_REGISTERS]
+        self.assertEqual(list(window.live.key[1]), list(dict.fromkeys(expected)))
 
     def test_serial_connect_flow_and_command_routing(self):
         """串口连接后终端自动切到 serial 实时终端：板卡输出直接显示，按键逐个直发。"""

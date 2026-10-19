@@ -30,7 +30,7 @@ from . import updater
 from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, HostKeyUnknownError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
-                   normalize_remote_dir, remember_dir, MONITOR_INTERVAL_MS, LIVE_INTERVAL_MS,
+                   normalize_remote_dir, remember_dir, MONITOR_INTERVAL_MS, MONITOR_MAX_REGISTERS, LIVE_INTERVAL_MS,
                    connect_ssh_until_cancelled)
 from .monitor import MonitorDialog
 from .live_read import LiveReader, NO_LIVE_FLAGS
@@ -3158,13 +3158,22 @@ class MainWindow(QMainWindow):
         self._sync_live()
 
     def _live_addresses(self):
-        """Addresses the live sampler should cover now; empty pauses it (board tasks, modal holds)."""
+        """Addresses the live sampler should cover now; empty pauses it (board tasks, modal holds).
+
+        The real-time sampler runs one resident monitor per run; like the watch
+        dialog it is capped at ``MONITOR_MAX_REGISTERS`` addresses.  Beyond that
+        the extra addresses would never refresh (the first chunk blocks the run),
+        so the list is truncated here — late rows simply stay on manual reads."""
         if not (self.poll_check.isChecked() and self.connected and not self._closing and not self._poll_holds
                 and self.active_component and getattr(self, "address_valid", False)
                 and (not self._busy or self._task_kind in ("read", "write"))):
             return []
-        return list(dict.fromkeys(reg["_address"] for reg in self.visible_regs
+        live = list(dict.fromkeys(reg["_address"] for reg in self.visible_regs
                                   if not any(reg.get(flag) for flag in NO_LIVE_FLAGS)))
+        if len(live) > MONITOR_MAX_REGISTERS:
+            self.append_log("SYSTEM", f"实时读取最多覆盖 {MONITOR_MAX_REGISTERS} 个寄存器，其余按手动读取刷新。")
+            return live[:MONITOR_MAX_REGISTERS]
+        return live
 
     def _sync_live(self):
         addresses = self._live_addresses()
