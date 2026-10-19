@@ -9,13 +9,13 @@
 
 ## 最终验证
 
-执行 `tools/build.py`，完整构建结果如下。
+执行 `tools/build.py`，完整构建 136 秒。
 
 | 项目 | 结果 |
 | --- | --- |
-| 完整回归（`--full`） | 615 项全部通过 |
-| 源码离线验收 | 通过 |
-| 单 EXE 隔离验收 | 通过；首次解压及验收，损坏缓存自动修复及验收；陈旧缓存自动清理 |
+| 完整回归（`--full`） | 615 项全部通过（91.8 s） |
+| 源码离线验收 | 通过（17.3 s） |
+| 单 EXE 隔离验收 | 通过（22.9 s）；首次解压及验收，损坏缓存自动修复及验收；陈旧缓存自动清理 |
 | 组件目录 | 沿用当前表（无变化不改写） |
 | 快速工程检查 | `tools/check_project.py` 通过（依赖锁定、源码编译、目录完整性） |
 | Windows 版本资源 | 文件版本、产品版本均为 5.5.6 |
@@ -25,7 +25,7 @@
 
 | 文件 | 大小 | SHA-256 |
 | --- | --- | --- |
-| `dist/DevmemStudio.exe` | 待构建后回填 | 待构建后回填 |
-| `dist/DevmemStudio-5.5.6-win64.zip` | 待构建后回填 | 待构建后回填 |
+| `dist/DevmemStudio.exe` | 21,268,992 字节 | `e4ab17ffe19b22e4d00a255578ae662f5dab03f22f92b9e0dc020e9bbb5ebce9` |
+| `dist/DevmemStudio-5.5.6-win64.zip` | 21,158,859 字节 | `da5c32f0904c2c2c3cf3f7c158d0567bf8c6bc3120a13161e00f0dad77add8b9` |
 
 GitHub 正式发布地址：[v5.5.6](https://github.com/shiknevus/devmemstudio/releases/tag/v5.5.6)，发布资产为 ZIP 与 `DevmemStudio-5.5.6-win64.zip.sha256`。
