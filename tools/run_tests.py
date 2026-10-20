@@ -27,8 +27,13 @@ CHILD_OVERHEAD = 1.5    # interpreter + Qt import per chunk
 CHILD_TIMEOUT = 900
 
 
-def child_env(full):
+def child_env(full, localappdata=None):
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONIOENCODING="utf-8")
+    if localappdata is not None:
+        # Isolate every child from the real %LOCALAPPDATA%\DevmemStudio
+        # (component overrides, updates, known_hosts): parallel UI tests must
+        # never read, let alone clean, the developer's live user data.
+        env["LOCALAPPDATA"] = str(localappdata)
     if full:
         env["DEVMEMSTUDIO_FULL_TESTS"] = "1"
     return env
@@ -153,7 +158,9 @@ def main():
     problems, crashed = [], []
     with tempfile.TemporaryDirectory(prefix="devmem-tests-") as scratch, \
             ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(run_chunk, chunk, child_env(args.full), scratch) for _, chunk in chunks]
+        localappdata = Path(scratch) / "localappdata"
+        localappdata.mkdir()
+        futures = [pool.submit(run_chunk, chunk, child_env(args.full, localappdata), scratch) for _, chunk in chunks]
         for done, future in enumerate(as_completed(futures), 1):
             chunk_ids, result, code, output, elapsed = future.result()
             label = chunk_ids[0].rsplit(".", 1)[0]

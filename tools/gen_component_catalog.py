@@ -17,7 +17,7 @@ from devmem_studio.component_parse import (  # noqa: E402,F401
     debug_notes_for, extract_concat_fields, find_component_folders, find_top_file, folder_module_types,
     harvest_debug_snapshots, harvest_signal_widths, harvest_type_notes, parse_component_folder,
     parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
-    strip_comments, top_is_plaintext)
+    strip_block_comments, strip_comments, top_is_plaintext)
 from devmem_studio.core import user_data_dir  # noqa: E402
 from devmem_studio.top_import import (  # noqa: E402
     _catalog_timestamp, find_top_files, override_imported_at, parse_top)

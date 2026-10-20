@@ -24,6 +24,13 @@ API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"   #
 MAX_PACKAGE = 512 * 1024 * 1024
 TIMEOUT = 15
 
+# Authenticode thumbprint the update EXE must be signed by before the helper
+# swaps it in.  Empty means signature pinning is not yet enabled (the current
+# release is unsigned; SHA-256 from the release metadata is the only check).
+# Fill this with the publisher certificate's SHA-1 thumbprint and sign the
+# distributed EXE to close the update chain against a compromised feed.
+EXPECTED_SIGNER_FINGERPRINT = os.environ.get("DEVMEMSTUDIO_EXPECTED_SIGNER", "").strip().upper()
+
 
 class UpdateCancelled(Exception):
     def __init__(self):
@@ -408,6 +415,7 @@ def prepare_install(download, target=None):
         job = {"target": str(target), "staged": str(staged), "sha256": download.digest,
                "backup": str(backup_path(target, identifier)),
                "pids": [os.getpid()], "version": download.version,
+               "expected_signer": EXPECTED_SIGNER_FINGERPRINT,
                "result": str(work / "result.json"), "started": str(work / "started.flag")}
         launcher_pid = os.environ.get("DEVMEMSTUDIO_LAUNCHER_PID", "")
         if launcher_pid.isdigit() and int(launcher_pid) > 0:

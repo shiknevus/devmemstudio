@@ -615,6 +615,29 @@ class WindowsReplacementTests(unittest.TestCase):
             self.assertTrue(result["success"], result)
             self.assertGreaterEqual(time.monotonic() - started, 1.4)
 
+    def test_pinned_signer_rejects_unsigned_update_and_preserves_old(self):
+        """When a signer thumbprint is pinned, an unsigned staged EXE must be
+        refused before the swap: the old program stays, no backup is created,
+        and the failure carries the signer message."""
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            base = Path(directory)
+            old = (self.base / "ok.exe").read_bytes()
+            result, target, staged, backup = self.apply(
+                directory, expected_signer="A" * 40, digest=updater.file_digest(self.base / "ok.exe"))
+            self.assertFalse(result["success"], result)
+            self.assertIn("Authenticode", result["error"])
+            self.assertEqual(target.read_bytes(), old)
+            self.assertFalse(backup.exists())
+            self.assertFalse(staged.exists())   # owned stage cleaned up
+
+    def test_unsigned_update_allowed_when_signer_not_pinned(self):
+        """Legacy behavior: without an expected_signer the unsigned staged EXE
+        passes the SHA-256 check and installs normally (pinning is opt-in)."""
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory)
+            self.assertTrue(result["success"], result)
+            self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
+
     def test_malformed_job_reports_failure_and_removes_owned_stage(self):
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
             base = Path(directory)

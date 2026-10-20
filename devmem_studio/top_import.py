@@ -22,6 +22,8 @@ _BASE_ADDR = re.compile(r"^[ \t]*`define[ \t]+PL_CFG_BASE_ADDR[ \t]+"
                         r"(?:\{\s*32\s*'\s*[hH]\s*([0-9a-fA-F_]+)\s*\}|"
                         r"32\s*'\s*[hH]\s*([0-9a-fA-F_]+))[ \t\r]*$", re.M)
 _IDENTIFIER = re.compile(r"^\s*(?://\s*)*([A-Za-z_]\w*)\s*$")
+# String ("…", \" escapes, ends at line end), escaped identifier (\name), // or /* */ comment.
+COMMENT_SCAN = re.compile(r'"(?:\\.|[^"\\\n])*"?|\\\S+|//[^\n]*|/\*.*?(?:\*/|\Z)', re.S)
 
 # Common header plus A/B/C channels; used when the type has no generated table.
 FALLBACK_REGISTERS = [
@@ -148,26 +150,27 @@ def _block_comments_as_line_comments(text: str) -> str:
     logic treats a block-commented instance as disabled, not active.
 
     Code after the closing */ stays live: that last comment piece is blanked
-    with spaces instead of turning the whole line into a comment."""
+    with spaces instead of turning the whole line into a comment.  Verilog
+    string literals are scanned literally so ``"a/*b"`` never opens a block."""
     def convert(match):
         comment = match.group(0)
-        if comment.startswith("//"):
-            return comment
+        if not comment.startswith("/*"):
+            return comment   # string, escaped identifier or // note
         if "\n" not in comment:
             return " " * len(comment)   # inline /* note */: code around it stays live
-        lines = comment[2:-2].split("\n")
+        lines = (comment[2:-2] if comment.endswith("*/") else comment[2:]).split("\n")
         line_end = text.find("\n", match.end())
         tail = text[match.end():line_end if line_end != -1 else len(text)].strip()
         last = ("//" + lines[-1]) if not tail or tail.startswith("//") else " " * (len(lines[-1]) + 2)
         return "\n".join(["//" + line for line in lines[:-1]] + [last])
-    return re.sub(r"//[^\n]*|/\*.*?\*/", convert, text, flags=re.S)
+    return COMMENT_SCAN.sub(convert, text)
 
 
 def _warn_duplicate_bias(components: list[dict], warnings: list[str]):
     seen = {}
     for component in components:
-        if component["disabled"]:
-            continue
+        if component["disabled"] or component["bias"] is None:
+            continue   # an unresolvable bias has no address to overlap; its own warning covers it
         other = seen.setdefault(component["bias"], component)
         if other is not component:
             warnings.append(f"{other['instance']} 与 {component['instance']} 偏移同为 0x{component['bias']:X}，寄存器空间重叠。")

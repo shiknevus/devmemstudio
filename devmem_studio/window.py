@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, QThreadPool, QRect, QSize, Slot
+from PySide6.QtCore import Qt, QTimer, QThreadPool, QPoint, QRect, QSize, Slot
 from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
@@ -140,6 +140,11 @@ class MainWindow(QMainWindow):
         # starve register/SSH/serial tasks waiting on the shared pool.
         self.ports_pool = QThreadPool(self)
         self.ports_pool.setMaxThreadCount(1)
+        # Serial connect runs on its own single worker so a long handshake can
+        # never occupy the shared pool's thread used by register reads/writes
+        # (and vice versa: a busy register sweep must not delay the handshake).
+        self.serial_pool = QThreadPool(self)
+        self.serial_pool.setMaxThreadCount(1)
         self._stream_workers = {}
         self._stream_cancel = threading.Event()
         self._stream_state = "stopped"
@@ -189,7 +194,7 @@ class MainWindow(QMainWindow):
         self.bit_pack_dialog = None
         self.bit_dialog = None
         self.bit_rollback_dialog = None
-        self.monitor_dialog = None
+        self.monitor_dialogs = {}   # component key -> its own monitor window
         self.update_dialog = None
         self._pending_update = None
         self._stream_epoch = 0
@@ -625,7 +630,7 @@ class MainWindow(QMainWindow):
         self.monitor_button = button("监视", self.open_monitor, "flat", "axis")
         self.monitor_button.setProperty("outlined", True)
         self.monitor_button.setToolTip(f"寄存器监视：勾选一个或多个寄存器，在板端按设定间隔（默认 {MONITOR_INTERVAL_MS} ms）"
-                                       "连续采样，绘制数值随时间变化的曲线。")
+                                       "连续采样，绘制数值随时间变化的曲线。每个组件一个窗口，可同时打开多个组件一起监视。")
         filters_layout.addWidget(self.monitor_button)
         self.access_filter = ComboBox()
         self.access_filter.setAccessibleName("寄存器权限过滤")
@@ -1292,7 +1297,13 @@ class MainWindow(QMainWindow):
                     item.setForeground(0, QColor("#5A6B7A"))
                     item.setToolTip(0, "该组件在 top 中已被注释禁用。")
                 else:
-                    full = f"全地址 0x{full_base + comp['bias']:08X}" if full_base is not None else "基地址未解析"
+                    bias = comp["bias"]
+                    if full_base is not None and bias is not None:
+                        full = f"全地址 0x{full_base + bias:08X}"
+                    elif full_base is not None:
+                        full = "组件 REG_SPACE_BIAS 未解析"
+                    else:
+                        full = "基地址未解析"
                     item.setToolTip(0, f"{comp['label']}\n类型 {module_type} · 例化 {comp['instance']}\n"
                                           f"组件地址 {comp['address']} · {full}")
                 group.addChild(item)
@@ -1395,9 +1406,30 @@ class MainWindow(QMainWindow):
             self._refresh_controls()
             return
         comp = self.active_component
+        bias = comp.get("bias")
+        if bias is None:
+            # A parameterless instance without REG_SPACE_BIAS has no usable
+            # component address; keep the controls enabled but explain instead
+            # of crashing on None arithmetic.
+            self.address_valid = False
+            self._module_start = None
+            self._last_context = None
+            self.regs = []
+            self.visible_regs = []
+            self.selected = None
+            self.row_buttons = []
+            self.table.setRowCount(0)
+            self.inspector.setEnabled(False)
+            self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
+            self.module_badge.setText(comp["module_type"])
+            self.module_badge.setToolTip("该组件的 REG_SPACE_BIAS 未解析，无法计算寄存器地址。")
+            self._schedule_title_fit()
+            self._status("该组件未声明可解析的 REG_SPACE_BIAS，无法定位寄存器，请在 top 中核对例化参数。")
+            self._refresh_controls()
+            return
         try:
             base = self.base_value()
-            start = validated_address(hex(base + comp["bias"]))
+            start = validated_address(hex(base + bias))
             registers, exact = top_import.registers_for(self.type_catalog, comp["module_type"])
             for register in registers:
                 validated_address(hex(start + parse_addr(register["offset"])))
@@ -1413,7 +1445,7 @@ class MainWindow(QMainWindow):
             self.base_field.setProperty("invalid", False)
             restyle(self.base_field)
         self._module_start = start
-        context = ("top", comp["module_type"], comp["bias"], base)
+        context = ("top", comp["module_type"], bias, base)
         self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
@@ -1425,7 +1457,7 @@ class MainWindow(QMainWindow):
         self._updating = True
         self.selected = None
         self.regs = copy.deepcopy(sorted(registers, key=lambda r: parse_addr(r["offset"])))
-        self.cache_key = f"top:{comp['module_type']}@0x{comp['bias']:04x}"
+        self.cache_key = f"top:{comp['module_type']}@0x{bias:04x}"
         if not exact:
             self.append_log("SYSTEM", f"未找到 {comp['module_type']} 的精确寄存器表，已使用通用回退。")
         meta = top_import.type_metadata(self.type_catalog, comp["module_type"])
@@ -2447,7 +2479,7 @@ class MainWindow(QMainWindow):
         worker.signals.result.connect(done)
         worker.signals.failed.connect(failed)
         worker.signals.finished.connect(self._serial_worker_finished)
-        self.pool.start(worker)
+        self.serial_pool.start(worker)
 
     def _serial_worker_finished(self):
         self._serial_busy = False
@@ -2582,30 +2614,66 @@ class MainWindow(QMainWindow):
         self.bit_pack_dialog.present()
 
     def open_monitor(self):
-        if self._closing or not self.regs or not getattr(self, "address_valid", False):
+        if self._closing or not self.regs or not getattr(self, "address_valid", False) or not self.active_component:
             return
-        if self.monitor_dialog is None:
-            self.monitor_dialog = MonitorDialog(lambda: self.session if self.connected else None, self,
-                                                settings=self.cfg.get("monitor_settings"))
-            self.monitor_dialog.settings_changed.connect(self._remember_monitor_settings)
-        self._sync_monitor(preselect=True)
-        self.monitor_dialog.present()
+        key = self._monitor_key()
+        dialog = self.monitor_dialogs.get(key)
+        created = dialog is None
+        if created:
+            dialog = MonitorDialog(lambda: self.session if self.connected else None, self,
+                                   settings=self.cfg.get("monitor_settings"))
+            dialog.settings_changed.connect(lambda settings, d=dialog: self._remember_monitor_settings(settings, d))
+            dialog.finished.connect(lambda _result, k=key, d=dialog: self._monitor_closed(k, d))
+            self.monitor_dialogs[key] = dialog
+        self._sync_monitor(dialog, preselect=True)
+        dialog.present()
+        if created:
+            self._cascade_monitor(dialog)
 
-    def _sync_monitor(self, preselect=False):
-        """Offer the current component's registers; a running monitor keeps its own list."""
-        if self.monitor_dialog is None or not self.active_component:
+    def _monitor_key(self):
+        return f"{Path(self.top_info['path']).resolve()}|{self.cache_key}|0x{self._module_start:08X}"
+
+    def _sync_monitor(self, dialog=None, preselect=False):
+        """Offer the current component's registers to its window; a running monitor keeps its own list."""
+        if (not (dialog or self.monitor_dialogs) or not self.active_component or not self.top_info
+                or getattr(self, "_module_start", None) is None):
+            return
+        key = self._monitor_key()
+        dialog = dialog or self.monitor_dialogs.get(key)
+        if dialog is None:
             return
         registers = [dict(name=self._display_name(reg), _address=reg["_address"], offset=reg["offset"],
                           **{flag: reg.get(flag, False) for flag in
                              ("write_only", "read_clear", "read_to_clear", "read_side_effect")}) for reg in self.regs]
         chosen = [self.selected["_address"]] if preselect and self.selected else []
-        self.monitor_dialog.set_registers(
+        dialog.set_registers(
             f"{self._component_display_name(self.active_component)} · {self.active_component['module_type']}",
-            registers, chosen, key=f"{Path(self.top_info['path']).resolve()}|{self.cache_key}|0x{self._module_start:08X}",
-            kind=self.active_component["module_type"])
+            registers, chosen, key=key, kind=self.active_component["module_type"])
 
-    def _remember_monitor_settings(self, settings):
+    def _cascade_monitor(self, dialog):
+        """Offset a new window off any open one so they do not stack exactly."""
+        taken = {other.pos() for other in self.monitor_dialogs.values() if other is not dialog and other.isVisible()}
+        if dialog.isMaximized() or not taken:
+            return
+        area = dialog.screen().availableGeometry()
+        pos = dialog.pos()
+        while pos in taken:
+            pos += QPoint(32, 32)
+        if pos.x() + 200 > area.right() or pos.y() + 80 > area.bottom():
+            return   # keep the title bar reachable
+        dialog.move(pos)
+
+    def _monitor_closed(self, key, dialog):
+        if self.monitor_dialogs.get(key) is dialog:
+            del self.monitor_dialogs[key]
+        if not self._closing:
+            dialog.release()
+
+    def _remember_monitor_settings(self, settings, source=None):
         self.cfg["monitor_settings"] = settings
+        for dialog in self.monitor_dialogs.values():
+            if dialog is not source:
+                dialog.settings = copy.deepcopy(settings)   # a stale copy would revert another window's picks
         self._schedule_save()
 
     def _remember_bitpack_settings(self, settings):
@@ -3727,6 +3795,12 @@ class MainWindow(QMainWindow):
             self.store.save(self.cfg)
         except OSError as exc:
             self.append_log("ERROR", f"设置保存失败：{exc}")
+            # A single visible notice (not a popup storm on the 600 ms autosave)
+            # so the user learns the change is session-only.
+            now = time.monotonic()
+            if now - getattr(self, "_save_fail_notice_at", 0.0) > 5.0:
+                self._save_fail_notice_at = now
+                self._status(f"设置保存失败（更改仅本次会话有效）：{exc}")
             return False
         return True
 
@@ -3745,8 +3819,8 @@ class MainWindow(QMainWindow):
         self.ports_pool.clear()
         self._ports_scanning = False
         self._ports_scan_worker = None
-        if self.monitor_dialog is not None:
-            self.monitor_dialog.shutdown()
+        for dialog in list(self.monitor_dialogs.values()):
+            dialog.shutdown()
         self.session.close()
         self.serial.close()
         if self._task_serial:

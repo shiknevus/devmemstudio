@@ -761,6 +761,42 @@ class SshTests(BoardFixture, unittest.TestCase):
         self.assertTrue(self.session.alive)
         self.assertEqual(self.session.read(0xB0102208), 42)
 
+    def test_stop_monitor_channels_closes_exec_channel_promptly(self):
+        """stop_monitor_channels() (used by the dialog's stop/shutdown) must
+        close the resident sampler's exec channel so the reader exits quickly
+        and the board-side loop dies on SIGPIPE rather than surviving a period."""
+        batches, done, stop = [], threading.Event(), threading.Event()
+        self.assertTrue(self.session.start_monitor([0xB0102200], 50, batches.append,
+                                                   lambda message: done.set(), stop))
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertGreaterEqual(len(self.session._monitor_channels), 1)
+        channel = self.session._monitor_channels[0][0]
+        self.assertFalse(channel.closed)
+        self.session.stop_monitor_channels(threading.Event())   # another run's event: untouched
+        self.assertFalse(channel.closed)
+        started = time.monotonic()
+        self.session.stop_monitor_channels(stop)
+        # The reader sees EOF and calls stopped('') reasonably fast (well under
+        # the 50 ms period that the plain stop.set() path would wait).
+        self.assertTrue(done.wait(2))
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(self.session._monitor_channels, [])
+        self.assertTrue(self.session.alive)
+        self.assertEqual(self.session.read(0xB0102208), 42)
+
+    def test_session_close_terminates_registered_monitor_channels(self):
+        batches, done, stop = [], threading.Event(), threading.Event()
+        self.assertTrue(self.session.start_monitor([0xB0102200], 50, batches.append,
+                                                   lambda message: done.set(), stop))
+        deadline = time.monotonic() + 3
+        while sum(map(len, batches)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.session.close()
+        self.assertTrue(done.wait(2))
+        self.assertEqual(self.session._monitor_channels, [])
+
     def run_monitor_briefly(self, addresses):
         batches, kinds, done, stop = [], [], threading.Event(), threading.Event()
         self.assertTrue(self.session.start_monitor(addresses, 5, batches.append, lambda message: done.set(), stop,

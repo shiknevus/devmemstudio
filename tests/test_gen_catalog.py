@@ -501,6 +501,30 @@ class ParserEdgeTests(unittest.TestCase):
         self.assertEqual(gen.parse_define_table("`define PARAM66 9'h1_B4\n  `define X 10'H0E4\n"),
                          {"PARAM66": 0x1B4, "X": 0x0E4})
 
+    def test_unsized_leading_zero_is_decimal(self):
+        """Verilog has no C-style octal: unsized ``047`` is decimal 47."""
+        warnings = []
+        self.assertEqual(gen.parse_define_table("`define A 047\n`define B 0_10\n", warnings),
+                         {"A": 47, "B": 10})
+        self.assertEqual(warnings, [])
+
+    def test_conditional_warning_only_for_differing_exact_names(self):
+        warnings = []
+        gen.parse_define_table("`ifdef X\n`define R 8'h10\n`else\n`define R 8'h10\n`endif\n"
+                               "`define R_B 8'h20\n`define R_BC 8'h24\n", warnings)
+        self.assertEqual(warnings, [])
+
+    def test_conditional_branch_defines_warn_for_manual_review(self):
+        """Registers redefined across `ifdef branches cannot be resolved to one
+        value; the textual-last value is kept but a distinct warning must tell
+        the user to verify the active branch."""
+        warnings = []
+        table = gen.parse_define_table(
+            "`ifdef FOO\n`define EC_ID 9'h00C\n`else\n`define EC_ID 9'h010\n`endif\n", warnings)
+        self.assertEqual(table, {"EC_ID": 0x010})
+        self.assertTrue(any("条件编译" in message for message in warnings))
+        self.assertTrue(any("EC_ID" in message for message in warnings))
+
     def test_strip_comments_line_comment_hides_block_opener(self):
         body = gen.strip_comments("// old: /* disabled\nassign a = param3;\n/* real\n */\nassign b = param4;")
         self.assertIn("assign a = param3;", body)
@@ -520,6 +544,73 @@ class ParserEdgeTests(unittest.TestCase):
         self.assertEqual(entries["P3"]["width"], 1)
         self.assertEqual(entries["P4"]["width"], 32)        # union of [15:0] and [31:16]
         self.assertTrue(entries["P4"]["writable"])
+
+    def test_read_arms_from_every_case_block_and_ignore_rhs_macros(self):
+        """Multiple case blocks all contribute read arms; a macro inside an
+        arm's RHS (a concat value, not a tag) must not become a register."""
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "always @(*) case (rd_addr_d2)\n"
+            "  `A: o_st_rd_data = 32'd1;\n"
+            "  default: o_st_rd_data = 32'd0;\n"
+            "endcase\n"
+            "always @(*) case (rd_addr_d2)\n"
+            "  `B: o_st_rd_data2 <= {`RHS_MACRO, a};\n"   # RHS macro: data, not a register
+            "  `C: o_st_rd_data2 <= {24'd0, p_c};\n"
+            "  default: o_st_rd_data2 = 32'd0;\n"
+            "endcase\n")}
+        self.assertEqual(set(entries), {"A", "B", "C"})
+        self.assertTrue(all(entries[name]["readable"] for name in ("A", "B", "C")))
+        self.assertEqual(entries["B"]["width"], 32)
+
+    def test_read_tags_keep_label_lists_and_skip_ternary_macros(self):
+        entries = {item["name"] for item in gen.parse_decode_file(
+            "always @(*) case (rd_addr_d2)\n"
+            "  `A, `B : o_st_rd_data = x;\n"
+            "  `C : o_st_rd_data = sel ? `CONST_X : y[`MSB:0];\n"
+            "  `D : begin o_st_rd_data = 1; end\n"
+            "  default: o_st_rd_data = 32'd0;\n"
+            "endcase\n")}
+        self.assertEqual(entries, {"A", "B", "C", "D"})
+
+    def test_strip_comments_unterminated_string_ends_at_line(self):
+        body = gen.strip_comments('assign m = "abc;\n// note /* x\nwire a; */\n')
+        self.assertNotIn("note", body)
+        self.assertIn("wire a;", body)
+
+    def test_byte_slice_read_arm_sets_width(self):
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "always @(*) case (rd_addr_d2)\n"
+            "  `A: o_st_rd_data[7:0] <= p_lo;\n"
+            "  `B: o_st_rd_data[15:0] <= p_hi;\n"
+            "  default: o_st_rd_data = 32'd0;\n"
+            "endcase\n")}
+        self.assertEqual(entries["A"]["width"], 8)
+        self.assertEqual(entries["B"]["width"], 16)
+
+    def test_strip_comments_ignores_string_literals(self):
+        """A Verilog string containing /* or // must never open/close a comment,
+        so real register-write code on the same line survives the strip."""
+        body = gen.strip_comments(
+            'assign s = "a/*b";\n'
+            'assign i_st_wr_data[7:0] = (wr_task_addr == `P1) ? 8\'h11 : 8\'h22;\n'
+            '/* note */\n'
+            'assign t = "c//d"; assign u = 1;\n')
+        self.assertIn('i_st_wr_data[7:0]', body)
+        self.assertIn('"a/*b"', body)
+        self.assertIn('"c//d"', body)
+        self.assertIn('assign u = 1;', body)
+
+    def test_strip_comments_handles_escaped_quote_inside_string(self):
+        body = gen.strip_comments('assign s = "a\\"/* not a comment */"; assign q = 1;')
+        self.assertIn('assign q = 1;', body)
+        self.assertNotIn("/*", body.replace('"a\\"/* not a comment */"', ""))
+
+    def test_strip_block_comments_keeps_line_notes_but_not_string_markers(self):
+        body = gen.strip_block_comments(
+            'assign s = "/*str*/"; // trailing note\nassign r = 1;')
+        self.assertIn('"/*str*/"', body)
+        self.assertIn("// trailing note", body)
+        self.assertIn('assign r = 1;', body)
 
 
 def write_component(root: Path, decode: str, top: str, defines: str = DEFINE_TEXT) -> Path:
@@ -587,6 +678,27 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual((entries["P2"]["writable"], entries["P2"]["width"]), (True, 32))
         self.assertFalse(entries["P3"]["writable"])        # not a register write
         self.assertEqual((entries["P4"]["writable"], entries["P4"]["width"]), (True, 16))
+
+    def test_write_detection_begin_block_with_non_write_first_statement(self):
+        """A begin/end write block whose first statement is a write-enable (or
+        anything else) must still attribute i_st_wr_data assignments to the
+        register named by the if condition's address macro."""
+        entries = {item["name"]: item for item in gen.parse_decode_file(
+            "always @(posedge clk_i) begin\n"
+            "  if (wr_task_vld && wr_task_addr == `A) begin\n"
+            "    we_a <= 1'b1;\n"
+            "    reg_a <= i_st_wr_data[7:0];\n"
+            "  end\n"
+            "  if (wr_task_addr == `B) begin\n"
+            "    we_b <= 1'b1;\n"
+            "    reg_b <= i_st_wr_data;\n"
+            "  end\n"
+            "end\n"
+            "always @(*) case (rd_addr_d2) `A: o = reg_a; `B: o = reg_b; endcase\n")}
+        self.assertEqual((entries["A"]["writable"], entries["A"]["width"]), (True, 8))
+        self.assertEqual((entries["B"]["writable"], entries["B"]["width"]), (True, 32))
+        self.assertTrue(entries["A"]["readable"] or entries["A"]["writable"])
+        self.assertTrue(entries["B"]["readable"] or entries["B"]["writable"])
 
     def test_read_width_subtracts_padding_on_both_ends(self):
         entries = {item["name"]: item for item in gen.parse_decode_file(

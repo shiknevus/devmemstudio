@@ -561,6 +561,21 @@ class DialogTests(unittest.TestCase):
         self.app.processEvents()
         return self.dialog.list
 
+    def test_release_waits_for_in_flight_export(self):
+        from shiboken6 import isValid
+        from PySide6.QtCore import QCoreApplication
+        dialog = MonitorDialog(lambda: None)
+        dialog.set_registers("ec_axis · T", self.registers)
+        self.assertEqual(dialog.windowTitle(), "寄存器监视 · ec_axis · T")
+        worker = object()
+        dialog._workers.add(worker)   # stands in for an export still writing
+        dialog.release()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertTrue(isValid(dialog))
+        dialog._worker_done(worker)
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(isValid(dialog))
+
     def test_sidebar_handle_drags_to_widen_list_during_monitoring(self):
         registers = [dict(name=f"R{i} · long_signal_name_for_monitoring", offset=i * 4,
                           _address=0x1000 + i * 4) for i in range(100)]

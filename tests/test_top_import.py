@@ -410,6 +410,50 @@ ec_b_2
                                  (6, "A0006_y", "A0006", "ec_y", "ec_y_6", 0x1200, False)])
         self.assertEqual(info["warnings"], [])
 
+    def test_multiple_parameterless_instances_without_bias_do_not_crash(self):
+        """Two or more parameterless ``ec_*`` instantiations without REG_SPACE_BIAS
+        previously crashed _warn_duplicate_bias with ``0x{None:X}``. They must
+        parse, carry bias=None, and only warn about the missing bias."""
+        text = ("module top;\n"
+                "ec_paramless ec_pl_1 (.clk(clk));\n"
+                "ec_paramless ec_pl_2 (.clk(clk));\n"
+                "ec_other ec_ot_1 (.clk(clk));\n"
+                "endmodule\n")
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["instance"], c["bias"]) for c in info["components"]],
+                         [("ec_pl_1", None), ("ec_pl_2", None), ("ec_ot_1", None)])
+        # Each missing bias is reported; crucially the overlap warning (which
+        # previously crashed formatting None) must never appear.
+        self.assertEqual(len(info["warnings"]), 3)
+        self.assertTrue(all("无 .REG_SPACE_BIAS" in message for message in info["warnings"]))
+        self.assertFalse(any("寄存器空间重叠" in message for message in info["warnings"]))
+
+    def test_parameterless_instance_without_bias_keeps_unknown_address(self):
+        """A single parameterless instance without bias is kept with a None
+        bias and an unknown address instead of being dropped or crashing."""
+        text = "module top; ec_paramless ec_pl_1 (.clk(clk)); endmodule\n"
+        info = top_import.parse_top(text)
+        self.assertEqual(len(info["components"]), 1)
+        comp = info["components"][0]
+        self.assertEqual((comp["instance"], comp["module_type"], comp["bias"]),
+                         ("ec_pl_1", "ec_paramless", None))
+        self.assertEqual(comp["address"], "0x0000")
+        self.assertTrue(any("无 .REG_SPACE_BIAS" in message for message in info["warnings"]))
+
+    def test_block_comment_rewrite_ignores_string_literals(self):
+        """A string containing /* must not be rewritten into a // line (which
+        would comment out the rest of the line, hiding a real instance)."""
+        text = ('module top;\n'
+                'wire s = "a/*b";\n'
+                'ec_x #( .REG_SPACE_BIAS(20\'h1000) ) ec_x_1 ();\n'
+                'endmodule\n')
+        rewritten = top_import._block_comments_as_line_comments(text)
+        self.assertIn('"a/*b"', rewritten)
+        self.assertIn('ec_x_1', rewritten)
+        info = top_import.parse_top(text)
+        self.assertEqual([(c["instance"], c["bias"]) for c in info["components"]],
+                         [("ec_x_1", 0x1000)])
+
 
 class ComponentsParamTests(unittest.TestCase):
     def test_locates_param_file_and_base_address(self):

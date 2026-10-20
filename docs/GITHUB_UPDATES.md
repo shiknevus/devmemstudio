@@ -34,5 +34,6 @@ ZIP 必须只包含 `DevmemStudio/DevmemStudio.exe`。校验文件内容为 `SHA
 - 安装工具使用 Windows PowerShell 5.1，通过隐藏的更新进程执行；重启的应用正常显示。受组织策略阻止 PowerShell 时需手动升级。
 - 等待已知旧进程最多 120 秒；替换锁冲突最多重试 30 秒，不强制结束其他实例。
 - 替换失败保留旧程序；新版启动失败或启动后 3 秒内以非零状态退出时尝试恢复并启动旧版。此检查不保证后续业务运行正常，运行后才发生的故障可直接运行保留的 `-backup.exe`，或把它改回原文件名回退。
-- 保留成功下载目录、安装结果及旧版备份供排查，不自动清除这些文件。应用运行库缓存仍沿用原有清理规则。
+- ZIP 与同名 `.sha256` 都由同一个 GitHub 发布账号提供：SHA-256 只保证下载内容与发布元数据一致，不构成独立于发布者的信任锚。**签名固定是可选的加固步骤**：给发布 EXE 做 Authenticode 签名后，把发布证书的 SHA-1 指纹写入环境变量 `DEVMEMSTUDIO_EXPECTED_SIGNER`（或 `devmem_studio/updater.py` 的 `EXPECTED_SIGNER_FINGERPRINT`），升级助手会在替换前用 `Get-AuthenticodeSignature` 校验签名者指纹，未签名或指纹不符时拒绝安装并回滚。未设置时保持仅 SHA-256 校验（当前发布未签名）。建议启用签名后将 `expected_signer` 固化进 `prepare_install`，并在 `GITHUB_UPDATES.md` 记录证书指纹与轮换流程。
+- 保留成功下载目录、安装结果及旧版备份供排查；超过 1 小时的陈旧 `download-*` 暂存目录与旧版备份会按保留策略自动清理（`cleanup_update_leftovers`），不触碰正在使用或 1 小时内的内容。应用运行库缓存仍沿用原有清理规则。
 - 检查、下载和安装均有本地回归覆盖。实际 GitHub 联网结果与最终构建记录见本版验收记录。

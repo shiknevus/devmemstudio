@@ -181,18 +181,32 @@ for path, content_type in ((archive, "application/zip"), (checksum, "text/plain"
     for dangling in [a for a in release.get("assets", []) if a["name"].startswith(f"{path.name}.replacement-")]:
         try:
             api("DELETE", dangling["url"])
-        except Exception:
-            pass
+        except (SystemExit, urllib.error.HTTPError):
+            pass   # api() gives up with SystemExit, which `except Exception` misses
     replacement = None
     if stale:
-        # GitHub rejects an upload while the old asset has the same name.  Stage
-        # a content-addressed replacement first, so a failed final upload never
-        # leaves the release without a recoverable copy of the new artifact.
+        # GitHub rejects an upload while an asset has the same name.  Stage the
+        # *new* bytes under a content-addressed name first, so a failed final
+        # upload still leaves a copy of the new artifact on the release.
         replacement = upload_asset(path, content_type, f"{path.name}.replacement-{digest[:12]}")
-        api("DELETE", stale["url"])
-    asset = upload_asset(path, content_type, path.name)
+        try:
+            api("DELETE", stale["url"])
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:   # already gone is fine
+                raise
+    try:
+        asset = upload_asset(path, content_type, path.name)   # retries internally
+    except SystemExit as exc:
+        kept = f"; the new bytes are kept as {replacement.get('name')}" if replacement else ""
+        raise SystemExit(f"{path.name} upload failed{kept}. Rerun this command to finish the publish.") from exc
+    if asset.get("state") not in (None, "uploaded"):
+        # starter = half uploaded: keep the staged copy, a rerun replaces this asset
+        raise SystemExit(f"{path.name} ended in state {asset.get('state')}; rerun the command")
     if replacement and replacement.get("url"):
-        api("DELETE", replacement["url"])
+        try:
+            api("DELETE", replacement["url"])   # canonical name is live: drop the staging copy
+        except (SystemExit, urllib.error.HTTPError) as exc:
+            print(f"could not delete {replacement.get('name')}: {exc}; the next run cleans it up", flush=True)
     uploaded.append({"asset": asset.get("name"), "size": asset.get("size"), "state": asset.get("state"),
                      "digest": asset.get("digest")})
 print(json.dumps({"release": release["html_url"], "tag": tag, "commit": commit, "assets": uploaded}, ensure_ascii=False))

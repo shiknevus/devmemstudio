@@ -314,7 +314,12 @@ class MonitorParser:
                 if self._stamp is not None and self._values:
                     self._complete([*self._values, *[None] * (self.count - len(self._values))])   # cut-off point
                 digits = line[1:]
-                self._stamp = int(digits) / 1e9 + self._skew if digits.isdigit() else self._host_stamp()
+                # date +%s%N emits 19 digits; a longer run of digits is corrupt
+                # or hostile noise and must not overflow int→float.
+                if digits.isdigit() and len(digits) <= 20:
+                    self._stamp = int(digits) / 1e9 + self._skew
+                else:
+                    self._stamp = self._host_stamp()
                 self._values = []
             elif line.startswith("#"):
                 kind = (line[1:].split() or [""])[0]
@@ -718,14 +723,19 @@ def _sftp_remove_quietly(sftp, path):
 
 
 def _prune_regmon(sftp, keep):
-    """Drop other versions' samplers and abandoned half uploads from /tmp (best effort)."""
+    """Drop other versions' samplers and abandoned half uploads from /tmp (best effort).
+
+    A file another instance placed/wrote within the last 10 minutes is never
+    touched: without that guard, two sessions uploading different digests would
+    delete each other's freshly-renamed complete file and force a re-upload."""
     try:
+        now = time.time()
         for entry in sftp.listdir_attr("/tmp"):
             path = "/tmp/" + entry.filename
             if not entry.filename.startswith("devmem-studio-regmon-") or path == keep:
                 continue
-            if ".part-" in entry.filename and abs(time.time() - (entry.st_mtime or 0)) < 600:
-                continue   # another instance may still be uploading it
+            if abs(now - (entry.st_mtime or 0)) < 600:
+                continue   # this or another instance may still be uploading/using it
             _sftp_remove_quietly(sftp, path)
     except Exception:
         pass
@@ -835,6 +845,8 @@ class SshSession:
         self._connect_sock = None   # live during connect(); close() aborts a handshake in flight
         self._fresh = True          # a close() before the first connect is a cancel
         self._regmon = (None, None)   # (transport, architecture); placement failures are never cached
+        self._monitor_channels = []   # live resident-sampler exec channels, guarded by _lock
+        self._monitor_channels_lock = threading.Lock()
 
     @property
     def alive(self):
@@ -1644,6 +1656,7 @@ class SshSession:
             reported = ""
             flushed = started = heard = time.monotonic()
             channel.settimeout(0.05)
+            self.register_monitor_channel(channel, stop)
             try:
                 while not stop.is_set():
                     try:
@@ -1679,16 +1692,26 @@ class SshSession:
                                      + (f"：{parser.note}" if parser.note else "。"))
                             parser.note = ""
                         if on_sampler:
-                            on_sampler(reported)
+                            try:
+                                on_sampler(reported)
+                            except RuntimeError:
+                                pass   # the dialog's signal bridge was already destroyed
                     if parser.samples and time.monotonic() - flushed >= 0.04:
-                        on_samples(parser.take())
+                        try:
+                            on_samples(parser.take())
+                        except RuntimeError:
+                            pass   # the dialog's signal bridge was already destroyed
                         flushed = time.monotonic()
                 if parser.samples:
-                    on_samples(parser.take())
+                    try:   # a pause keeps the epoch: the tail batch still belongs to the run
+                        on_samples(parser.take())
+                    except RuntimeError:
+                        pass
             except Exception as exc:
                 message = f"监视连接中断：{exc}"
             finally:
                 channel.close()
+                self.unregister_monitor_channel(channel)
                 try:
                     stopped("" if stop.is_set() else message)
                 except RuntimeError:
@@ -1702,6 +1725,10 @@ class SshSession:
 
     def _close_connection(self):
         self.stop_stream()
+        # Close every live resident-sampler exec channel so its board-side
+        # devmem/bash loop dies on SIGPIPE at once instead of surviving until
+        # its next write.  The reader threads see EOF and finish promptly.
+        self.stop_monitor_channels()
         # Break a handshake still waiting inside client.connect: a socket
         # shutdown unblocks the recv even on Windows (close alone does not),
         # so the blocked call raises instead of waiting out the timeout.
@@ -1721,6 +1748,29 @@ class SshSession:
             channel.close()
         if client:
             client.close()
+
+    def register_monitor_channel(self, channel, cancel_event=None):
+        """Track a live monitor exec channel (with its run's cancel event) so stop/close can terminate it."""
+        with self._monitor_channels_lock:
+            if not any(item is channel for item, _ in self._monitor_channels):
+                self._monitor_channels.append((channel, cancel_event))
+
+    def unregister_monitor_channel(self, channel):
+        with self._monitor_channels_lock:
+            self._monitor_channels = [pair for pair in self._monitor_channels if pair[0] is not channel]
+
+    def stop_monitor_channels(self, cancel_event=None):
+        """Close the monitor exec channels of one run (by its cancel event), or all of them."""
+        with self._monitor_channels_lock:
+            channels, kept = [], []
+            for pair in self._monitor_channels:
+                (channels if cancel_event is None or pair[1] is cancel_event else kept).append(pair)
+            self._monitor_channels = kept
+        for channel, _ in channels:
+            try:
+                channel.close()
+            except Exception:
+                pass
 
 
 class DemoSession:

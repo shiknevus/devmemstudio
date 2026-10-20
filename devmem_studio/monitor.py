@@ -1737,6 +1737,7 @@ class MonitorDialog(ManagedDialog):
         self._runs = 0   # bumped only by start(): stop alone must not hide an export's outcome
         self._stop = threading.Event()
         self._workers = set()
+        self._release_pending = False
         self._dirty = False
         self.state = "idle"
         self.buffer = None
@@ -1947,6 +1948,7 @@ class MonitorDialog(ManagedDialog):
         self._selection_key = key
         self._selection_kind = kind
         self.component_label.setText(title)
+        self.setWindowTitle(f"寄存器监视 · {title}")   # tells the open windows apart on the taskbar
         self.list.blockSignals(True)
         self.list.clear()
         for reg in registers:
@@ -2157,7 +2159,7 @@ class MonitorDialog(ManagedDialog):
             on_sampler=lambda kind: bridge.sampler.emit(token, kind)))
         worker.signals.result.connect(lambda ok: bridge.started.emit(token, bool(ok)))
         worker.signals.failed.connect(lambda message: bridge.stopped.emit(token, "启动监视失败：" + message))
-        worker.signals.finished.connect(lambda: self._workers.discard(worker))
+        worker.signals.finished.connect(lambda: self._worker_done(worker))
         self._workers.add(worker)
         self._set_state("starting")
         self._set_status(f"正在启动板端采样（{len(addresses)} 个寄存器，间隔 {interval} ms）…")
@@ -2174,6 +2176,7 @@ class MonitorDialog(ManagedDialog):
         if self.state != "running":
             return False
         self._stop.set()   # same epoch: samples already in flight still belong to this run
+        self._terminate_board_sampler()   # hush the sampler now, not after its next period
         self._set_state("paused")
         self._refresh()
         self._set_status(self._summary("已暂停"))
@@ -2196,10 +2199,21 @@ class MonitorDialog(ManagedDialog):
         self._launch(session, token, stop)
         return True
 
+    def _terminate_board_sampler(self):
+        """Close the resident sampler's exec channel so the board-side process
+        dies on SIGPIPE now instead of surviving up to a full sampling period."""
+        try:
+            session = self._session_provider()
+            if session is not None and hasattr(session, "stop_monitor_channels"):
+                session.stop_monitor_channels(self._stop)   # only this run: live reads share the session
+        except Exception:
+            pass   # the session may already be gone; the reader's EOF path handles it
+
     def stop(self):
         if self.state == "idle":
             return
         self._stop.set()
+        self._terminate_board_sampler()
         self._epoch += 1   # queued samples from this run must not refill a cleared buffer
         self._set_state("idle")
         self._refresh()
@@ -2337,9 +2351,22 @@ class MonitorDialog(ManagedDialog):
 
     def _markers_changed(self, markers):
         first, second = markers
+        def retained(stamp):
+            """True when the stamp is inside the retained sample window; a
+            stale marker dropped out of the buffer must not show a fake Δt."""
+            if stamp is None:
+                return False
+            return self.plot._index_at(stamp) is not None
         def stamp_text(stamp):
-            return "—" if stamp is None else f"{stamp:.6f} s"
-        difference = abs(second - first) if first is not None and second is not None else None
+            if stamp is None:
+                return "—"
+            if not retained(stamp):
+                return "—"   # data no longer retained (dropped/cleared): no visible line
+            return f"{stamp:.6f} s"
+        if retained(first) and retained(second):
+            difference = abs(second - first)
+        else:
+            difference = None
         self.marker_label.setText(f"A: {stamp_text(first)}   B: {stamp_text(second)}   Δt: {stamp_text(difference)}")
         self.clear_markers_button.setEnabled(any(stamp is not None for stamp in markers))
 
@@ -2450,7 +2477,7 @@ class MonitorDialog(ManagedDialog):
         worker.signals.result.connect(self._export_finished)
         worker.signals.failed.connect(lambda message: self.bridge.export_failed.emit(request["run"], message))
         worker.signals.finished.connect(self._export_done)
-        worker.signals.finished.connect(lambda: self._workers.discard(worker))
+        worker.signals.finished.connect(lambda: self._worker_done(worker))
         self._workers.add(worker)
         self.export_pool.start(worker)
 
@@ -2463,15 +2490,30 @@ class MonitorDialog(ManagedDialog):
         self.export_button.setEnabled(True)
         self.export_button.setText("导出数据")
 
+    def _worker_done(self, worker):
+        self._workers.discard(worker)
+        if self._release_pending and not self._workers:
+            self.deleteLater()
+
+    def release(self):
+        """Closed for good: free the samples once no start or export is still in flight."""
+        self.stop()
+        self._release_pending = True
+        if not self._workers:
+            self.deleteLater()
+
     def shutdown(self):
         """Owner is closing: stop sampling and drop late results."""
         self._epoch += 1
         self._stop.set()
+        self._terminate_board_sampler()
         self._set_state("idle")
         # An in-flight CSV/zip export holds the export_pool; drop queued work and
         # stop waiting on it so the dialog can be destroyed without a hang.
         self.export_pool.clear()
         self.export_pool.waitForDone(50)
+        self.pool.clear()
+        self.pool.waitForDone(200)   # let the sampler worker observe the close and exit
         self._exporting = False
 
     def closeEvent(self, event):

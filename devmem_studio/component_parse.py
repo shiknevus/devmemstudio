@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from .top_import import read_text_resilient
+from .top_import import COMMENT_SCAN, read_text_resilient
 
 ALIASES = {"ec_sf_door": "sf_doo"}
 # 9'h1B4 / 12'd16 / 12'b1010 / plain 436. A plain number must end the line; a
@@ -23,9 +23,20 @@ _WR_DATA = (r"(?:\{\s*(?:\d+\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,\s*)+)?"
 WRITE = re.compile(_WR_ADDR + r"[^?;]*?\?\s*" + _WR_DATA)
 WRITE_IF = re.compile(r"\bif\s*\([^;]*?" + _WR_ADDR + r"[^;]*?\)\s*(?:begin\b\s*)?"
                       r"[A-Za-z_]\w*(?:\s*\[[^\]]*\])*\s*<?=\s*" + _WR_DATA)
+# An assignment forwarding the write bus, possibly behind constant padding:
+# ``target <= i_st_wr_data[7:0]`` / ``target <= {16'd0, i_st_wr_data[15:0]}``.
+_WR_IF_ASSIGN = re.compile(r"\b([A-Za-z_]\w*(?:\s*\[[^\]]*\])*)\s*(?:<=|=)\s*"
+                           r"(?:\{\s*(?:\d+\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,\s*)+)?"
+                           r"i_st_wr_data(?:\s*\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\])?")
 READ_CASE = re.compile(r"case\s*\(\s*rd_addr_d2(?:\s*\[[^\]]*\])?\s*\)(.*?)endcase", re.S)
+# Case item labels: a macro list (```A, `B :``) opening an arm, i.e. after the case
+# head, a ``;``, ``begin`` or ``end``.  RHS macros (concat, ``? `X : y``, ``[`MSB:0]``)
+# are data, not registers.
+_READ_TAG = re.compile(r"(?:^|;|\bbegin\b|\bend\b)\s*((?:`\w+\s*,\s*)*`\w+)\s*:(?!:)")
 # One read arm only ([^;\n] stops at the arm's end); <= or =, concat value.
 READ_CONCAT = re.compile(r"`(\w+)\s*:[^;\n]*?<?=\s*(\{[^;\n]*\})\s*;")
+# A read arm that slices the output bus: ```A : o_st_rd_data[7:0] <= …``.
+_READ_SLICE = re.compile(r"`(\w+)\s*:[^;\n]*?o_st_rd_data\s*\[\s*(\d+)\s*:\s*(\d+)\s*\]\s*<?=")
 _RD_ADDR = r"\b(?:rd_addr_d1|rd_addr_d2|rd_task_addr)\b(?:\s*\[[^\]]*\])?"
 READ_COMPARE = re.compile(_RD_ADDR + r"\s*[!=]==?\s*`(\w+)|`(\w+)\s*[!=]==?\s*" + _RD_ADDR)
 DECLARATION_KEYWORD = re.compile(r"\b(?:input|output|inout|wire|reg|logic)\b")
@@ -69,17 +80,29 @@ def split_top_level(text: str) -> list[str]:
     return parts
 
 
+def _scan_comments(text: str, keep_line_notes: bool) -> str:
+    def replace(match):
+        token = match.group(0)
+        if token.startswith("/*"):
+            return "\n" * token.count("\n")
+        if token.startswith("//"):
+            return token if keep_line_notes else ""
+        return token   # string literal / escaped identifier
+    return COMMENT_SCAN.sub(replace, text)
+
+
 def strip_comments(text: str) -> str:
     """Drop // and /* */ comments in one left-to-right pass (whichever opens first wins).
 
+    Verilog string literals (``"…"`` with ``\\"`` escapes, ending at the line) and
+    escaped identifiers never open a comment, so real code inside such lines survives.
     Block comments keep their newlines so single-line patterns never merge lines."""
-    return re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    return _scan_comments(text, keep_line_notes=False)
 
 
 def strip_block_comments(text: str) -> str:
     """Drop /* */ comments only (same scan as strip_comments), keeping // trailing notes."""
-    return re.sub(r"//[^\n]*|/\*.*?\*/", lambda m: m.group(0) if m.group(0).startswith("//")
-                  else "\n" * m.group(0).count("\n"), text, flags=re.S)
+    return _scan_comments(text, keep_line_notes=True)
 
 
 def port_hookups(body: str, head: re.Pattern) -> list[tuple[str, str]]:
@@ -101,8 +124,10 @@ def parse_define_table(text: str, warnings: list[str] | None = None) -> dict[str
     Sized literals may use h/d/b/o radix.  A ``define`` whose value is an
     expression (``9'h0D8 + 9'h004``, ``20'h3000 - 20'h1000``, a macro reference)
     is not a plain constant: it is skipped *and* reported, so a register is never
-    silently placed at the truncated prefix of an expression."""
+    silently placed at the truncated prefix of an expression.  Unsized literals
+    are decimal (Verilog has no leading-zero octal: ``047`` is 47)."""
     table: dict[str, int] = {}
+    values: dict[str, set[int]] = {}
     code = strip_comments(text)
     for name, radix, digits, plain in DEFINE.findall(code):
         try:
@@ -122,6 +147,7 @@ def parse_define_table(text: str, warnings: list[str] | None = None) -> dict[str
         if name in table and table[name] != value and warnings is not None:
             warnings.append(f"reg_addr_pl.vh: {name} 重复定义且取值不同（0x{table[name]:X} / 0x{value:X}），使用后者")
         table[name] = value
+        values.setdefault(name, set()).add(value)
     # A `define whose value is not a plain constant (an expression or a macro
     # reference) is skipped and reported, never silently truncated to a prefix.
     # One regex covers both kinds and the names are de-duplicated so a line that
@@ -133,6 +159,15 @@ def parse_define_table(text: str, warnings: list[str] | None = None) -> dict[str
             if name not in warned:
                 warned.add(name)
                 warnings.append(f"reg_addr_pl.vh: {name} 的偏移是表达式或宏引用，无法解析，已跳过（请改为常量）。")
+    # Conditional-compilation macros: every branch's ``define`` is collected
+    # (later wins), but the active branch depends on compile-time flags this
+    # parser cannot know, so a differing redefinition inside `ifdef must be
+    # surfaced instead of silently picking the textually-last value.
+    if warnings is not None and re.search(r"^\s*`(?:ifdef|ifndef|elsif|else|endif)\b", code, re.M):
+        differing = sorted(name for name, seen in values.items() if len(seen) > 1)
+        if differing:
+            warnings.append("reg_addr_pl.vh: 含条件编译宏（`ifdef/`else/`endif），以下寄存器在多个分支中定义，"
+                            "无法确定板端激活分支，请人工核对：" + "、".join(differing))
     return table
 
 
@@ -160,10 +195,55 @@ def _padded_read_width(concat: str) -> int | None:
     return width if pads and (lead or trail) and width > 0 else None
 
 
+def _if_register_writes(body: str) -> list[tuple[str, str, str]]:
+    """(name, hi, lo) per register write inside ``if (wr_task_addr == `X) …``
+    blocks, including ``begin … end`` bodies whose first statement is not a
+    register write (a write-enable line, a counter, a comment).  The write
+    register's name is the macro in the if condition, matching WRITE/WRITE_IF.
+
+    A plain ``if (…) p <= i_st_wr_data;`` (no begin) is matched by WRITE_IF
+    already; this pass handles the begin/end form where the old regex could
+    only see a write at the very first statement."""
+    found: list[tuple[str, str, str]] = []
+
+    def _word_at(position: int) -> str:
+        end = position
+        while end < len(body) and (body[end].isalnum() or body[end] == "_"):
+            end += 1
+        return body[position:end]
+
+    for match in re.finditer(r"\bif\s*\((?:[^;]*?" + _WR_ADDR + r"[^;]*?)\)\s*begin\b", body, re.S):
+        # _WR_ADDR's own capture group is the register macro name
+        name = match.group(1)
+        depth, cursor = 1, match.end()
+        while cursor < len(body) and depth:
+            # keyword boundary: the char before must not be a word char
+            boundary = cursor == 0 or not (body[cursor - 1].isalnum() or body[cursor - 1] == "_")
+            if boundary:
+                word = _word_at(cursor)
+                if word == "begin":
+                    depth += 1
+                    cursor += 5
+                    continue
+                if word == "end":
+                    depth -= 1
+                    cursor += 3
+                    continue
+            cursor += 1
+        if depth:
+            continue   # unbalanced: leave WRITE_IF's own handling
+        block = body[match.end():cursor - 1]
+        for write in _WR_IF_ASSIGN.finditer(block):
+            hi, lo = write.group(2), write.group(3)
+            found.append((name, hi or "", lo or ""))
+    return found
+
+
 def _write_widths(body: str) -> dict[str, int | None]:
     """Written bit span per register; None = full-word write (no slice)."""
     spans: dict[str, tuple[int, int] | None] = {}
-    for name, hi, lo in [*WRITE.findall(body), *WRITE_IF.findall(body)]:
+    for name, hi, lo in [*WRITE.findall(body), *WRITE_IF.findall(body),
+                         *_if_register_writes(body)]:
         span = None
         if hi:
             first, second = int(hi), int(lo if lo else hi)
@@ -183,14 +263,21 @@ def parse_decode_file(text: str) -> list[dict]:
     popping a FIFO) marks that register read_side_effect."""
     body = strip_comments(text)
     writes = _write_widths(body)
-    case = READ_CASE.search(body)
     reads, widths = set(), {}
-    if case:
-        for name, concat in READ_CONCAT.findall(case.group(1)):
+    # Every case block contributes read arms; a multi-mux decode file must not
+    # silently drop the later blocks.
+    for case in READ_CASE.findall(body):
+        for name, concat in READ_CONCAT.findall(case):
             width = _padded_read_width(concat)
             if width:
                 widths[name] = width
-        reads = set(re.findall(r"`([A-Z]\w*)", case.group(1)))
+        for name, hi, lo in _READ_SLICE.findall(case):
+            # A byte/slice output bus (o_st_rd_data[7:0]) sizes the read; the
+            # concat-computed width (set above) still wins when both exist.
+            widths.setdefault(name, abs(int(hi) - int(lo)) + 1)
+        # Only tag-position macros name registers read by this mux.
+        for labels in _READ_TAG.findall(case):
+            reads.update(re.findall(r"`(\w+)", labels))
     side_effects = {first or second for first, second in READ_COMPARE.findall(READ_CASE.sub(" ", body))}
     entries = []
     for name in sorted(reads | set(writes)):

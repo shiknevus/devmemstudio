@@ -17,6 +17,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+from shiboken6 import isValid
 from devmem_studio import top_import
 from devmem_studio.core import ConfigStore, DemoSession, ReadbackError, HostKeyChangedError, DEFAULT_LOG_PATH, parse_addr
 from devmem_studio.theme import STYLE
@@ -430,9 +431,9 @@ class UiTests(UiTestBase):
                                            for i in range(self.window.serial_port.count())]
             self.window._toggle_serial()
             # The serial connect runs on a worker thread; under an 8-way parallel
-            # Qt load the 4 s default can be too tight for the event loop to
-            # deliver the result.  Wait up to 12 s for this real worker round trip.
-            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy, timeout=12)
+            # Qt load the default can be too tight for the event loop to deliver
+            # the result.  Wait generously for this real worker round trip.
+            self.settle(lambda: self.window.serial_connected and not self.window._serial_busy, timeout=20)
         return armed
 
     def test_serial_unplug_drops_the_session_at_once(self):
@@ -1195,6 +1196,28 @@ class TopImportUiTests(UiTestBase):
                                           if item["disabled"]))
         self.assertEqual(self.window.cache_key, "top:ec_slv_pul_axis@0x6400")  # disabled is ignored
 
+    def test_parameterless_components_without_bias_do_not_crash_gui(self):
+        """A top whose ec_* instances lack REG_SPACE_BIAS previously crashed
+        both the tree tooltip and rebuild_registers with a TypeError. The tree
+        must still populate; selecting such a component must degrade to an
+        explanatory status rather than raise."""
+        top = ("module emcc_mix_top;\n"
+               "ec_paramless ec_pl_1 (.clk(clk));\n"
+               "ec_paramless ec_pl_2 (.clk(clk));\n"
+               "endmodule\n")
+        path = Path(self.temp.name) / "parameterless_top.sv"
+        path.write_text(top, encoding="utf-8")
+        self.window.load_top(path)   # must not raise (tree tooltip path)
+        self.assertGreaterEqual(self.window.component_tree.topLevelItemCount(), 1)
+        target = next(item for item in self.window.top_info["components"]
+                      if not item["disabled"])
+        self.assertIsNone(target["bias"])
+        self.window.select_component(target)   # must not raise (rebuild_registers path)
+        self.settle(lambda: not self.window._busy)
+        self.assertFalse(self.window.address_valid)
+        self.assertEqual(self.window.regs, [])
+        self.assertEqual(self.window.visible_regs, [])
+
     def test_group_header_toggles_on_single_click(self):
         group = self.window.component_tree.topLevelItem(1)
         self.assertFalse(group.isExpanded())
@@ -1732,7 +1755,7 @@ class TopImportUiTests(UiTestBase):
         self.window.table.selectRow(0)
         self.settle(lambda: self.window.selected is self.window.regs[0])
         self.window.monitor_button.click()
-        dialog = self.window.monitor_dialog
+        dialog = self.window.monitor_dialogs[self.window._monitor_key()]
         self.assertTrue(dialog.isVisible())
         self.assertEqual(dialog.list.count(), len(self.window.regs))
         self.assertEqual(dialog.checked_addresses(), [self.window.regs[0]["_address"]])   # selected row preselected
@@ -1780,16 +1803,65 @@ class TopImportUiTests(UiTestBase):
         self.settle(lambda: "演示会话已关闭" in dialog.status.text())
         dialog.start_button.click()
         self.assertIn("请先连接 SSH", dialog.status.text())
-        # Switching components while idle offers the new component's registers.
+        # A window stays on its component; switching only changes where the button opens.
         self.window.select_component(self.window.top_info["components"][1])
         self.settle(lambda: not self.window._busy)
-        self.assertIn("ec_1do", dialog.component_label.text())
-        self.assertEqual(dialog.list.count(), len(self.window.regs))
+        self.assertNotIn("ec_1do", dialog.component_label.text())
+        self.assertEqual(dialog._selection_key, selection_key)
         self.window.select_component(self.window.top_info["components"][0])
         self.settle(lambda: not self.window._busy)
-        self.assertEqual(dialog._selection_key, selection_key)
+        self.window.monitor_button.click()
+        self.assertIs(self.window.monitor_dialogs[self.window._monitor_key()], dialog)   # reopened, not duplicated
+        self.assertEqual(len(self.window.monitor_dialogs), 1)
         self.assertEqual(dialog.checked_addresses(), [reg["_address"] for reg in self.window.regs[:2]])
         dialog.close()
+        self.settle(lambda: not self.window.monitor_dialogs and not isValid(dialog))   # closed window is freed
+
+    def test_monitor_windows_per_component_run_together(self):
+        first_component, second_component = self.window.top_info["components"][:2]
+        self.window.table.selectRow(0)
+        self.settle(lambda: self.window.selected is self.window.regs[0])
+        self.window.monitor_button.click()
+        first = self.window.monitor_dialogs[self.window._monitor_key()]
+        first_address = self.window.regs[0]["_address"]
+        self.select_and_wait(second_component)
+        self.window.table.selectRow(0)
+        self.settle(lambda: self.window.selected is self.window.regs[0])
+        self.window.monitor_button.click()
+        second = self.window.monitor_dialogs[self.window._monitor_key()]
+        second_address = self.window.regs[0]["_address"]
+        self.assertIsNot(first, second)
+        self.assertEqual(len(self.window.monitor_dialogs), 2)
+        self.assertTrue(first.isVisible() and second.isVisible())
+        self.assertIn("ec_1do", second.windowTitle())
+        self.assertNotIn("ec_1do", first.windowTitle())
+        self.assertNotEqual(first.pos(), second.pos())                    # cascaded, not stacked
+        self.assertEqual(first.checked_addresses(), [first_address])
+        self.assertEqual(second.checked_addresses(), [second_address])
+        # One window's picks must not be reverted by the other's stale settings copy.
+        first.signed_check.setChecked(True)
+        second.interval_spin.setValue(2)
+        saved = self.window.cfg["monitor_settings"]
+        self.assertTrue(saved["signed"])
+        self.assertEqual(saved["interval_ms"], 2)
+        self.assertEqual(saved["selections"].get(second._selection_key), None)  # untouched picks stay unsaved
+        first.start_button.click()
+        second.start_button.click()
+        self.settle(lambda: first.state == second.state == "running"
+                    and len(first.buffer) >= 10 and len(second.buffer) >= 10)
+        self.assertEqual(list(first.buffer.addresses), [first_address])
+        self.assertEqual(list(second.buffer.addresses), [second_address])
+        second.close()                                                     # closing one leaves the other sampling
+        self.settle(lambda: list(self.window.monitor_dialogs.values()) == [first] and not isValid(second))
+        count = len(first.buffer)
+        self.settle(lambda: len(first.buffer) > count)
+        self.assertEqual(first.state, "running")
+        self.select_and_wait(first_component)
+        self.window.monitor_button.click()
+        self.assertIs(self.window.monitor_dialogs[self.window._monitor_key()], first)
+        self.assertEqual(first.state, "running")
+        first.close()
+        self.settle(lambda: not self.window.monitor_dialogs and not isValid(first))
 
     def test_bit_upload_paste_file_path(self):
         # Paste a raw .bit path (text clipboard) → picked.

@@ -21,6 +21,38 @@ function Get-DevmemHash($path) {
     } finally { $stream.Dispose() }
 }
 
+# Authenticode thumbprint of the staged EXE's signer (null when unsigned or
+# when the signature is not present). Used to pin the update to the publisher's
+# certificate, so a compromised release feed cannot install arbitrary code.
+function Get-DevmemSignerThumbprint($path) {
+    try {
+        $sig = Get-AuthenticodeSignature -LiteralPath $path
+        if ($sig -and $sig.Status -eq 'Valid' -and $sig.SignerCertificate) {
+            return $sig.SignerCertificate.Thumbprint
+        }
+        if ($sig -and $sig.Status -in @('NotSigned', 'UnknownError', 'HashMismatch', 'NotTrusted', 'Incompatible')) {
+            # Incomplete/unknown states never satisfy a pinned expectation: the
+            # caller treats a null here as "cannot prove the expected signer".
+            return $null
+        }
+    } catch { }
+    return $null
+}
+
+# Verify the staged executable against a pinned signer thumbprint. Empty
+# expected means the publisher has not enabled pinning yet (legacy behavior:
+# SHA-256 only). Any mismatch aborts the update before the swap.
+function Assert-DevmemSigner($path, $expected) {
+    if (-not $expected) { return }
+    $thumb = Get-DevmemSignerThumbprint $path
+    if (-not $thumb) {
+        throw ('The update is not Authenticode-signed; refusing to install. Expected signer thumbprint: ' + $expected)
+    }
+    if ($thumb -ne $expected) {
+        throw ('The update signer does not match the pinned certificate. Found: ' + $thumb + '; expected: ' + $expected)
+    }
+}
+
 # Antivirus scans and a just-exited image keep the EXE locked briefly (sharing or access denied).
 function Replace-DevmemFile($source, $target, $backup) {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -94,6 +126,7 @@ function Invoke-DevmemUpdate($job) {
         if ((Get-DevmemHash $stagePath) -ne ([string]$job.sha256).ToLowerInvariant()) {
             throw 'Update SHA-256 verification failed.'
         }
+        Assert-DevmemSigner $stagePath ([string]$job.expected_signer)
         Replace-DevmemFile $stagePath $targetPath $backupPath
         $replaced = $true
         # No inherited PyInstaller/launcher variables may point the new process

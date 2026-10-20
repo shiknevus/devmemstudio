@@ -167,6 +167,21 @@ class ConfigTests(unittest.TestCase):
                                                        'selections': {'A': [4096], 'B': list(range(40))},
                                                        'types': {'t': [4]}})
 
+    def test_bare_config_store_falls_back_to_isolated_user_dir_not_repo_root(self):
+        """When the application directory is not writable, a bare ``ConfigStore()``
+        falls back to ``user_data_dir()``.  Under the test runner that directory is
+        the isolated LOCALAPPDATA, so the chosen path must never be the repository
+        root's registers.json (which holds machine credentials)."""
+        from unittest.mock import patch
+        import devmem_studio.core as core
+        root_resident = Path(core.__file__).resolve().parent.parent / "registers.json"
+        unwritable = Path(core.__file__).resolve().parent.parent / "no-such-runtime-dir"
+        with patch("devmem_studio.core.application_dir", return_value=unwritable):
+            store = ConfigStore()
+            resolved = store.path.resolve()
+            self.assertNotEqual(resolved, root_resident.resolve())
+            self.assertFalse(str(resolved).startswith(str(root_resident.resolve())))
+
     def test_basic_category_selection_and_write_cache_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "registers.json")
