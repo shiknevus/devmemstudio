@@ -1445,7 +1445,8 @@ class MainWindow(QMainWindow):
             self.base_field.setProperty("invalid", False)
             restyle(self.base_field)
         self._module_start = start
-        context = ("top", comp["module_type"], bias, base)
+        wiring = comp.get("wiring") or {}
+        context = ("top", comp["module_type"], bias, base, tuple(sorted(wiring.items())))
         self.module_title.setText(f"{self._component_display_name(comp)} · 寄存器映射")
         self.module_badge.setText(comp["module_type"] + ("" if exact else " ≈"))
         self.module_badge.setToolTip("组件类型来自导入的 top；≈ 表示使用通用回退寄存器表")
@@ -1469,6 +1470,9 @@ class MainWindow(QMainWindow):
         for index, reg in enumerate(self.regs):
             reg.update(_address=start + parse_addr(reg["offset"]), _value=None, _updated="", _error="", _readback_failed=False,
                        _row=index, _access_width=access_width(reg), _fmt="H", _source="未读取", _target="")
+            buses = [wiring[port] for port in reg.get("ports") or () if port in wiring]
+            if buses:
+                reg["_wiring"] = "/".join(buses)   # board DI/DO behind this instance's port
             note = meta["notes"].get(reg["name"]) or meta["debug_notes"].get(reg["name"])
             if note:
                 reg["_note"] = note
@@ -1531,7 +1535,8 @@ class MainWindow(QMainWindow):
     def _display_name(reg):
         """Register name plus its real RTL signal, or the wiring state for PARAM slots."""
         if reg.get("signal"):
-            return f'{reg["name"]} · {reg["signal"]}'
+            wiring = f' · {reg["_wiring"]}' if reg.get("_wiring") else ""
+            return f'{reg["name"]} · {reg["signal"]}{wiring}'
         if reg["name"].startswith("PARAM"):
             return f'{reg["name"]} · {"未接线" if reg.get("unwired") else "预留"}'
         return reg["name"]

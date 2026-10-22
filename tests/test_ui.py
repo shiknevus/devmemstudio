@@ -1301,6 +1301,19 @@ class TopImportUiTests(UiTestBase):
         pos = self.window.regs[self.row_of("PARAM1")]
         self.assertEqual(self.window.table.item(pos["_row"], 4).text(), str(pos["_value"]))
 
+    def test_param_rows_append_top_di_do_wiring(self):
+        for item in self.window.type_catalog["types"]["ec_slv_pul_axis"]["registers"]:
+            if item["name"] == "PARAM68":
+                item.update(signal="i_axis_zero/origin", ports=["i_axis_zero"])
+        self.window.active_component["wiring"] = {"i_axis_zero": "~di_mst_msg[0]"}
+        self.window.rebuild_registers()   # wiring is part of the context: no manual reset
+        self.settle(lambda: not self.window._busy)
+        self.window.view_buttons["param"].click()
+        self.settle(lambda: not self.window._busy)
+        self.assertEqual(self.window.table.item(self.row_of("PARAM68"), 0).text(),
+                         "PARAM68 · i_axis_zero/origin · ~di_mst_msg[0]")
+        self.assertNotIn("di_mst_msg", self.window.table.item(self.row_of("PARAM1"), 0).text())
+
     def test_param_rows_show_actual_signal_names(self):
         # Current RTL wires every pulse-axis PARAM; mark one unwired to cover that state.
         for item in self.window.type_catalog["types"]["ec_slv_pul_axis"]["registers"]:

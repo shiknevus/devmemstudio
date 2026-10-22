@@ -206,7 +206,9 @@ def parse_top(text: str) -> dict:
     text = _block_comments_as_line_comments(text)
     headers = list(_HEADER.finditer(text))
     if not headers:
-        return _parse_unheaded(text)
+        result = _parse_unheaded(text)
+        _attach_wiring(text, result["components"])
+        return result
     for position, header in enumerate(headers):
         if position + 1 < len(headers):
             end = headers[position + 1].start()
@@ -306,7 +308,53 @@ def parse_top(text: str) -> dict:
     # hardware is noticed instead of silently debugging the wrong addresses.
     if re.search(r"^\s*`(?:ifdef|ifndef|else|elsif|endif)\b", text, re.M):
         warnings.append("顶层文件含条件编译宏（`ifdef/`endif 等），组件列表可能包含未实际生成的实例，请人工核对。")
+    _attach_wiring(text, components)
     return {"components": components, "warnings": warnings}
+
+
+# Board DI/DO buses: di_mst_msg, di_regoin_msg[_p], do_mst_msg, do_regoin_r_msg[_n] ...
+_IO_BUS = re.compile(r"\b(?:di|do)_\w*msg\w*")
+_TOP_ASSIGN = re.compile(r"\bassign\s+([^=;]+?)\s*=\s*([^;]+?)\s*;")
+_PORT_HOOKUP = re.compile(r"\.\s*([A-Za-z_]\w*)\s*\(")
+_NET = re.compile(r"(~?)([A-Za-z_]\w*)")
+
+
+def _attach_wiring(text: str, components: list[dict]):
+    """comp["wiring"] = {port: "~di_mst_msg[0]"} for ports wired to a board DI/DO bus,
+    directly or through one net (``.o_dri1(o_dri1_74)`` + ``assign do_mst_msg[14] = ~o_dri1_74``)."""
+    wanted = {comp["instance"]: comp for comp in components if not comp["disabled"]}
+    if not wanted:
+        return
+    code = re.sub(r"//[^\n]*", lambda m: " " * len(m.group(0)), text)
+    nets = {}
+    for lhs, rhs in _TOP_ASSIGN.findall(code):
+        lhs, rhs = re.sub(r"\s+", "", lhs), re.sub(r"\s+", "", rhs)
+        driven, source = _NET.fullmatch(rhs), _NET.fullmatch(lhs)
+        if driven and _IO_BUS.fullmatch(lhs.split("[", 1)[0]):
+            nets.setdefault(driven.group(2), driven.group(1) + lhs)   # DO bit <- component output net
+        elif source and not source.group(1) and _IO_BUS.search(rhs):
+            nets.setdefault(lhs, rhs)   # component input net <- DI bit
+    for match in re.finditer(r"\b(ec_\w+)\s*\(", code):
+        comp = wanted.pop(match.group(1), None)
+        if comp is None:
+            continue
+        depth, cursor = 1, match.end()
+        while cursor < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[cursor], 0)
+            cursor += 1
+        ports, wiring = code[match.end():cursor - 1], {}
+        for hookup in _PORT_HOOKUP.finditer(ports):
+            depth, end = 1, hookup.end()
+            while end < len(ports) and depth:
+                depth += {"(": 1, ")": -1}.get(ports[end], 0)
+                end += 1
+            expression = re.sub(r"\s+", "", ports[hookup.end():end - 1])
+            if _IO_BUS.search(expression):
+                wiring[hookup.group(1)] = expression
+            elif expression in nets:
+                wiring[hookup.group(1)] = nets[expression]
+        if wiring:
+            comp["wiring"] = wiring
 
 
 _EC_INSTANCE_HEAD = re.compile(r"\b(ec_\w+)\s*#\s*\(")

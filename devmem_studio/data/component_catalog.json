@@ -264,6 +264,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign1_check"
           ]
         },
         {
@@ -278,6 +281,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign2_check"
           ]
         },
         {
@@ -292,6 +298,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign3_check"
           ]
         },
         {
@@ -306,6 +315,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign4_check"
           ]
         },
         {
@@ -320,6 +332,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign5_check"
           ]
         },
         {
@@ -334,6 +349,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign6_check"
           ]
         },
         {
@@ -348,6 +366,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign7_check"
           ]
         },
         {
@@ -362,6 +383,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign8_check"
           ]
         },
         {
@@ -376,6 +400,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign9_check"
           ]
         },
         {
@@ -390,6 +417,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign10_check"
           ]
         },
         {
@@ -404,6 +434,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign11_check"
           ]
         },
         {
@@ -418,6 +451,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_sign12_check"
           ]
         },
         {
@@ -425,28 +461,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign13_check"
+          "signal": "i_sign13_check",
+          "ports": [
+            "i_sign13_check"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign14_check"
+          "signal": "i_sign14_check",
+          "ports": [
+            "i_sign14_check"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign15_check"
+          "signal": "i_sign15_check",
+          "ports": [
+            "i_sign15_check"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign16_check"
+          "signal": "i_sign16_check",
+          "ports": [
+            "i_sign16_check"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -1512,7 +1560,10 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign1_check"
+          "signal": "i_sign1_check",
+          "ports": [
+            "i_sign1_check"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -1775,14 +1826,20 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos"
+          "signal": "i_pos",
+          "ports": [
+            "i_pos"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri"
+          "signal": "o_dri",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -2045,21 +2102,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -2322,14 +2388,20 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos"
+          "signal": "i_pos",
+          "ports": [
+            "i_pos"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri"
+          "signal": "o_dri",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -2592,21 +2664,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -2869,7 +2950,10 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_sig_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -3139,14 +3223,20 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign1_check"
+          "signal": "i_sign1_check",
+          "ports": [
+            "i_sign1_check"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign2_check"
+          "signal": "i_sign2_check",
+          "ports": [
+            "i_sign2_check"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -3409,21 +3499,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -3686,28 +3785,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -3970,21 +4081,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -4247,28 +4367,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "di_i"
+          "signal": "di_i",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -4531,35 +4663,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos"
+          "signal": "i_pos",
+          "ports": [
+            "i_pos"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_poa"
+          "signal": "i_poa",
+          "ports": [
+            "i_poa"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri"
+          "signal": "o_dri",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -4822,14 +4969,20 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -5092,28 +5245,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri"
+          "signal": "o_dri",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_poa"
+          "signal": "i_poa",
+          "ports": [
+            "i_poa"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -5376,35 +5541,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_poa"
+          "signal": "i_poa",
+          "ports": [
+            "i_poa"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -5667,35 +5847,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos3"
+          "signal": "i_pos3",
+          "ports": [
+            "i_pos3"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -5958,28 +6153,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri"
+          "signal": "o_dri",
+          "ports": [
+            "o_dri"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_poa"
+          "signal": "i_poa",
+          "ports": [
+            "i_poa"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -6242,35 +6449,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_poa"
+          "signal": "i_poa",
+          "ports": [
+            "i_poa"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -6533,35 +6755,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1"
+          "signal": "i_pos1",
+          "ports": [
+            "i_pos1"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2"
+          "signal": "i_pos2",
+          "ports": [
+            "i_pos2"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos3"
+          "signal": "i_pos3",
+          "ports": [
+            "i_pos3"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -6830,28 +7067,40 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "o_led_r"
+          "signal": "o_led_r",
+          "ports": [
+            "o_led_r"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_led_y"
+          "signal": "o_led_y",
+          "ports": [
+            "o_led_y"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_led_g"
+          "signal": "o_led_g",
+          "ports": [
+            "o_led_g"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_bz"
+          "signal": "o_bz",
+          "ports": [
+            "o_bz"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -7124,6 +7373,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_pos1_1"
           ]
         },
         {
@@ -7131,35 +7383,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1_2"
+          "signal": "i_pos1_2",
+          "ports": [
+            "i_pos1_2"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2_1"
+          "signal": "i_pos2_1",
+          "ports": [
+            "i_pos2_1"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2_2"
+          "signal": "i_pos2_2",
+          "ports": [
+            "i_pos2_2"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -7429,6 +7696,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_pos1_1"
           ]
         },
         {
@@ -7436,35 +7706,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos1_2"
+          "signal": "i_pos1_2",
+          "ports": [
+            "i_pos1_2"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2_1"
+          "signal": "i_pos2_1",
+          "ports": [
+            "i_pos2_1"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_pos2_2"
+          "signal": "i_pos2_2",
+          "ports": [
+            "i_pos2_2"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri1"
+          "signal": "o_dri1",
+          "ports": [
+            "o_dri1"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri2"
+          "signal": "o_dri2",
+          "ports": [
+            "o_dri2"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -7734,35 +8019,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign1_check"
+          "signal": "i_sign1_check",
+          "ports": [
+            "i_sign1_check"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign2_check"
+          "signal": "i_sign2_check",
+          "ports": [
+            "i_sign2_check"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign3_check"
+          "signal": "i_sign3_check",
+          "ports": [
+            "i_sign3_check"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign4_check"
+          "signal": "i_sign4_check",
+          "ports": [
+            "i_sign4_check"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_sign5_check"
+          "signal": "i_sign5_check",
+          "ports": [
+            "i_sign5_check"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -8032,6 +8332,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dri1"
           ]
         },
         {
@@ -8046,6 +8349,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dri2"
           ]
         },
         {
@@ -8060,6 +8366,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dri3"
           ]
         },
         {
@@ -8074,6 +8383,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dri4"
           ]
         },
         {
@@ -8088,6 +8400,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dri5"
           ]
         },
         {
@@ -8095,21 +8410,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri6"
+          "signal": "o_dri6",
+          "ports": [
+            "o_dri6"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri7"
+          "signal": "o_dri7",
+          "ports": [
+            "o_dri7"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_dri8"
+          "signal": "o_dri8",
+          "ports": [
+            "o_dri8"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -8407,21 +8731,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limf"
+          "signal": "i_axis_limf",
+          "ports": [
+            "i_axis_limf"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_zero"
+          "signal": "i_axis_zero",
+          "ports": [
+            "i_axis_zero"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb"
+          "signal": "i_axis_limb",
+          "ports": [
+            "i_axis_limb"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -8940,7 +9273,13 @@
           "name": "PARAM16",
           "width": 8,
           "readonly": false,
-          "signal": "o_spdx1/o_spdx2/o_spdx3/o_spdx4"
+          "signal": "o_spdx1/o_spdx2/o_spdx3/o_spdx4",
+          "ports": [
+            "o_spdx1",
+            "o_spdx2",
+            "o_spdx3",
+            "o_spdx4"
+          ]
         },
         {
           "offset": "0x13C",
@@ -9308,21 +9647,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limf"
+          "signal": "i_axis_limf",
+          "ports": [
+            "i_axis_limf"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_zero"
+          "signal": "i_axis_zero",
+          "ports": [
+            "i_axis_zero"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb"
+          "signal": "i_axis_limb",
+          "ports": [
+            "i_axis_limb"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -11929,35 +12277,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_mgs"
+          "signal": "i_mgs",
+          "ports": [
+            "i_mgs"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_dmgs"
+          "signal": "i_dmgs",
+          "ports": [
+            "i_dmgs"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_mag"
+          "signal": "o_mag",
+          "ports": [
+            "o_mag"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "o_demag"
+          "signal": "o_demag",
+          "ports": [
+            "o_demag"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_lock"
+          "signal": "o_lock",
+          "ports": [
+            "o_lock"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -13787,6 +14150,11 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "o_dv_reset",
+            "o_dv_dir",
+            "o_dv_pulse"
           ]
         },
         {
@@ -13794,7 +14162,10 @@
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf/w_soft_lim_f"
+          "signal": "i_axis_limf/w_soft_lim_f",
+          "ports": [
+            "i_axis_limf"
+          ]
         },
         {
           "offset": "0x1B0",
@@ -13808,6 +14179,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_servo_ready"
           ]
         },
         {
@@ -13815,35 +14189,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_servo_done"
+          "signal": "i_servo_done",
+          "ports": [
+            "i_servo_done"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb/w_soft_lim_b"
+          "signal": "i_axis_limb/w_soft_lim_b",
+          "ports": [
+            "i_axis_limb"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_zero/origin"
+          "signal": "i_axis_zero/origin",
+          "ports": [
+            "i_axis_zero"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_dv_alarm"
+          "signal": "i_dv_alarm",
+          "ports": [
+            "i_dv_alarm"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_dv_son"
+          "signal": "o_dv_son",
+          "ports": [
+            "o_dv_son"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -14153,6 +14542,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_stp_x10"
           ]
         },
         {
@@ -14167,6 +14559,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_stp_x100"
           ]
         },
         {
@@ -14181,6 +14576,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_estop"
           ]
         },
         {
@@ -14195,6 +14593,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_pulse_a"
           ]
         },
         {
@@ -14209,6 +14610,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_pulse_b"
           ]
         },
         {
@@ -14237,6 +14641,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_axis_x"
           ]
         },
         {
@@ -14251,6 +14658,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_axis_y"
           ]
         },
         {
@@ -14265,6 +14675,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_axis_z"
           ]
         },
         {
@@ -14279,6 +14692,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_axis_4"
           ]
         },
         {
@@ -14286,7 +14702,10 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_5"
+          "signal": "i_axis_5",
+          "ports": [
+            "i_axis_5"
+          ]
         },
         {
           "offset": "0x1B8",
@@ -14300,21 +14719,30 @@
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_6"
+          "signal": "i_axis_6",
+          "ports": [
+            "i_axis_6"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_7"
+          "signal": "i_axis_7",
+          "ports": [
+            "i_axis_7"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_stp_x1"
+          "signal": "i_stp_x1",
+          "ports": [
+            "i_stp_x1"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -14866,6 +15294,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_open_req_key"
           ]
         },
         {
@@ -14873,35 +15304,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_close_confirm_key"
+          "signal": "i_close_confirm_key",
+          "ports": [
+            "i_close_confirm_key"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_key_light"
+          "signal": "o_key_light",
+          "ports": [
+            "o_key_light"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "o_lock_open"
+          "signal": "o_lock_open",
+          "ports": [
+            "o_lock_open"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_door_monitor"
+          "signal": "i_door_monitor",
+          "ports": [
+            "i_door_monitor"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_lock_monitor"
+          "signal": "i_lock_monitor",
+          "ports": [
+            "i_lock_monitor"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -16239,7 +16685,10 @@
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_axis_limf/w_soft_lim_f"
+          "signal": "i_axis_limf/w_soft_lim_f",
+          "ports": [
+            "i_axis_limf"
+          ]
         },
         {
           "offset": "0x1B0",
@@ -16253,6 +16702,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_servo_ready"
           ]
         },
         {
@@ -16260,21 +16712,30 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_servo_done"
+          "signal": "i_servo_done",
+          "ports": [
+            "i_servo_done"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_limb/w_soft_lim_b"
+          "signal": "i_axis_limb/w_soft_lim_b",
+          "ports": [
+            "i_axis_limb"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_axis_zero/origin"
+          "signal": "i_axis_zero/origin",
+          "ports": [
+            "i_axis_zero"
+          ]
         },
         {
           "offset": "0x1C0",
@@ -16923,70 +17384,100 @@
           "name": "PARAM61",
           "width": 8,
           "readonly": true,
-          "signal": "i_right_far_cage_mat_check"
+          "signal": "i_right_far_cage_mat_check",
+          "ports": [
+            "i_right_far_cage_mat_check"
+          ]
         },
         {
           "offset": "0x1A4",
           "name": "PARAM62",
           "width": 8,
           "readonly": true,
-          "signal": "i_right_hori_overrange"
+          "signal": "i_right_hori_overrange",
+          "ports": [
+            "i_right_hori_overrange"
+          ]
         },
         {
           "offset": "0x1A8",
           "name": "PARAM63",
           "width": 8,
           "readonly": true,
-          "signal": "i_left_near_cage_mat_check"
+          "signal": "i_left_near_cage_mat_check",
+          "ports": [
+            "i_left_near_cage_mat_check"
+          ]
         },
         {
           "offset": "0x1AC",
           "name": "PARAM64",
           "width": 8,
           "readonly": true,
-          "signal": "i_left_far_cage_mat_check"
+          "signal": "i_left_far_cage_mat_check",
+          "ports": [
+            "i_left_far_cage_mat_check"
+          ]
         },
         {
           "offset": "0x1B0",
           "name": "PARAM65",
           "width": 8,
           "readonly": true,
-          "signal": "i_left_hori_overrange"
+          "signal": "i_left_hori_overrange",
+          "ports": [
+            "i_left_hori_overrange"
+          ]
         },
         {
           "offset": "0x1B4",
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_right_near_cage_mat_cher"
+          "signal": "i_right_near_cage_mat_cher",
+          "ports": [
+            "i_right_near_cage_mat_cher"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_mat_arr"
+          "signal": "i_mat_arr",
+          "ports": [
+            "i_mat_arr"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_left_verti_overrange"
+          "signal": "i_left_verti_overrange",
+          "ports": [
+            "i_left_verti_overrange"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_height_overrange"
+          "signal": "i_height_overrange",
+          "ports": [
+            "i_height_overrange"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_right_verti_overrange"
+          "signal": "i_right_verti_overrange",
+          "ports": [
+            "i_right_verti_overrange"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -17678,6 +18169,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_start"
           ]
         },
         {
@@ -17685,35 +18179,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "i_stop"
+          "signal": "i_stop",
+          "ports": [
+            "i_stop"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "i_rst"
+          "signal": "i_rst",
+          "ports": [
+            "i_rst"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_estop"
+          "signal": "i_estop",
+          "ports": [
+            "i_estop"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_manul"
+          "signal": "i_manul",
+          "ports": [
+            "i_manul"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "i_auto"
+          "signal": "i_auto",
+          "ports": [
+            "i_auto"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -17983,6 +18492,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_close_arr"
           ]
         },
         {
@@ -17997,6 +18509,9 @@
               "low": 0,
               "width": 1
             }
+          ],
+          "ports": [
+            "i_open_arr"
           ]
         },
         {
@@ -18004,35 +18519,50 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "o_claw_unlock"
+          "signal": "o_claw_unlock",
+          "ports": [
+            "o_claw_unlock"
+          ]
         },
         {
           "offset": "0x1B8",
           "name": "PARAM67",
           "width": 1,
           "readonly": true,
-          "signal": "o_claw_press"
+          "signal": "o_claw_press",
+          "ports": [
+            "o_claw_press"
+          ]
         },
         {
           "offset": "0x1BC",
           "name": "PARAM68",
           "width": 1,
           "readonly": true,
-          "signal": "i_material_arr"
+          "signal": "i_material_arr",
+          "ports": [
+            "i_material_arr"
+          ]
         },
         {
           "offset": "0x1C0",
           "name": "PARAM69",
           "width": 1,
           "readonly": true,
-          "signal": "i_airtight_arr"
+          "signal": "i_airtight_arr",
+          "ports": [
+            "i_airtight_arr"
+          ]
         },
         {
           "offset": "0x1C4",
           "name": "PARAM70",
           "width": 1,
           "readonly": true,
-          "signal": "o_claw_blow"
+          "signal": "o_claw_blow",
+          "ports": [
+            "o_claw_blow"
+          ]
         },
         {
           "offset": "0x1EC",
@@ -18576,7 +19106,10 @@
           "name": "PARAM66",
           "width": 1,
           "readonly": true,
-          "signal": "do_o"
+          "signal": "do_o",
+          "ports": [
+            "o_sig_dri"
+          ]
         },
         {
           "offset": "0x1EC",

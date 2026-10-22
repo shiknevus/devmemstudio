@@ -374,7 +374,7 @@ def harvest_type_notes(top_path: Path) -> dict:
 
 
 def iter_declarations(body: str):
-    """(modifiers, packed dims, names) per declaration in comment-free source.
+    """(keyword + modifiers, packed dims, names) per declaration in comment-free source.
 
     A name list runs across lines up to ';', the port list's ')' or the next
     declaration keyword (ANSI ports: input [7:0] a, b, input c)."""
@@ -399,7 +399,7 @@ def iter_declarations(body: str):
             name = re.match(r"\s*([A-Za-z_]\w*)", piece)
             if name and name.group(1) not in DECLARATION_KEYWORDS:
                 names.append(name.group(1))
-        yield head.group(1).split(), re.findall(r"\[[^\]]*\]", head.group(2)), names
+        yield head.group(0).split()[:1] + head.group(1).split(), re.findall(r"\[[^\]]*\]", head.group(2)), names
         position = max(cursor, head.end())
 
 
@@ -425,6 +425,122 @@ def harvest_signal_widths(text: str) -> dict[str, int | None]:
         for key in names:
             widths[key] = width if widths.get(key, width) == width else None
     return widths
+
+
+ASSIGN = re.compile(r"\bassign\s+([^=;]+?)\s*=\s*([^;]+?)\s*;")
+_PLAIN_REF = re.compile(r"^~?\s*([A-Za-z_]\w*)\s*(?:\[\s*(\d+)\s*\])?$")
+_SIGNAL_REF = re.compile(r"\b([A-Za-z_]\w*)\b(?:\s*\[\s*(\d+)\s*\])?")
+
+
+def module_ports(body: str) -> set[str]:
+    """input/output/inout names of the module(s) in comment-free source."""
+    return {name for modifiers, _, names in iter_declarations(body)
+            if modifiers[0] in ("input", "output", "inout") for name in names}
+
+
+def _plain_refs(expression: str) -> list[tuple[str, int | None]] | None:
+    """(name, bit) per element of a plain alias (one ref or a concat of refs, MSB first); None otherwise."""
+    expression = expression.strip()
+    parts = (split_top_level(expression[1:-1]) if expression.startswith("{") and expression.endswith("}")
+             else [expression])
+    refs = []
+    for part in parts:
+        match = _PLAIN_REF.match(part.strip())
+        if not match:
+            return None
+        refs.append((match.group(1), int(match.group(2)) if match.group(2) else None))
+    return refs
+
+
+def _select_bit(refs: list, bit: int | None, widths: dict) -> list[tuple[str, int | None]]:
+    """Element(s) of a concat carrying `bit`; all of them when bit is None."""
+    if bit is None:
+        return refs
+    if len(refs) == 1:
+        name, own = refs[0]
+        return [(name, bit if own is None else own)]
+    cursor = 0
+    for name, own in reversed(refs):
+        width = 1 if own is not None else widths.get(name)
+        if not width:
+            return []
+        if cursor <= bit < cursor + width:
+            return [(name, own if own is not None else (bit - cursor if width > 1 else None))]
+        cursor += width
+    return []
+
+
+def wired_ports(expression: str, ports: set[str], assigns: list, widths: dict) -> list[str]:
+    """Module ports behind a hookup expression, following plain assign aliases
+    (``assign di_i = i_pos`` / ``assign {o_dri2, o_dri1} = do_o``) only."""
+    found: list[str] = []
+    visited: set = set()
+
+    def trace(name: str, bit: int | None, depth: int):
+        if (name, bit) in visited:
+            return
+        visited.add((name, bit))
+        if name in ports:
+            if name not in found:
+                found.append(name)
+            return
+        if depth >= 4:
+            return
+        def same(refs):
+            return len(refs) == 1 and refs[0][0] == name and (refs[0][1] is None or bit in (None, refs[0][1]))
+
+        for lhs, rhs, two_way in assigns:
+            if same(lhs):
+                targets = _select_bit(rhs, bit if lhs[0][1] is None else None, widths)   # name driven by rhs
+            elif two_way and same(rhs):
+                targets = _select_bit(lhs, bit if rhs[0][1] is None else None, widths)   # name drives lhs
+            else:
+                continue
+            for target, target_bit in targets:
+                trace(target, target_bit, depth + 1)
+
+    for name, bit in _SIGNAL_REF.findall(SIZED_LITERAL.sub(" ", expression)):
+        trace(name, int(bit) if bit else None, 0)
+    return found
+
+
+NET_DECL_ASSIGN = re.compile(r"\b(?:wire|logic)\b((?:\s+(?:signed|unsigned)\b)?\s*(?:\[[^\]]*\]\s*)*)([^;]*=[^;]*);")
+
+
+def _ternary_branches(expression: str) -> list[str] | None:
+    """[a, b] of ``cond ? a : b`` (single level); None for anything else."""
+    if expression.count("?") != 1:
+        return None
+    rest, depth = expression.split("?", 1)[1], 0
+    for index, character in enumerate(rest):
+        depth += 1 if character in "[{(" else -1 if character in "]})" else 0
+        if character == ":" and not depth:
+            return [rest[:index], rest[index + 1:]]
+    return None
+
+
+def plain_assigns(body: str) -> list[tuple[list, list]]:
+    """(lhs refs, rhs refs, two_way) per plain alias in comment-free source: continuous
+    assigns and net declaration assigns (``wire a = b[3]``).  Each ``c ? x : y`` branch
+    is a one-way entry: traced from lhs to its drivers, never back."""
+    pairs = list(ASSIGN.findall(body))
+    for _, declared in NET_DECL_ASSIGN.findall(body):
+        for piece in split_top_level(declared):
+            if "=" in piece:
+                pairs.append(tuple(piece.split("=", 1)))
+    result = []
+    for lhs, rhs in pairs:
+        left = _plain_refs(lhs)
+        if not left:
+            continue
+        right = _plain_refs(rhs)
+        if right:
+            result.append((left, right, True))
+            continue
+        for branch in _ternary_branches(rhs) or []:
+            if (right := _plain_refs(branch)):
+                result.append((left, right, False))
+    return result
 
 
 def element_width(element: str, widths: dict | None = None) -> int | None:
@@ -580,7 +696,13 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     wired = set(param_hookups)
     debug_hookups = dict(port_hookups(top_body, DEBUG_HEAD))
     signed_names = harvest_signed_signals(top_file.parent)
+    ports, assigns = module_ports(top_body), plain_assigns(top_body)
     for item in registers:
+        if item["name"].startswith("PARAM") and item["name"][5:] in param_hookups:
+            # Component ports behind the register: the top import maps them to board DI/DO.
+            reached = wired_ports(param_hookups[item["name"][5:]], ports, assigns, widths)
+            if reached:
+                item["ports"] = reached
         signal = signals.get(item["name"])
         if signal:
             item["signal"] = signal

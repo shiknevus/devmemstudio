@@ -454,6 +454,23 @@ ec_b_2
         self.assertEqual([(c["instance"], c["bias"]) for c in info["components"]],
                          [("ec_x_1", 0x1000)])
 
+    def test_instance_ports_map_to_board_di_do(self):
+        text = ("module top;\n"
+                "wire o_dri1_74;\n"
+                "// --- flow_comp_74 --A0029_驱动---\n"
+                "ec_1di_2do\n#( .REG_SPACE_BIAS ( 20'd11776) )\nec_1di_2do_74\n(\n"
+                "  .clk_i ( clk ), .o_st_rd_data ( sub_comp_rd_dat[19] )\n"
+                "  ,.i_pos ( ~di_mst_msg[38] )   // 到位\n"
+                "  ,.i_pob ( di_regoin_msg[1][5] )\n"
+                "  ,.o_dri1 ( o_dri1_74 )\n"
+                "//,.i_zero ( ~di_mst_msg[3] )\n"
+                ");\n"
+                "assign do_mst_msg[14] = ~o_dri1_74;\n"
+                "endmodule\n")
+        comp = top_import.parse_top(text)["components"][0]
+        self.assertEqual(comp["wiring"], {"i_pos": "~di_mst_msg[38]", "i_pob": "di_regoin_msg[1][5]",
+                                          "o_dri1": "~do_mst_msg[14]"})
+
 
 class ComponentsParamTests(unittest.TestCase):
     def test_locates_param_file_and_base_address(self):

@@ -464,6 +464,27 @@ class ComponentFolderTests(unittest.TestCase):
                              ["o_rst", "i_error", "o_fwd"])
             self.assertEqual([f["low"] for f in registers["DEBUG_REG3"]["fields"]], [2, 1, 0])  # path order: pl_exe_io before pl_ps_exe
 
+    def test_param_ports_follow_plain_aliases(self):
+        from devmem_studio import component_parse as cp
+        body = cp.strip_comments(
+            "module t(input i_pos, input i_raw, input i_x1, input i_x10, output o_dri1, output o_dri2, input i_cfg);\n"
+            " wire di_i; wire [1:0] do_o; reg [1:0] sim;\n"
+            " assign {o_dri2,o_dri1} = do_o;\n assign di_i = i_pos;\n"
+            " wire [1:0] di_raw = {i_x1, i_x10};\n wire [1:0] di_eff = sim_en ? sim : di_raw;\n"
+            " wire w_x1 = di_eff[1], w_x10 = di_eff[0];\n"
+            " assign w_mix = i_cfg & i_raw;\nendmodule\n")
+        ports, assigns = cp.module_ports(body), cp.plain_assigns(body)
+        widths = cp.harvest_signal_widths(body)
+        trace = lambda expression: cp.wired_ports(expression, ports, assigns, widths)
+        self.assertEqual(trace("di_i"), ["i_pos"])
+        self.assertEqual(trace("do_o[0]"), ["o_dri1"])
+        self.assertEqual(trace("do_o[1]"), ["o_dri2"])
+        self.assertEqual(trace("{19'd0,w_x10}"), ["i_x10"])   # through the sim mux's raw branch
+        self.assertEqual(trace("w_x1"), ["i_x1"])
+        self.assertEqual(trace("{7'd0, i_pos | w_soft}"), ["i_pos"])
+        self.assertEqual(trace("w_mix"), [])   # logic, not an alias: no port claimed
+        self.assertEqual(trace("rcfg_spd_max"), [])
+
     def test_concat_fields_use_declared_widths(self):
         widths = gen.harvest_signal_widths(
             "module t(input [8:0] a_addr, input [31:0] b_data);\n"
