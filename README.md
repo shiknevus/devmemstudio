@@ -1,10 +1,10 @@
-# 寄存器调试工作台 5.5.10
+# 寄存器调试工作台 5.6.0
 
 Auth：szzhang / cgliu / bxli
 
 面向 FPGA / ARM 的 EMCC60 主板的寄存器调试工作台。以控件为中心：导入 RTL 顶层文件后直接选择组件调试，寄存器表精确到组件类型。
 
-当前发布包：**`DevmemStudio-5.5.10-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.5.10**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.5.10 验收记录](docs/VALIDATION_5.5.10.md)。
+当前发布包：**`DevmemStudio-5.6.0-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.6.0**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.6.0 验收记录](docs/VALIDATION_5.6.0.md)。
 
 <div align="center">
 
@@ -12,7 +12,7 @@ Auth：szzhang / cgliu / bxli
 | --- | --- |
 | 下载后的运行与升级 | [直接运行 EXE](#直接运行-exe) |
 | 连接板卡、导入 top、调试寄存器 | [使用流程](#使用流程) |
-| 查看本次变化 | [5.5.10 发布](#5510-发布2026-10-24) |
+| 查看本次变化 | [5.6.0 发布](#560-发布2026-10-24) |
 | 查找更早版本的变化 | [变更记录](docs/CHANGELOG.md) |
 | 找配置、缓存或日志 | [配置与日志](#配置与日志) |
 | 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
@@ -20,7 +20,7 @@ Auth：szzhang / cgliu / bxli
 
 </div>
 
-## 5.5.10 发布（2026-10-24）
+## 5.6.0 发布（2026-10-24）
 
 - **单文件启动器并行解压 + 启动提示窗**：运行库各压缩块由各自的线程解压并按块独立校验 SHA-256，随后多个线程并行写出文件；解压期间立即显示「首次运行，正在准备运行环境…」提示，其他启动超过 1 秒仍未出现主窗口时显示「正在启动…」，主窗口（或错误框）出现即自动关闭提示。
 - **任务栏折叠多窗口**：主窗口与打开的子窗口在任务栏合并为一个工作台图标（折叠显示），悬停或单击图标后选择缩略图即可恢复对应窗口；最小化的窗口不再单独占任务栏标签，关闭/恢复后标签状态即时同步。
@@ -95,11 +95,11 @@ Auth：szzhang / cgliu / bxli
 
 ## 直接运行 EXE
 
-解压 **`DevmemStudio-5.5.10-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用；解压期间立即显示「首次运行，正在准备运行环境…」提示，其他启动超过 1 秒仍未出现主窗口时显示「正在启动…」，主窗口出现即自动关闭。
+解压 **`DevmemStudio-5.6.0-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用；解压期间立即显示「首次运行，正在准备运行环境…」提示，其他启动超过 1 秒仍未出现主窗口时显示「正在启动…」，主窗口出现即自动关闭。
 
 可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
 
-从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.5.10**。之后可通过底部“检查更新”在线升级。
+从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.6.0**。之后可通过底部“检查更新”在线升级。
 
 本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
@@ -196,7 +196,7 @@ Auth：szzhang / cgliu / bxli
 - 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
 - EXE 构建及隔离验收：PyInstaller 生成 `build/dist/_runtime/`，封装为候选 `build/DevmemStudio.exe`，再单独复制候选 EXE 到隔离目录，验证首次解压、损坏缓存修复和旧缓存清理。
 
-三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.5.10-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
+三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.6.0-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
 
 <div align="center">
 
@@ -290,7 +290,7 @@ Copy-Item -LiteralPath build\DevmemStudio.exe -Destination dist\DevmemStudio.exe
 
 ## 验证范围
 
-当前 **5.5.10** 构建及验收证据见 [5.5.10 验收记录](docs/VALIDATION_5.5.10.md)。此前的测试与实板验证见 [5.5.9 验收记录](docs/VALIDATION_5.5.9.md)、[5.5.8 验收记录](docs/VALIDATION_5.5.8.md)、[5.5.7 验收记录](docs/VALIDATION_5.5.7.md)、[5.5.6 验收记录](docs/VALIDATION_5.5.6.md)、[5.5.5 验收记录](docs/VALIDATION_5.5.5.md)、[5.5.4 验收记录](docs/VALIDATION_5.5.4.md)、[5.5.3 验收记录](docs/VALIDATION_5.5.3.md)、[5.5.2 验收记录](docs/VALIDATION_5.5.2.md)、[5.5.1 验收记录](docs/VALIDATION_5.5.1.md) 与 [5.5.0 验收记录](docs/VALIDATION_5.5.0.md)。
+当前 **5.6.0** 构建及验收证据见 [5.6.0 验收记录](docs/VALIDATION_5.6.0.md)。此前的测试与实板验证见 [5.5.9 验收记录](docs/VALIDATION_5.5.9.md)、[5.5.8 验收记录](docs/VALIDATION_5.5.8.md)、[5.5.7 验收记录](docs/VALIDATION_5.5.7.md)、[5.5.6 验收记录](docs/VALIDATION_5.5.6.md)、[5.5.5 验收记录](docs/VALIDATION_5.5.5.md)、[5.5.4 验收记录](docs/VALIDATION_5.5.4.md)、[5.5.3 验收记录](docs/VALIDATION_5.5.3.md)、[5.5.2 验收记录](docs/VALIDATION_5.5.2.md)、[5.5.1 验收记录](docs/VALIDATION_5.5.1.md) 与 [5.5.0 验收记录](docs/VALIDATION_5.5.0.md)。
 
 - 核心与交互回归：原始寄存器定义逐项比对、字段解析、地址与数值校验、配置恢复、异常操作及关闭行为。
 - 本机真实 SSH 回环测试：Paramiko 加密连接、读写回读、命令失败退出码、超时失效、断线检测、独立日志通道和分片 UTF-8 输出。
