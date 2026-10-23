@@ -2830,6 +2830,7 @@ class MainWindow(QMainWindow):
         if self.bit_rollback_dialog is None:
             self.bit_rollback_dialog = BitRollbackDialog(self, self.cfg["bit_remote_dirs"], self.cfg["bit_remote_dir"])
             self.bit_rollback_dialog.rollback_requested.connect(self._start_bit_rollback)
+            self.bit_rollback_dialog.download_requested.connect(self._start_bit_download)
             self.bit_rollback_dialog.remote_dir_changed.connect(self._bit_rollback_dir_changed)
         self.bit_rollback_dialog.set_reset()
         self.bit_rollback_dialog.present()
@@ -2908,6 +2909,7 @@ class MainWindow(QMainWindow):
         dialog.set_busy(True)
         dialog.set_reset()
         dialog.status.setText(f"正在回退到 {backup_name} …")
+        self._bit_last_paint = 0.0
 
         def task(progress):
             session.rollback_bit(backup_name, remote_dir,
@@ -2950,7 +2952,77 @@ class MainWindow(QMainWindow):
             return
         current, total = data.get("current", 0), data.get("total", 100)
         percent = min(100, int(current * 100 / total)) if total > 0 else 0
+        now = time.monotonic()
+        if percent < 100 and now - self._bit_last_paint < 0.1:
+            return   # SFTP download callbacks: same ~10 Hz throttle as _bit_progress
+        self._bit_last_paint = now
         self.bit_rollback_dialog.set_percent(percent)
+
+    @staticmethod
+    def _bit_download_name(backup_name, bitname="sunny_fpga.bit"):
+        """sunny_fpga.bit_20260918010203 -> sunny_fpga_20260918_010203.bit (keeps .bit for re-upload)."""
+        stamp = backup_name[len(bitname) + 1:] if backup_name.startswith(bitname + "_") else ""
+        if re.fullmatch(r"\d{14}", stamp):
+            stamp = f"{stamp[:8]}_{stamp[8:]}"
+        stamp = re.sub(r'[<>:"/\\|?*\s]', "_", stamp)
+        stem = Path(bitname).stem
+        return f"{stem}_{stamp}.bit" if stamp else f"{stem}.bit"
+
+    def _start_bit_download(self, backup_name):
+        if self._closing or self._busy or not self.connected:
+            return
+        dialog = self.bit_rollback_dialog
+        if not dialog:
+            return
+        remote_dir = dialog.listed_dir() or self.cfg["bit_remote_dir"]
+        remote_path = f"{remote_dir.rstrip('/')}/{backup_name}"
+        local_dir = self.cfg.get("bit_local_dir", "")
+        default_path = str(Path(local_dir) / self._bit_download_name(backup_name)) if local_dir \
+            else self._bit_download_name(backup_name)
+        path, _ = QFileDialog.getSaveFileName(dialog, "保存 bit 到本地", default_path,
+                                              "bit 文件 (*.bit);;所有文件 (*)")
+        if not path or self._closing or self._busy or not self.connected:
+            return
+        self._remember_bit_local_dir(str(Path(path).parent))
+        session = self.session
+        dialog.set_busy(True)
+        dialog.set_reset()
+        dialog.status.setText(f"正在下载 {backup_name} …")
+        self._bit_last_paint = 0.0
+
+        def task(progress):
+            session.download_file(remote_path, path,
+                                  progress=lambda done, total: progress({"current": done, "total": total}))
+            return path
+
+        def done(result):
+            if self._closing or not dialog:
+                return
+            dialog.set_done()
+            dialog.status.setText(f"已下载：{remote_path} -> {result}")
+            self.append_log("SUCCESS", f"bit 下载完成：{remote_path} -> {result}")
+
+        def failed(message):
+            if self._closing or not dialog:
+                return
+            dialog.set_reset()
+            dialog.status.setText("下载失败：" + message)
+            self.append_log("ERROR", f"bit 下载失败：{message}")
+
+        def finished():
+            if self._side_task_finished():
+                dialog.set_busy(False)
+
+        worker = Worker(task)
+        worker.signals.result.connect(done)
+        worker.signals.failed.connect(failed)
+        worker.signals.progress.connect(self._rollback_progress)
+        worker.signals.finished.connect(finished)
+        self._active_worker = worker
+        self._busy = True
+        self._task_kind = "download"
+        self._refresh_controls()
+        self.pool.start(worker)
 
     def download_board_log(self):
         if self._closing or not self.connected or self._busy:

@@ -139,6 +139,23 @@ class BitRollbackDialogTests(unittest.TestCase):
         self.assertFalse(live.flags() & Qt.ItemIsEnabled, "当前版本不可作为回退目标")
         self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit_20260914120000")
 
+    def test_download_button_follows_selection_and_busy(self):
+        dialog = BitRollbackDialog()
+        self.assertFalse(dialog.download_button.isEnabled())
+        dialog.populate([{"name": "sunny_fpga.bit", "timestamp": None},
+                         {"name": "sunny_fpga.bit_20260914120000", "timestamp": "20260914120000"}], "")
+        self.assertTrue(dialog.download_button.isEnabled())
+        requested = []
+        dialog.download_requested.connect(requested.append)
+        dialog.download_button.click()
+        self.assertEqual(requested, ["sunny_fpga.bit_20260914120000"])
+        dialog.set_busy(True)
+        self.assertFalse(dialog.download_button.isEnabled())
+        dialog.start_download()   # busy: ignored
+        self.assertEqual(len(requested), 1)
+        dialog.populate([], "")
+        self.assertFalse(dialog.download_button.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

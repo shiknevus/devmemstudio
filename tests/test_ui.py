@@ -1413,6 +1413,40 @@ class TopImportUiTests(UiTestBase):
                                               "sunny_fpga.bit_20260918000000")))   # new aside backup
         self.assertIn("回退完成", " ".join(message for _, _, message in self.window.log_records_system))
 
+    def test_bit_rollback_downloads_selected_backup(self):
+        sda = self.window.session.remote_root / "run" / "media" / "sda"
+        sda.mkdir(parents=True, exist_ok=True)
+        (sda / "sunny_fpga.bit").write_bytes(b"\x00" * 100)
+        (sda / "sunny_fpga.bit_20260916000000").write_bytes(b"\x01" * 100)
+        (sda / "sunny_fpga.bit_20260918010203").write_bytes(b"\x02" * 300)
+        self.window.bit_rollback_button.click()
+        self.settle(lambda: self.window.bit_rollback_dialog and
+                    not self.window._busy and self.window.bit_rollback_dialog.list.count() == 3)
+        dialog = self.window.bit_rollback_dialog
+        target = Path(self.temp.name) / "saved" / "picked.bit"
+        target.parent.mkdir()
+        with patch("devmem_studio.window.QFileDialog.getSaveFileName",
+                   return_value=(str(target), "")) as save, \
+                patch("devmem_studio.window.QMessageBox.question") as question:
+            dialog.download_button.click()
+            self.settle(lambda: not self.window._busy)
+        question.assert_not_called()   # non-destructive: no board confirmation
+        self.assertTrue(save.call_args.args[2].endswith("sunny_fpga_20260918_010203.bit"))
+        self.assertEqual(target.read_bytes(), b"\x02" * 300)
+        self.assertEqual(sorted(p.name for p in sda.iterdir() if p.name.startswith("sunny_fpga.bit")),
+                         ["sunny_fpga.bit", "sunny_fpga.bit_20260916000000",
+                          "sunny_fpga.bit_20260918010203"])   # board side untouched
+        self.assertEqual(self.window.cfg["bit_local_dir"], str(target.parent))
+        self.assertEqual(dialog.progress.value(), 100)
+        self.assertTrue(dialog.download_button.isEnabled())
+        self.assertIn("bit 下载完成", " ".join(message for _, _, message in self.window.log_records_system))
+
+    def test_bit_download_name_keeps_bit_suffix(self):
+        name = MainWindow._bit_download_name
+        self.assertEqual(name("sunny_fpga.bit_20260918010203"), "sunny_fpga_20260918_010203.bit")
+        self.assertEqual(name("sunny_fpga.bit_hand:written"), "sunny_fpga_hand_written.bit")
+        self.assertEqual(name("sunny_fpga.bit"), "sunny_fpga.bit")
+
     def test_bit_rollback_cancel_leaves_files_untouched(self):
         sda = self.window.session.remote_root / "run" / "media" / "sda"
         sda.mkdir(parents=True, exist_ok=True)

@@ -1,10 +1,10 @@
-# 寄存器调试工作台 5.5.8
+# 寄存器调试工作台 5.5.9
 
 Auth：szzhang / cgliu / bxli
 
 面向 FPGA / ARM 的 EMCC60 主板的寄存器调试工作台。以控件为中心：导入 RTL 顶层文件后直接选择组件调试，寄存器表精确到组件类型。
 
-当前发布包：**`DevmemStudio-5.5.8-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.5.8**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.5.8 验收记录](docs/VALIDATION_5.5.8.md)。
+当前发布包：**`DevmemStudio-5.5.9-win64.zip`**，内含单文件 `DevmemStudio/DevmemStudio.exe`。应用版本和 Windows 文件/产品版本均为 **5.5.9**。5.2.0 起加入 GitHub 在线升级，使用和发布步骤见 [在线升级说明](docs/GITHUB_UPDATES.md)，构建结果及联网验证边界见 [5.5.9 验收记录](docs/VALIDATION_5.5.9.md)。
 
 <div align="center">
 
@@ -12,13 +12,19 @@ Auth：szzhang / cgliu / bxli
 | --- | --- |
 | 下载后的运行与升级 | [直接运行 EXE](#直接运行-exe) |
 | 连接板卡、导入 top、调试寄存器 | [使用流程](#使用流程) |
-| 查看本次变化 | [5.5.8 发布](#558-发布2026-10-22) |
+| 查看本次变化 | [5.5.9 发布](#559-发布2026-10-23) |
 | 查找更早版本的变化 | [变更记录](docs/CHANGELOG.md) |
 | 找配置、缓存或日志 | [配置与日志](#配置与日志) |
 | 开发、测试与生成发布包 | [使用当前 venv 开发](#使用当前-venv-开发)、[重新打包](#重新打包) |
 | 排查启动、监视或构建问题 | [常见问题](#常见问题) |
 
 </div>
+
+## 5.5.9 发布（2026-10-23）
+
+- **「回退bit」新增「下载到本地」**：在备份列表选择某个版本，点「下载到本地」即可把该版本保存到本机，板端文件保持不变。
+- 自动生成便于再次上传的文件名：`sunny_fpga.bit_20260918010203` → `sunny_fpga_20260918_010203.bit`（保留 `.bit` 后缀可直接用于「上传bit」）；记住上次选择的下载目录；进度条显示下载进度；非破坏性操作无需板端确认。
+- 5.5.8 的变更见下方说明。
 
 ## 5.5.8 发布（2026-10-22）
 
@@ -80,11 +86,11 @@ Auth：szzhang / cgliu / bxli
 
 ## 直接运行 EXE
 
-解压 **`DevmemStudio-5.5.8-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
+解压 **`DevmemStudio-5.5.9-win64.zip`**，双击 **`DevmemStudio/DevmemStudio.exe`**（本地构建路径为 `dist/DevmemStudio.exe`）。这是 Windows x64 单文件程序，已包含 Python、Qt、SSH 加密库、HTTPS 库及所需运行库，无需安装 Python 或配置 venv，也不需要任何附带文件夹。每个版本首次启动会把运行库解压到 `%LOCALAPPDATA%\DevmemStudio\runtime\`，之后直接复用。
 
 可复制这个 EXE 到其他目录或电脑使用。程序首次保存设置时会在 EXE 旁生成 `registers.json`。如果要沿用本机设备设置，可自行将项目中的 `registers.json` 放到 EXE 旁边；该文件可能包含保存的密码。发布包使用空白设备配置，不含本机设备凭据。
 
-从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.5.8**。之后可通过底部“检查更新”在线升级。
+从 5.1.0 或更早版本升级：先关闭正在运行的程序，保留原 `registers.json`，再将新 EXE 放到原目录（5.2.1 起可直接在线升级）。用户目录中的主机指纹、组件覆盖定义及日志仍沿用原位置。文件属性的「详细信息」中，文件版本和产品版本应均为 **5.5.9**。之后可通过底部“检查更新”在线升级。
 
 本次产物已在当前 Windows 10 x64 系统上验收：EXE 被单独复制到独立目录，PATH 仅保留 Windows 系统目录，清除了 Python / venv 环境变量，并使用空的 `LOCALAPPDATA`；依次验证首次解压运行、缓存损坏后自动修复、旧版本缓存自动清理。
 
@@ -93,7 +99,7 @@ Auth：szzhang / cgliu / bxli
 1. 左栏「设备连接」卡片：点 SSH 行展开，填写主板地址、端口、用户名和密码，点该行右侧「连接」（或在输入框中按 Enter）。设备端需要 SSH、可用的 shell 和 `devmem` 命令。需要串口控制台时，点 serial 行展开，选本机端口与波特率后连接，终端自动切到 `serial` 实时显示板卡输出（连接时不向板卡发送任何字符，不会误打断 U-Boot 倒计时）。填写了串口用户名/密码时，出现 `login:` 提示会自动登录；留空则在终端里手动输入。SSH 与 serial 两条连接相互独立、可同时在线，各行的状态圆点分别显示状态，串口线拔出会立即断开并提示；参数保存过之后，下次打开直接点该行「连接」即可。Esc 可取消正在进行的连接。
 2. 连接前点击左侧「导入 top」，选择工程文件夹，软件在该文件夹及子目录中找出包含 `ec_` 控件的 top（如 `emcc_mix_top.sv`），先在列表中列出路径、控件数量和修改时间，只有一个结果也列出；选择后再确认导入。组件目录按类型列出全部组件（可按设备名 / 类型 / 地址搜索，禁用组件灰色），点击组件即加载该类型的精确寄存器表并自动读取。基地址自动取自 `components_param.vh`。
 3. 用「基础 / A通道 / B通道 / C通道 / 中断 / 参数 / 调试 / 全部」页签切换视图。选中寄存器后右侧显示完整地址、HEX / DEC、位状态及字段解析，并沿用上次的「写入设置 / 解析与位状态」（只读寄存器仍显示解析页）。在「写入设置」编辑数值或选预设，点击「写入并回读」。「批量写入」先预览再执行。点筛选栏「监视」打开寄存器监视窗口，设置采样间隔（1–60000 ms，默认 5 ms）并勾选最多 64 个寄存器后点「开始监视」，在板端连续采样并绘制曲线，可放置 A/B 标记测量时间差、导出 ZIP / CSV（需已连接 SSH）。aarch64 常驻采样支持 1 ms；回退到 `devmem` 循环时会自动把低于 5 ms 的请求调整为 5 ms。
-4. 本地发布包：点「打包bit」，选择或拖入 `.bit`，填写项目号并确认输出目录，点「开始打包」；无需连接设备，源文件保留。「上传bit」选择文件、选择文件夹（自动查找其下 `.bit`，多个时列表选择）或拖入 `*.bit`（严格校验后缀，非 bit 文件提示「选中文件不是bit文件」），在「板端目录」下拉选择上传目录（默认 `/run/media/sda`，自动列出板端 `/run/media` 下的挂载目录，也可直接输入；记住上次使用的目录），上传前确认文件路径、日期与目标位置，确认后先传为 `sunny_fpga.bit.uploading`，传完再把旧文件备份为 `sunny_fpga.bit_时间戳` 并换入为 `sunny_fpga.bit`（传输失败时板端原 bit 不受影响）；「回退bit」列出所选板端目录下的时间戳备份，选择后当前 bit 先备份、所选版本恢复为 `sunny_fpga.bit`；「下载log」把板端 `sunny.log` 保存到本地。
+4. 本地发布包：点「打包bit」，选择或拖入 `.bit`，填写项目号并确认输出目录，点「开始打包」；无需连接设备，源文件保留。「上传bit」选择文件、选择文件夹（自动查找其下 `.bit`，多个时列表选择）或拖入 `*.bit`（严格校验后缀，非 bit 文件提示「选中文件不是bit文件」），在「板端目录」下拉选择上传目录（默认 `/run/media/sda`，自动列出板端 `/run/media` 下的挂载目录，也可直接输入；记住上次使用的目录），上传前确认文件路径、日期与目标位置，确认后先传为 `sunny_fpga.bit.uploading`，传完再把旧文件备份为 `sunny_fpga.bit_时间戳` 并换入为 `sunny_fpga.bit`（传输失败时板端原 bit 不受影响）；「回退bit」列出所选板端目录下的时间戳备份，选择后当前 bit 先备份、所选版本恢复为 `sunny_fpga.bit`，也可点「下载到本地」把所选版本另存为 `sunny_fpga_时间戳.bit`（板端文件不变）；「下载log」把板端 `sunny.log` 保存到本地。
 5. 会话终端：来源选 `ssh` 时在终端底部 `❯` 提示行输入 shell 命令，`←`/`→` 在行内移动光标，Tab 补全命令或板端路径，`↑`/`↓` 翻历史，回车执行。来源选 `serial` 时终端就是串口控制台：板卡自发的打印实时显示，按键逐个直发板卡（Tab 补全、历史由板端 shell 处理），无选中文字时 Ctrl+C 发送中断、Ctrl+V 粘贴发送；进 U-Boot 时在倒计时期间按住 Shift+7，或先勾选工具栏「U-Boot」再重启/上电。来源为 `tail log` 时查看板端 `sunny.log` 实时流（SSH 连上后自动后台打印），`system` 查看软件自身运行日志。点击「查找日志」随输随查，Ctrl+F 填充选中文字。点击「导出」保存当前终端内容。
 6. RTL 组件内部修改后点「更新控件」，选择该组件文件夹（或上级目录批量导入），先列出组件目录、类型和寄存器定义文件，只有一个结果也列出。默认全选，可点击行取消不需要的组件；点击「选择」后仅解析所选组件，再确认导入。重新解析的寄存器定义立即生效并持久化到本机；取消列表不会解析或导入组件。
 
@@ -181,7 +187,7 @@ Auth：szzhang / cgliu / bxli
 - 源码离线验收：保存检查报告与截图到 `artifacts/build-smoke/`。
 - EXE 构建及隔离验收：PyInstaller 生成 `build/dist/_runtime/`，封装为候选 `build/DevmemStudio.exe`，再单独复制候选 EXE 到隔离目录，验证首次解压、损坏缓存修复和旧缓存清理。
 
-三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.5.8-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
+三个任务全部通过后才复制候选 EXE 到 `dist/DevmemStudio.exe`，并生成 **`dist/DevmemStudio-5.5.9-win64.zip`** 和同名 **`.zip.sha256`** 校验文件。测试、源码验收或 EXE 验收失败时保留原 `dist` 产物，显示失败阶段日志的末尾；完整日志见下表。发布 ZIP 仅含 `DevmemStudio/DevmemStudio.exe`。
 
 <div align="center">
 
@@ -275,7 +281,7 @@ Copy-Item -LiteralPath build\DevmemStudio.exe -Destination dist\DevmemStudio.exe
 
 ## 验证范围
 
-当前 **5.5.8** 构建及验收证据见 [5.5.8 验收记录](docs/VALIDATION_5.5.8.md)。此前的测试与实板验证见 [5.5.7 验收记录](docs/VALIDATION_5.5.7.md)、[5.5.6 验收记录](docs/VALIDATION_5.5.6.md)、[5.5.5 验收记录](docs/VALIDATION_5.5.5.md)、[5.5.4 验收记录](docs/VALIDATION_5.5.4.md)、[5.5.3 验收记录](docs/VALIDATION_5.5.3.md)、[5.5.2 验收记录](docs/VALIDATION_5.5.2.md)、[5.5.1 验收记录](docs/VALIDATION_5.5.1.md) 与 [5.5.0 验收记录](docs/VALIDATION_5.5.0.md)。
+当前 **5.5.9** 构建及验收证据见 [5.5.9 验收记录](docs/VALIDATION_5.5.9.md)。此前的测试与实板验证见 [5.5.8 验收记录](docs/VALIDATION_5.5.8.md)、[5.5.7 验收记录](docs/VALIDATION_5.5.7.md)、[5.5.6 验收记录](docs/VALIDATION_5.5.6.md)、[5.5.5 验收记录](docs/VALIDATION_5.5.5.md)、[5.5.4 验收记录](docs/VALIDATION_5.5.4.md)、[5.5.3 验收记录](docs/VALIDATION_5.5.3.md)、[5.5.2 验收记录](docs/VALIDATION_5.5.2.md)、[5.5.1 验收记录](docs/VALIDATION_5.5.1.md) 与 [5.5.0 验收记录](docs/VALIDATION_5.5.0.md)。
 
 - 核心与交互回归：原始寄存器定义逐项比对、字段解析、地址与数值校验、配置恢复、异常操作及关闭行为。
 - 本机真实 SSH 回环测试：Paramiko 加密连接、读写回读、命令失败退出码、超时失效、断线检测、独立日志通道和分片 UTF-8 输出。
