@@ -36,10 +36,14 @@ def release_window_owner(hwnd):
     it covers the main window, and activating the main window cannot reveal it.
     """
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    set_long = user32.SetWindowLongPtrW
+    get_long, set_long = user32.GetWindowLongPtrW, user32.SetWindowLongPtrW
+    get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+    get_long.restype = ctypes.c_ssize_t
+    if not get_long(wintypes.HWND(hwnd), -8):   # GWLP_HWNDPARENT
+        return   # already unowned: skip the frame-changing SetWindowPos (an extra repaint per state change)
     set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
     set_long.restype = ctypes.c_ssize_t
-    set_long(wintypes.HWND(hwnd), -8, 0)   # GWLP_HWNDPARENT
+    set_long(wintypes.HWND(hwnd), -8, 0)
     user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                     ctypes.c_int, ctypes.c_int, wintypes.UINT]
     user32.SetWindowPos.restype = wintypes.BOOL
@@ -73,20 +77,19 @@ def _with_taskbar(action):
             ctypes.windll.ole32.CoUninitialize()
 
 
-def hide_taskbar_tab(hwnd):
-    """Keep a real, independently minimizable window without another taskbar tab."""
-    return _with_taskbar(lambda taskbar: _method(taskbar, 5, wintypes.HWND)(taskbar, wintypes.HWND(hwnd)) == 0)
+def sync_taskbar_tabs(shown, hidden=()):
+    """One tab per shown window; same-app tabs fold into one taskbar button.
 
-
-def select_taskbar_tab(hwnd, other_hwnds):
-    """Expose only the target window; Windows restores that exact HWND on click."""
-    def select(taskbar):
-        remove = _method(taskbar, 5, wintypes.HWND)
-        for other in other_hwnds:
-            if other != hwnd and remove(taskbar, wintypes.HWND(other)):
-                return False
-        return _method(taskbar, 4, wintypes.HWND)(taskbar, wintypes.HWND(hwnd)) == 0
-    return _with_taskbar(select)
+    Hidden windows never get a tab: a tab added to a hidden window outlives it."""
+    def apply(taskbar):
+        add, remove = _method(taskbar, 4, wintypes.HWND), _method(taskbar, 5, wintypes.HWND)
+        ok = True
+        for hwnd in hidden:
+            ok = remove(taskbar, wintypes.HWND(hwnd)) == 0 and ok
+        for hwnd in shown:
+            ok = add(taskbar, wintypes.HWND(hwnd)) == 0 and ok
+        return ok
+    return _with_taskbar(apply)
 
 
 class _Guid(ctypes.Structure):

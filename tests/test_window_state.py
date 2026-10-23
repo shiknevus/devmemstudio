@@ -105,6 +105,45 @@ class WindowStateTests(unittest.TestCase):
         self.settle()
         self.assertFalse(child.isVisible())
 
+    def assert_centred_on_owner(self, dialog):
+        offset = self.owner.geometry().center() - dialog.geometry().center()
+        self.assertLessEqual(abs(offset.x()) + abs(offset.y()), 60, (offset, dialog.geometry()))   # Qt's frame estimate
+
+    def test_first_present_centres_even_with_an_early_native_window(self):
+        self.owner.resize(500, 400)
+        self.owner.move(100, 100)
+        self.settle()
+        dialog = ManagedDialog(self.owner)
+        dialog.resize(300, 200)
+        dialog.winId()   # created before the first present, like BitPackDialog
+        dialog.present(activate=False)
+        self.settle()
+        self.assert_centred_on_owner(dialog)   # was pinned at (0, 0): top-left of the screen
+        self.assertEqual(dialog.size().toTuple(), (300, 200))
+        dialog.move(150, 160)
+        self.settle()
+        dialog.close()
+        self.settle()
+        dialog.present(activate=False)
+        self.settle()
+        self.assertEqual(dialog.pos().toTuple(), (150, 160))   # a reopened window keeps its own place
+
+    def test_first_present_while_owner_minimized_is_centred_on_restore(self):
+        self.owner.resize(500, 400)
+        self.owner.move(100, 100)
+        self.settle()
+        self.owner.showMinimized()
+        self.settle()
+        dialog = ManagedDialog(self.owner)
+        dialog.resize(300, 200)
+        dialog.winId()
+        dialog.present(activate=False)
+        self.settle()
+        self.owner.showNormal()
+        self.settle()
+        self.assertTrue(dialog.isVisible())
+        self.assert_centred_on_owner(dialog)
+
     def test_present_while_owner_minimized_waits_for_owner_restore(self):
         self.owner.showMinimized()
         self.settle()
@@ -171,7 +210,11 @@ class WindowStateTests(unittest.TestCase):
         self.settle()
         self.assertEqual(observations, [(False, True, True)])
 
-    def test_taskbar_targets_the_last_minimized_child_and_native_restore_preserves_maximized_state(self):
+    def tabs(self):
+        shown, hidden = self.owner._window_states._taskbar_tabs()
+        return set(shown), set(hidden)
+
+    def test_minimized_children_keep_folded_tabs_and_native_restore_preserves_maximized_state(self):
         first, last = self.dialog(), self.dialog()
         first.showMinimized()
         self.settle()
@@ -179,38 +222,35 @@ class WindowStateTests(unittest.TestCase):
         self.settle()
         last.showMinimized()
         self.settle()
-        states = self.owner._window_states
-        self.assertIs(states.last_minimized, last)
-        self.assertIs(states._taskbar_target(), last)
-        # Windows acts on the represented child directly; no command is redirected.
+        # Every window keeps its own tab; Windows folds them into one app button.
+        self.assertEqual(self.tabs(), ({self.owner, first, last}, set()))
         last.present(activate=False)
         self.settle()
         self.assertTrue(first.isMinimized())
         self.assertFalse(last.isMinimized())
         self.assertTrue(last.isMaximized())
 
-    def test_owner_is_the_restore_target_when_minimized_last(self):
+    def test_minimized_owner_is_the_only_tab_until_restored(self):
         child = self.dialog()
         child.showMinimized()
         self.settle()
         self.owner.showMinimized()
         self.settle()
-        states = self.owner._window_states
-        self.assertIs(states.last_minimized, self.owner)
-        self.assertIs(states._taskbar_target(), self.owner)
+        self.assertEqual(self.tabs(), ({self.owner}, {child}))
         self.owner.showNormal()
         self.settle()
         self.assertFalse(self.owner.isMinimized())
         self.assertTrue(child.isMinimized())
+        self.assertEqual(self.tabs(), ({self.owner, child}, set()))
 
-    def test_closed_last_minimized_child_is_not_restored(self):
+    def test_closed_minimized_child_loses_its_tab(self):
         child = self.dialog()
         child.showMinimized()
         self.settle()
         child.close()
         self.settle()
-        self.assertFalse(self.owner._window_states.restore_last_minimized())
         self.assertFalse(child.isVisible())
+        self.assertEqual(self.tabs(), ({self.owner}, {child}))
 
     def test_owner_activation_never_restores_a_minimized_child(self):
         child = self.dialog()
@@ -220,7 +260,7 @@ class WindowStateTests(unittest.TestCase):
         QApplication.sendEvent(self.owner, QEvent(QEvent.WindowActivate))
         self.settle()
         self.assertTrue(child.isMinimized())
-        self.assertIs(self.owner._window_states._taskbar_target(), child)
+        self.assertEqual(self.tabs(), ({self.owner, child}, set()))
 
     def test_minimizing_owner_after_child_is_never_intercepted(self):
         child = self.dialog()
@@ -231,9 +271,9 @@ class WindowStateTests(unittest.TestCase):
         QTest.qWait(180)
         self.assertTrue(self.owner.isMinimized())
         self.assertFalse(child.isVisible())
-        self.assertIs(self.owner._window_states._taskbar_target(), self.owner)
+        self.assertEqual(self.tabs(), ({self.owner}, {child}))
 
-    def test_closing_or_destroying_last_minimized_child_keeps_previous_target(self):
+    def test_closing_or_destroying_minimized_child_keeps_other_tabs(self):
         first, last = self.dialog(), self.dialog()
         first.showMinimized()
         self.settle()
@@ -241,35 +281,32 @@ class WindowStateTests(unittest.TestCase):
         self.settle()
         last.close()
         self.settle()
-        states = self.owner._window_states
-        self.assertIs(states._taskbar_target(), first)
+        self.assertEqual(self.tabs(), ({self.owner, first}, {last}))
         first.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.settle()
-        self.assertIs(states._taskbar_target(), self.owner)
-        self.assertIsNone(states.last_minimized)
+        self.assertEqual(self.tabs(), ({self.owner}, {last}))
 
     def test_repeated_main_and_child_restore_cycles_keep_geometry_and_no_auto_restore(self):
         child = self.dialog()
         geometry = child.geometry()
-        states = self.owner._window_states
         for _ in range(4):
             child.showMinimized()
             self.settle()
-            self.assertIs(states._taskbar_target(), child)
+            self.assertEqual(self.tabs(), ({self.owner, child}, set()))
             self.owner.showMinimized()
             self.settle()
-            self.assertIs(states._taskbar_target(), self.owner)
+            self.assertEqual(self.tabs(), ({self.owner}, {child}))
             self.owner.showNormal()
             self.settle()
             self.assertTrue(child.isMinimized())
-            self.assertIs(states._taskbar_target(), child)
+            self.assertEqual(self.tabs(), ({self.owner, child}, set()))
             child.present(activate=False)
             self.settle()
             self.assertEqual(child.geometry(), geometry)
             self.assertFalse(child.isMinimized())
 
-    def test_ignored_close_keeps_minimized_child_as_taskbar_target(self):
+    def test_ignored_close_keeps_minimized_child_tab(self):
         class BusyDialog(ManagedDialog):
             def closeEvent(inner, event):
                 event.ignore()
@@ -282,18 +319,9 @@ class WindowStateTests(unittest.TestCase):
         child.close()
         self.settle()
         self.assertTrue(child.isMinimized())
-        self.assertIs(self.owner._window_states._taskbar_target(), child)
+        self.assertIn(child, self.tabs()[0])
 
-    def test_pending_restore_does_not_reopen_a_child_closed_before_callback(self):
-        child = self.dialog()
-        child.showMinimized()
-        self.settle()
-        QTimer.singleShot(0, self.owner._window_states.restore_last_minimized)
-        child.close()
-        self.settle()
-        self.assertFalse(child.isVisible())
-
-    def test_close_during_owner_restore_does_not_leave_a_closed_taskbar_target(self):
+    def test_close_during_owner_restore_does_not_leave_a_closed_child_tab(self):
         child = self.dialog()
         child.showMinimized()
         self.settle()
@@ -303,7 +331,7 @@ class WindowStateTests(unittest.TestCase):
         QTimer.singleShot(0, child.close)
         self.settle()
         self.assertFalse(child.isVisible())
-        self.assertIs(self.owner._window_states._taskbar_target(), self.owner)
+        self.assertEqual(self.tabs(), ({self.owner}, {child}))
 
     def test_maximized_owner_saves_and_restores_its_normal_size(self):
         normal = self.owner.size()

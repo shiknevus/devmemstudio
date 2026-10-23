@@ -294,6 +294,8 @@ def divider(name="divider"):
 
 
 def restyle(widget):
+    if not widget.testAttribute(Qt.WA_WState_Polished):
+        return   # never polished: the first polish reads the new property (each polish is ~4 ms of QSS)
     widget.style().unpolish(widget)
     widget.style().polish(widget)
     widget.update()

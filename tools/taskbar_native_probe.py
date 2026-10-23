@@ -41,11 +41,12 @@ def main():
     checks = []
 
     # Maximized probes stay invisible and do not take keyboard or mouse input.
+    # WS_EX_APPWINDOW keeps NOACTIVATE probes shell-tracked: no ghost tab after exit.
     for window in (owner, child):
         window.setAttribute(Qt.WA_ShowWithoutActivating, True)
         hwnd = wintypes.HWND(int(window.winId()))
         style = user32.GetWindowLongPtrW(hwnd, -20)
-        user32.SetWindowLongPtrW(hwnd, -20, style | 0x00080000 | 0x00000020 | 0x08000000)
+        user32.SetWindowLongPtrW(hwnd, -20, style | 0x00080000 | 0x00000020 | 0x08000000 | 0x00040000)
         user32.SetLayeredWindowAttributes(hwnd, 0, 0, 2)
     owner.show()
     child.present(activate=False)
@@ -80,8 +81,8 @@ def main():
             QApplication.sendEvent(owner, QEvent(QEvent.WindowActivate))
             settle()
             check(child.isMinimized(), f"cycle {cycle}: owner activation leaves child minimized")
-            check(states._taskbar_key and states._taskbar_key[0] == int(child.winId()),
-                  f"cycle {cycle}: taskbar represents minimized child")
+            check(states._taskbar_key and set(states._taskbar_key[0]) == {int(owner.winId()), int(child.winId())},
+                  f"cycle {cycle}: minimized child keeps its folded tab beside owner")
             native_restore(child)
         owner.showMaximized()
         child.showMaximized()
@@ -104,8 +105,9 @@ def main():
             owner.showMinimized()
             settle()
             check(owner.isMinimized() and not child.isVisible(), f"cycle {cycle}: owner minimize")
-            check(states._taskbar_key and states._taskbar_key[0] == int(owner.winId()),
-                  f"cycle {cycle}: taskbar represents minimized owner")
+            check(states._taskbar_key and states._taskbar_key[0] == (int(owner.winId()),)
+                  and int(child.winId()) in states._taskbar_key[1],
+                  f"cycle {cycle}: taskbar keeps only the minimized owner")
             native_restore(owner)
             check(not owner.isMinimized() and child.isMinimized(), f"cycle {cycle}: native owner restore preserves child state")
             native_restore(child)
@@ -114,7 +116,8 @@ def main():
         child.close()
         settle()
         check(not child.isVisible(), "closed child stays closed")
-        check(states._taskbar_key and states._taskbar_key[0] == int(owner.winId()), "taskbar returns to owner on close")
+        check(states._taskbar_key and states._taskbar_key[0] == (int(owner.winId()),)
+              and int(child.winId()) in states._taskbar_key[1], "closed child leaves the folded button")
         print(json.dumps({"platform": app.platformName(), "checks": checks}))
     finally:
         child.close()

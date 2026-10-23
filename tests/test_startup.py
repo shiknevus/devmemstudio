@@ -78,8 +78,8 @@ class TaskbarIdentityTests(unittest.TestCase):
             self.assertEqual(values[taskbar.RELAUNCH_COMMAND], f'"{launcher}"')
             self.assertEqual(values[taskbar.RELAUNCH_NAME], "DevmemStudio")
             self.assertEqual(values[taskbar.RELAUNCH_ICON], f"{launcher},0")
-            self.assertTrue(taskbar.hide_taskbar_tab(hwnd))
-            self.assertTrue(taskbar.select_taskbar_tab(hwnd, []))
+            self.assertTrue(taskbar.sync_taskbar_tabs([hwnd]))
+            self.assertTrue(taskbar.sync_taskbar_tabs([], [hwnd]))   # end tab-less: no ghost button
         finally:
             user32.DestroyWindow(hwnd)
 

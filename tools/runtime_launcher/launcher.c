@@ -162,19 +162,46 @@ typedef struct {
     unsigned char *packed;
     unsigned char *raw;
     DWORD packed_size, raw_size;
+    const unsigned char *sha256;
     int ok;
 } Block;
 
+/* Unpacks and verifies one block; the blocks run in parallel. */
 static DWORD WINAPI inflate(LPVOID context)
 {
     Block *block = context;
     DECOMPRESSOR_HANDLE decompressor = NULL;
     SIZE_T size = 0;
+    unsigned char digest[32];
     block->ok = CreateDecompressor(COMPRESS_ALGORITHM_LZMS, NULL, &decompressor)
              && Decompress(decompressor, block->packed, block->packed_size, block->raw, block->raw_size, &size)
-             && size == block->raw_size;
+             && size == block->raw_size
+             && sha256(block->raw, block->raw_size, digest) && !memcmp(digest, block->sha256, 32);
     if (decompressor)
         CloseDecompressor(decompressor);
+    return 0;
+}
+
+#define WRITERS 4
+
+typedef struct {
+    const wchar_t *staging;
+    const unsigned char *raw;
+    const size_t *offsets;
+    volatile LONG next, failed;
+} Writer;
+
+/* Writers take the next file in turn: per-file create/close costs (and on-close scans) overlap. */
+static DWORD WINAPI write_files(LPVOID context)
+{
+    Writer *job = context;
+    for (LONG i; !job->failed && (i = InterlockedIncrement(&job->next) - 1) < RUNTIME_FILE_COUNT;) {
+        wchar_t *path = join(job->staging, runtime_files[i].path);
+        if (!path || !make_parents(job->staging, runtime_files[i].path)
+            || !write_file(path, job->raw + job->offsets[i], runtime_files[i].size))
+            InterlockedExchange(&job->failed, 1);
+        free(path);
+    }
     return 0;
 }
 
@@ -193,7 +220,8 @@ static int extract(HINSTANCE instance, const wchar_t *staging)
     HANDLE threads[RUNTIME_BLOCK_COUNT] = {0};
     size_t packed_at = 0, raw_at = 0;
     for (size_t i = 0; i < RUNTIME_BLOCK_COUNT; ++i) {
-        blocks[i] = (Block){packed + packed_at, raw + raw_at, runtime_blocks[i].packed, runtime_blocks[i].raw, 0};
+        blocks[i] = (Block){packed + packed_at, raw + raw_at, runtime_blocks[i].packed, runtime_blocks[i].raw,
+                            runtime_blocks[i].sha256, 0};
         packed_at += runtime_blocks[i].packed;
         raw_at += runtime_blocks[i].raw;
     }
@@ -215,14 +243,25 @@ static int extract(HINSTANCE instance, const wchar_t *staging)
             WaitForSingleObject(threads[i], INFINITE);
             CloseHandle(threads[i]);
         }
-    unsigned char digest[32];
-    ok = ok && sha256(raw, RUNTIME_RAW_SIZE, digest) && !memcmp(digest, runtime_sha256, 32);
+    static size_t offsets[RUNTIME_FILE_COUNT];
     size_t offset = 0;
-    for (size_t i = 0; ok && i < RUNTIME_FILE_COUNT; ++i) {
-        wchar_t *path = join(staging, runtime_files[i].path);
-        ok = path && make_parents(staging, runtime_files[i].path) && write_file(path, raw + offset, runtime_files[i].size);
-        free(path);
+    for (size_t i = 0; i < RUNTIME_FILE_COUNT; ++i) {
+        offsets[i] = offset;
         offset += runtime_files[i].size;
+    }
+    ok = ok && offset == RUNTIME_RAW_SIZE;
+    if (ok) {
+        Writer job = {staging, raw, offsets, 0, 0};
+        HANDLE writers[WRITERS] = {0};
+        for (size_t i = 0; i < WRITERS; ++i)
+            writers[i] = CreateThread(NULL, 0, write_files, &job, 0, NULL);   /* NULL: the others (or this thread) carry on */
+        write_files(&job);
+        for (size_t i = 0; i < WRITERS; ++i)
+            if (writers[i]) {
+                WaitForSingleObject(writers[i], INFINITE);
+                CloseHandle(writers[i]);
+            }
+        ok = !job.failed;
     }
     VirtualFree(raw, 0, MEM_RELEASE);
     return ok;
@@ -253,6 +292,21 @@ static void remove_tree(const wchar_t *path)
         FindClose(search);
     }
     RemoveDirectoryW(path);
+}
+
+#define MOVE_PATIENCE 5000ULL   /* ms */
+
+/* No directory renames while a file inside is open: on-access scans hold fresh files for a moment. */
+static int move_directory(const wchar_t *from, const wchar_t *to)
+{
+    ULONGLONG until = GetTickCount64() + MOVE_PATIENCE;
+    while (!MoveFileExW(from, to, 0)) {
+        DWORD error = GetLastError();
+        if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || GetTickCount64() >= until)
+            return 0;
+        Sleep(25);
+    }
+    return 1;
 }
 
 /* Old versions and leftovers: a runtime still in use holds open files, so its rename fails and it stays. */
@@ -308,6 +362,171 @@ static HANDLE app_job(void)
     return job;
 }
 
+/* Splash: shown at once while unpacking, else only if the app has no window after SPLASH_DELAY
+   (a warm start shows its own window in ~0.6 s). The title stays empty: tools look for "DevmemStudio" windows. */
+#define SPLASH_DELAY 1000
+#define SPLASH_TIMEOUT 60000ULL
+
+static HANDLE splash_done, splash_now, splash_thread;
+static HINSTANCE splash_instance;
+static volatile LONG splash_unpacking;
+
+static UINT window_dpi(HWND window)
+{
+    typedef UINT (WINAPI *DpiForWindow)(HWND);
+    DpiForWindow dpi_for = (DpiForWindow)(void (*)(void))GetProcAddress(GetModuleHandleW(L"user32"), "GetDpiForWindow");
+    UINT dpi = dpi_for ? dpi_for(window) : 0;
+    if (!dpi) {
+        HDC screen = GetDC(NULL);
+        dpi = (UINT)GetDeviceCaps(screen, LOGPIXELSY);
+        ReleaseDC(NULL, screen);
+    }
+    return dpi ? dpi : 96;
+}
+
+static HFONT splash_font(UINT dpi, int points, int weight)
+{
+    return CreateFontW(-MulDiv(points, (int)dpi, 72), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+}
+
+static LRESULT CALLBACK splash_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message != WM_PAINT)
+        return message == WM_MOUSEACTIVATE ? MA_NOACTIVATE : DefWindowProcW(window, message, wparam, lparam);
+    PAINTSTRUCT paint;
+    HDC dc = BeginPaint(window, &paint);
+    RECT box;
+    GetClientRect(window, &box);
+    UINT dpi = window_dpi(window);
+    int unit = MulDiv(1, (int)dpi, 96), pad = MulDiv(18, (int)dpi, 96), glyph = MulDiv(32, (int)dpi, 96);
+    HBRUSH fill = CreateSolidBrush(RGB(0xFF, 0xFF, 0xFF)), edge = CreateSolidBrush(RGB(0xD5, 0xDE, 0xE7)),
+           accent = CreateSolidBrush(RGB(0x24, 0x63, 0xDC));
+    FillRect(dc, &box, fill);
+    FrameRect(dc, &box, edge);
+    RECT bar = {box.left, box.top, box.left + 3 * unit, box.bottom};
+    FillRect(dc, &bar, accent);
+    HICON logo = LoadImageW(splash_instance, MAKEINTRESOURCEW(101), IMAGE_ICON, glyph, glyph, 0);
+    if (logo) {
+        DrawIconEx(dc, pad, (box.bottom - glyph) / 2, logo, glyph, glyph, 0, NULL, DI_NORMAL);
+        DestroyIcon(logo);
+    }
+    HFONT title = splash_font(dpi, 11, FW_SEMIBOLD), note = splash_font(dpi, 9, FW_NORMAL);
+    SetBkMode(dc, TRANSPARENT);
+    int left = pad + glyph + MulDiv(14, (int)dpi, 96), middle = box.bottom / 2;
+    RECT upper = {left, box.top, box.right - pad, middle + unit}, lower = {left, middle + 3 * unit, box.right - pad, box.bottom};
+    HGDIOBJ previous = SelectObject(dc, title);
+    SetTextColor(dc, RGB(0x23, 0x37, 0x4A));
+    DrawTextW(dc, L"DevmemStudio " RUNTIME_VERSION, -1, &upper, DT_SINGLELINE | DT_BOTTOM | DT_NOPREFIX);
+    SelectObject(dc, note);
+    SetTextColor(dc, RGB(0x6F, 0x82, 0x95));
+    DrawTextW(dc, splash_unpacking ? L"首次运行，正在准备运行环境…" : L"正在启动…", -1, &lower,
+              DT_SINGLELINE | DT_TOP | DT_NOPREFIX | DT_END_ELLIPSIS);
+    SelectObject(dc, previous);
+    DeleteObject(title);
+    DeleteObject(note);
+    DeleteObject(fill);
+    DeleteObject(edge);
+    DeleteObject(accent);
+    EndPaint(window, &paint);
+    return 0;
+}
+
+static DWORD WINAPI splash_main(LPVOID unused)
+{
+    (void)unused;
+    HANDLE waits[2] = {splash_done, splash_now};
+    if (WaitForMultipleObjects(2, waits, FALSE, SPLASH_DELAY) == WAIT_OBJECT_0)
+        return 0;   /* the app showed a window, or the launcher stopped, before the delay */
+    WNDCLASSEXW type = {sizeof type, CS_DROPSHADOW, splash_proc, 0, 0, splash_instance, NULL,
+                        LoadCursorW(NULL, IDC_APPSTARTING), NULL, NULL, L"DevmemStudioLauncherSplash", NULL};
+    POINT cursor = {0, 0};
+    GetCursorPos(&cursor);
+    MONITORINFO monitor = {sizeof monitor, {0, 0, 0, 0}, {0, 0, 0, 0}, 0};
+    if (!RegisterClassExW(&type) || !GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &monitor))
+        return 0;
+    const RECT *work = &monitor.rcWork;
+    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, type.lpszClassName, L"", WS_POPUP,
+                                  work->left, work->top, 1, 1, NULL, NULL, splash_instance, NULL);
+    if (!window)
+        return 0;
+    UINT dpi = window_dpi(window);   /* placed on the target monitor first, so this is its DPI */
+    int width = MulDiv(340, (int)dpi, 96), height = MulDiv(82, (int)dpi, 96);
+    SetWindowPos(window, NULL, (work->left + work->right - width) / 2, (work->top + work->bottom - height) / 2,
+                 width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(window, SW_SHOWNOACTIVATE);
+    UpdateWindow(window);
+    LONG painted = splash_unpacking;
+    while (MsgWaitForMultipleObjects(1, &splash_done, FALSE, 100, QS_ALLINPUT) != WAIT_OBJECT_0) {
+        MSG message;
+        while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE))
+            DispatchMessageW(&message);
+        if (painted != splash_unpacking) {
+            painted = splash_unpacking;
+            InvalidateRect(window, NULL, FALSE);
+        }
+    }
+    DestroyWindow(window);
+    return 0;
+}
+
+static void splash_start(HINSTANCE instance, const wchar_t *arguments)
+{
+    if (wcsstr(arguments, L"--smoke-test") || wcsstr(arguments, L"--offscreen"))
+        return;   /* acceptance runs stay windowless */
+    splash_instance = instance;
+    splash_done = CreateEventW(NULL, TRUE, FALSE, NULL);
+    splash_now = CreateEventW(NULL, TRUE, FALSE, NULL);
+    splash_thread = splash_done && splash_now ? CreateThread(NULL, 0, splash_main, NULL, 0, NULL) : NULL;
+}
+
+static void splash_stage(int unpacking)
+{
+    InterlockedExchange(&splash_unpacking, unpacking);
+    if (unpacking && splash_now)
+        SetEvent(splash_now);   /* unpacking takes long: show now rather than after the delay */
+}
+
+static void splash_stop(void)
+{
+    if (!splash_thread)
+        return;
+    SetEvent(splash_done);
+    WaitForSingleObject(splash_thread, 2000);
+    CloseHandle(splash_thread);
+    splash_thread = NULL;
+}
+
+typedef struct {
+    DWORD process;
+    int found;
+} Seek;
+
+static BOOL CALLBACK seek_window(HWND window, LPARAM context)
+{
+    Seek *seek = (Seek *)context;
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    if (process == seek->process && IsWindowVisible(window)) {
+        seek->found = 1;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Keep the splash until the app shows any window of its own (main window or an error box), exits, or times out. */
+static void splash_until_window(HANDLE process, DWORD id)
+{
+    Seek seek = {id, 0};
+    ULONGLONG until = GetTickCount64() + SPLASH_TIMEOUT;
+    while (splash_thread && WaitForSingleObject(process, 25) == WAIT_TIMEOUT && GetTickCount64() < until) {
+        EnumWindows(seek_window, (LPARAM)&seek);
+        if (seek.found)
+            break;
+    }
+    splash_stop();
+}
+
 static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_code)
 {
     static wchar_t self[PATH_CAP];
@@ -348,6 +567,7 @@ static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_co
             }
             AllowSetForegroundWindow(process.dwProcessId);
             CloseHandle(process.hThread);
+            splash_until_window(process.hProcess, process.dwProcessId);
             WaitForSingleObject(process.hProcess, INFINITE);
             if (!GetExitCodeProcess(process.hProcess, exit_code))
                 *exit_code = 1;
@@ -370,6 +590,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     HANDLE mutex = NULL;
     int owned = 0;
     DWORD exit_code = 3;
+    splash_start(instance, arguments);
     if (!appdata || !(top = join(appdata, L"DevmemStudio")) || !(base = join(top, L"runtime")))
         goto done;
     problem = L"无法创建运行库缓存目录 %LOCALAPPDATA%\\DevmemStudio\\runtime。";
@@ -384,18 +605,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     owned = 1;
     if (!lock_runtime(root)) {
         problem = L"解压运行库失败。请确认磁盘空间充足、用户目录可写；必要时删除 %LOCALAPPDATA%\\DevmemStudio\\runtime 后重试。";
-        if (!(staging = sibling(base, RUNTIME_ID, L"tmp")) || !extract(instance, staging)) {
+        splash_stage(1);
+        int unpacked = (staging = sibling(base, RUNTIME_ID, L"tmp")) && extract(instance, staging);
+        splash_stage(0);
+        if (!unpacked) {
             if (staging)
                 remove_tree(staging);
             goto done;
         }
         if (GetFileAttributesW(root) != INVALID_FILE_ATTRIBUTES
-            && (!(aside = sibling(base, RUNTIME_ID, L"old")) || !MoveFileExW(root, aside, 0))) {
+            && (!(aside = sibling(base, RUNTIME_ID, L"old")) || !move_directory(root, aside))) {
             free(root);   /* a damaged copy still in use: run the fresh extraction where it is */
             root = staging;
             staging = NULL;
         }
-        if (staging && !MoveFileExW(staging, root, 0)) {
+        if (staging && !move_directory(staging, root)) {
             free(root);
             root = staging;
             staging = NULL;
@@ -416,6 +640,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
     const wchar_t *leaf = wcsrchr(root, L'\\');
     sweep(base, leaf ? leaf + 1 : root);
 done:
+    splash_stop();
     if (owned)
         ReleaseMutex(mutex);
     if (mutex)

@@ -71,6 +71,47 @@ def _refresh_restored_window(widget):
         widget.windowHandle().requestUpdate()
 
 
+def fill_grown_client(widget, msg):
+    """WM_WINDOWPOSCHANGED records the client's screen rect; WM_ERASEBKGND then paints
+    everything the window gained beyond it in the window colour.
+
+    Qt ignores the erase, so DWM shows that area black until the first full-size
+    frame is flushed (a busy monitor chart takes hundreds of ms after maximize).
+    Windows keeps the old client bits at their screen position, so only the strips
+    around them are filled."""
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32")
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    client, origin = wintypes.RECT(), wintypes.POINT(0, 0)
+    if not user32.GetClientRect(msg.hWnd, ctypes.byref(client)) or not user32.ClientToScreen(msg.hWnd, ctypes.byref(origin)):
+        return
+    if msg.message == 0x0047:   # WM_WINDOWPOSCHANGED
+        widget._client_on_screen = (origin.x, origin.y, client.right, client.bottom)
+        return
+    old = getattr(widget, "_client_on_screen", None)
+    if old is None or not msg.wParam:
+        return
+    left, top = old[0] - origin.x, old[1] - origin.y
+    right, bottom = left + old[2], top + old[3]
+    upper, lower = max(top, 0), min(bottom, client.bottom)
+    strips = [wintypes.RECT(*box) for box in ((0, 0, client.right, top), (0, bottom, client.right, client.bottom),
+                                               (0, upper, left, lower), (right, upper, client.right, lower))
+              if min(box[2], client.right) > max(box[0], 0) and min(box[3], client.bottom) > max(box[1], 0)]
+    if not strips:
+        return
+    gdi32 = ctypes.WinDLL("gdi32")
+    user32.FillRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT), ctypes.c_void_p]
+    gdi32.CreateSolidBrush.restype = ctypes.c_void_p
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    brush = gdi32.CreateSolidBrush(0xF7F3EF)   # #EFF3F7, the QMainWindow/QDialog background
+    try:
+        for strip in strips:
+            user32.FillRect(ctypes.c_void_p(msg.wParam), ctypes.byref(strip), brush)
+    finally:
+        gdi32.DeleteObject(brush)
+
+
 class ManagedDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,6 +135,7 @@ class ManagedDialog(QDialog):
                 break
             parent = parent.parentWidget()
         super().showEvent(event)
+        self._shown_once = True   # from now on the window has a position worth restoring
         self._detach_from_owner()
 
     def changeEvent(self, event):
@@ -133,8 +175,8 @@ class ManagedDialog(QDialog):
         if sys.platform == "win32" and bytes(event_type) == b"windows_generic_MSG":
             from ctypes import wintypes
             msg = wintypes.MSG.from_address(int(message))
-            # Explorer re-creates tabs after restarting. Reapply the single-tab
-            # policy when Windows announces that this window's tab was created.
+            # Explorer re-creates tabs after restarting. Reapply the tab policy
+            # when Windows announces that this window's tab was created.
             created = getattr(self, "_taskbar_created_message", None)
             if created is None:
                 register = ctypes.windll.user32.RegisterWindowMessageW
@@ -143,6 +185,8 @@ class ManagedDialog(QDialog):
                 created = self._taskbar_created_message = register("TaskbarButtonCreated")
             if msg.message == created:
                 QTimer.singleShot(0, self._detach_from_owner)
+            elif msg.message in (0x0014, 0x0047):   # WM_ERASEBKGND, WM_WINDOWPOSCHANGED
+                fill_grown_client(self, msg)
         return super().nativeEvent(event_type, message)
 
     def present(self, activate=True):
@@ -163,8 +207,12 @@ class ManagedDialog(QDialog):
         if coordinator is not None and (not self.isVisible() or self.isMinimized()):
             geometry = coordinator.normal_geometry(self)
             self.setWindowState(Qt.WindowNoState)
-            if geometry.isValid():
+            # A never-shown window's position is (0, 0); pinning it there (and
+            # setting WA_Moved) put it top-left instead of centred on the owner.
+            if geometry.isValid() and getattr(self, "_shown_once", False):
                 self.setGeometry(geometry)
+            elif geometry.isValid():
+                self.resize(geometry.size())
             self.show()
             self.setWindowState(desired)
         else:
@@ -198,9 +246,6 @@ class WindowStateCoordinator(QObject):
         self._restore_targets = []
         self._owner_geometry = QRect(owner.geometry())
         self._normal_restore_pending = {}
-        self.last_minimized = None
-        self._minimized_order = []
-        self._active_window = owner
         self._taskbar_key = None
         self._taskbar_timer = QTimer(self)
         self._taskbar_timer.setSingleShot(True)
@@ -257,6 +302,8 @@ class WindowStateCoordinator(QObject):
             if not isValid(widget) or not isinstance(widget, ManagedDialog) or not record.prepared:
                 continue
             geometry = self.normal_geometry(widget)
+            if not geometry.isValid():
+                continue   # opened while the owner was minimized and never shown: keep the saved size
             state = record.snapshot[0] if record.snapshot is not None else _state(widget)
             saved[type(widget).__name__] = {"size": [geometry.width(), geometry.height()],
                                           "maximized": bool(state & Qt.WindowMaximized)}
@@ -302,58 +349,6 @@ class WindowStateCoordinator(QObject):
             return bool(ctypes.windll.user32.IsIconic(ctypes.c_void_p(int(self.owner.winId()))))
         return False
 
-    def restore_last_minimized(self):
-        target = self.last_minimized
-        if (target is None or not isValid(target) or getattr(self.owner, "_closing", False)
-                or self.restoring):
-            return False
-        self._forget_minimized(target)
-        if self.owner.isMinimized():
-            self.owner.setWindowState(_state(self.owner) & ~Qt.WindowMinimized)
-            self.owner.show()
-        if self.suspended:
-            self._resume()
-            # Wait for geometry/state restoration before presenting the target.
-            QTimer.singleShot(0, lambda: self._present_target(target))
-        else:
-            self._present_target(target)
-        return True
-
-    def _present_target(self, target):
-        if not isValid(target) or getattr(self.owner, "_closing", False):
-            return
-        record = self.dialogs.get(target)
-        if target is not self.owner and record is not None and (record.closed or record.closing):
-            return
-        if isinstance(target, ManagedDialog):
-            target.present()
-        else:
-            target.show()
-            target.raise_()
-            target.activateWindow()
-
-    def _note_minimized(self, widget):
-        self._minimized_order = [window for window in self._minimized_order if window is not widget and isValid(window)]
-        self._minimized_order.append(widget)
-        self.last_minimized = widget
-        self._queue_taskbar()
-
-    def _forget_minimized(self, widget):
-        self._minimized_order = [window for window in self._minimized_order if window is not widget and isValid(window)]
-        self.last_minimized = self._minimized_order[-1] if self._minimized_order else None
-        self._queue_taskbar()
-
-    def _taskbar_target(self):
-        for window in reversed(self._minimized_order):
-            record = self.dialogs.get(window)
-            if isValid(window) and window.isMinimized() and not (record and (record.closed or record.closing)):
-                return window
-        window = self._active_window
-        record = self.dialogs.get(window)
-        if isValid(window) and window.isVisible() and not (record and (record.closed or record.closing)):
-            return window
-        return self.owner
-
     def _queue_taskbar(self, force=False):
         if not isValid(self) or not isValid(self._taskbar_timer):
             return
@@ -368,18 +363,20 @@ class WindowStateCoordinator(QObject):
                 or sys.platform != "win32" or QApplication.platformName() != "windows"
                 or not self.owner.windowHandle()):
             return
+        shown, hidden = self._taskbar_tabs()
+        key = tuple(int(window.winId()) for window in shown), tuple(int(window.winId()) for window in hidden)
+        if key != self._taskbar_key:
+            from .taskbar import sync_taskbar_tabs
+            if sync_taskbar_tabs(*key):
+                self._taskbar_key = key
+
+    def _taskbar_tabs(self):
+        """(shown, hidden) windows. Every shown window keeps its own tab under the
+        shared app id; Windows folds them into one button and restores the thumbnail picked."""
         windows = [self.owner] + [window for window in self.dialogs
                                   if isValid(window) and isinstance(window, ManagedDialog) and window.windowHandle()]
-        target = self._taskbar_target()
-        if target not in windows:
-            target = self.owner
-        hwnd = int(target.winId())
-        others = tuple(int(window.winId()) for window in windows if window is not target)
-        key = hwnd, others
-        if key != self._taskbar_key:
-            from .taskbar import select_taskbar_tab
-            if select_taskbar_tab(hwnd, others):
-                self._taskbar_key = key
+        return ([window for window in windows if window.isVisible()],
+                [window for window in windows if not window.isVisible()])
 
     def _belongs(self, widget):
         parent = widget.parentWidget()
@@ -410,9 +407,7 @@ class WindowStateCoordinator(QObject):
     def _dialog_destroyed(self, widget):
         self.dialogs.pop(widget, None)
         self._normal_restore_pending.pop(widget, None)
-        self._forget_minimized(widget)
-        if self._active_window is widget:
-            self._active_window = self.owner
+        self._queue_taskbar()
 
     def _finish_close(self, widget):
         if not isValid(widget):
@@ -427,7 +422,6 @@ class WindowStateCoordinator(QObject):
             record.visible = False
             record.snapshot = None
             record.closed = True
-            self._forget_minimized(widget)
             schedule_save = getattr(self.owner, "_schedule_save", None)
             if schedule_save is not None:
                 schedule_save()
@@ -468,7 +462,9 @@ class WindowStateCoordinator(QObject):
         record.visible = True
         self._save(widget, record, state)
         # An explicit request to reopen replaces a previously minimized state.
-        record.snapshot = (state, QRect(record.geometry), getattr(widget, "_restore_state", state))
+        # A first opening has no position yet: Qt centres it when the owner returns.
+        geometry = QRect(record.geometry) if getattr(widget, "_shown_once", False) else QRect()
+        record.snapshot = (state, geometry, getattr(widget, "_restore_state", state))
         self.suspended = True
         widget.hide()
         return True
@@ -582,21 +578,17 @@ class WindowStateCoordinator(QObject):
                 self._restore_normal_size(watched)
             if kind == QEvent.WindowStateChange:
                 if self._owner_minimized():
-                    if not event.oldState() & Qt.WindowMinimized:
-                        self._note_minimized(self.owner)
                     self._suspend()
                 else:
-                    self._forget_minimized(self.owner)
                     if event.oldState() & Qt.WindowMinimized:
                         QTimer.singleShot(0, lambda: _refresh_restored_window(self.owner))
                     if self.suspended:
                         QTimer.singleShot(0, self._resume)
+                self._queue_taskbar()
             elif kind == QEvent.WindowActivate:
                 # A maximized child used to stay above its owner, so clicking the
                 # main window never brought it forward. Reveal it after Qt applies
                 # the activation.
-                self._active_window = self.owner
-                self._queue_taskbar()
                 QTimer.singleShot(0, self._reveal_owner)
             elif kind == QEvent.Show:
                 self._queue_taskbar(force=True)
@@ -625,17 +617,7 @@ class WindowStateCoordinator(QObject):
             else:
                 record.state = _state(watched)
             self._queue_taskbar(force=True)
-        elif kind == QEvent.WindowActivate:
-            self._active_window = watched
-            self._queue_taskbar()
         elif kind in (QEvent.Hide, QEvent.WindowStateChange):
-            if (kind == QEvent.WindowStateChange and not watched.isMinimized()
-                    and watched in self._minimized_order):
-                self._forget_minimized(watched)
-            if (kind == QEvent.WindowStateChange and watched.isMinimized()
-                    and not event.oldState() & Qt.WindowMinimized and not self.suspended
-                    and not self._owner_minimized()):
-                self._note_minimized(watched)
             if self._owner_minimized():
                 self._suspend()
             elif not self.suspended:

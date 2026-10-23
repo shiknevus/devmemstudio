@@ -1492,9 +1492,18 @@ class MonitorPlot(QWidget):
             target.end()
         return image
 
-    def _blit_lanes(self, painter, exposed, ratio):
-        """Draw cached lanes; defer missing curves instead of blocking scrolling."""
+    def _blit_lanes(self, painter, exposed, ratio, budget_ms=0):
+        """Draw cached lanes; defer missing curves instead of blocking scrolling.
+
+        budget_ms renders missing visible lanes in place until it is spent."""
         rows = self._scene_rows(exposed)
+        started = time.perf_counter()
+        for column, rect in rows:
+            if (time.perf_counter() - started) * 1000 >= budget_ms:
+                break
+            tile = self._lane_scenes.get(column)
+            if tile is None or abs(tile.devicePixelRatio() - ratio) > .01:
+                self._lane_scenes[column] = self._render_lane(rect, ratio)
         missing = any(column not in self._lane_scenes
                       or abs(self._lane_scenes[column].devicePixelRatio() - ratio) > .01
                       for column, _ in rows)
@@ -1573,7 +1582,12 @@ class MonitorPlot(QWidget):
         # Marker gestures keep their time coordinates; vertical scrolling stays live.
         freeze = self._interaction_frozen()
         structural = self._scene_key is None or geometry != self._scene_key
-        if self._scrolling:
+        # A resize (maximize) misses every per-pixel trace piece, so a full redraw
+        # can take hundreds of ms while Windows shows the grown area black. Take the
+        # scroll path: render lanes within a frame budget, tile jobs fill in the rest.
+        resized = (structural and self._scene_transform is not None
+                   and self._scene_transform[3:5] != transform[3:5])
+        if self._scrolling or resized:
             if structural:
                 # A resize, lane change or retained-buffer drop invalidates the
                 # old frame. Start fresh metadata, but leave curve work deferred.
@@ -1588,11 +1602,15 @@ class MonitorPlot(QWidget):
                 self._trace_cache.clear()
                 self._cache_key = None
                 self._scene_cache = None
+                if resized:
+                    # The old cost was measured at the old width; build data frames
+                    # off-paint until a frame at this size is measured.
+                    self._frame_render_ms = max(self._frame_render_ms, 12.)
             elif changed and not freeze:
                 # Prepare visible lanes between input events and commit their
                 # time axis together. Wheel paints never render the traces.
                 self._start_prepare(geometry, exposed, ratio)
-            self._blit_lanes(painter, exposed, ratio)
+            self._blit_lanes(painter, exposed, ratio, budget_ms=0 if self._scrolling else 16)
             self._paint_readouts(painter, exposed, *self._scene_range)
             self._finish_paint_flags(freeze)
             self._sync_axis_view()

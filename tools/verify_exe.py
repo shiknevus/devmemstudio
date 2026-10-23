@@ -62,6 +62,8 @@ def accept(run):
     report = json.loads(report_path.read_text(encoding="utf-8"))
     if not report["passed"] or not report["frozen"]:
         raise RuntimeError(f"EXE acceptance failed: {report_path}")
+    if ".tmp-" in Path(report["executable"]).parent.name:
+        raise RuntimeError(f"Run {run} ran from the staging copy: moving it into place failed. See {report_path}")
     if report.get("paramiko") != version("paramiko"):
         raise RuntimeError(f"The EXE SSH library does not match the project venv: {report_path}")
     return report, seconds

@@ -38,7 +38,7 @@ from .csv_export import EXPORT_FILTERS, csv_export, export_path
 from .console_screen import ScreenBuffer
 from .serial_session import SerialSession, list_serial_ports
 from .theme import icon
-from .window_state import WindowStateCoordinator, saved_origin
+from .window_state import WindowStateCoordinator, fill_grown_client, saved_origin
 from .widgets import (label, button, row, field, divider, restyle, ComboBox, ElidedComboBox, ElidedLabel,
                       ChannelSection, BitView, DecodedFieldsView, Worker, LogBridge, password_field,
                       IpAddressField, ResizeAwareWidget, TerminalView, LinkLabel)
@@ -2027,8 +2027,8 @@ class MainWindow(QMainWindow):
     def _fit_register_filters(self):
         """Pick the roomiest preset whose minimum fits the bar's real width (splitters
         move it independently of the window), so the combo and search never overlap."""
-        if not hasattr(self, "register_filters"):
-            return
+        if not hasattr(self, "register_filters") or not self.register_filters.isVisible():
+            return   # no real width before the first show; its resize refits then
         available = self.register_filters.width()
         layout = self.register_filters.layout()
         for level in range(len(REGISTER_FILTER_DENSITIES)):
@@ -3394,6 +3394,8 @@ class MainWindow(QMainWindow):
                         created = self._taskbar_created_message = register("TaskbarButtonCreated")
                     if msg.message == created:
                         self._window_states._queue_taskbar(force=True)
+                elif msg.message in (0x0014, 0x0047):   # WM_ERASEBKGND, WM_WINDOWPOSCHANGED
+                    fill_grown_client(self, msg)
                 if msg.message == 0x0219 and msg.wParam in (0x8000, 0x8004):
                     self._ports_changed.start(150)
             except (TypeError, ValueError, OSError):

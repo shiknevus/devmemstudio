@@ -1393,11 +1393,14 @@ class TopImportUiTests(UiTestBase):
         rows = [dialog.list.item(i).text() for i in range(dialog.list.count())]
         self.assertTrue(any("当前版本" in text for text in rows))
         self.assertTrue(any("备份于" in text for text in rows))
-        # The live bit must not be selectable as a rollback target; newest backup preselected.
+        # The live bit is selectable (download only) but never a rollback target; newest backup preselected.
         current = next(i for i in range(dialog.list.count())
                        if "当前版本" in dialog.list.item(i).text())
-        self.assertFalse(dialog.list.item(current).flags() & Qt.ItemIsEnabled)
+        self.assertTrue(dialog.list.item(current).flags() & Qt.ItemIsEnabled)
         self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit_20260918000000")
+        dialog.list.setCurrentRow(current)
+        self.assertFalse(dialog.rollback_button.isEnabled())
+        self.assertTrue(dialog.download_button.isEnabled())
         # Double-click the chosen backup, confirm, and verify the rename sequence.
         with patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes) as question:
             dialog.list.item(1).setSelected(True)
@@ -1440,6 +1443,30 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(dialog.progress.value(), 100)
         self.assertTrue(dialog.download_button.isEnabled())
         self.assertIn("bit 下载完成", " ".join(message for _, _, message in self.window.log_records_system))
+
+    def test_bit_rollback_downloads_current_bit(self):
+        sda = self.window.session.remote_root / "run" / "media" / "sda"
+        sda.mkdir(parents=True, exist_ok=True)
+        (sda / "sunny_fpga.bit").write_bytes(b"\x07" * 200)
+        (sda / "sunny_fpga.bit_20260916000000").write_bytes(b"\x01" * 100)
+        self.window.bit_rollback_button.click()
+        self.settle(lambda: self.window.bit_rollback_dialog and
+                    not self.window._busy and self.window.bit_rollback_dialog.list.count() == 2)
+        dialog = self.window.bit_rollback_dialog
+        dialog.list.setCurrentRow(next(i for i in range(dialog.list.count())
+                                       if "当前版本" in dialog.list.item(i).text()))
+        target = Path(self.temp.name) / "saved" / "live.bit"
+        target.parent.mkdir()
+        with patch("devmem_studio.window.QFileDialog.getSaveFileName",
+                   return_value=(str(target), "")) as save, \
+                patch("devmem_studio.window.QMessageBox.question") as question:
+            dialog.download_button.click()
+            self.settle(lambda: not self.window._busy)
+        question.assert_not_called()
+        self.assertTrue(save.call_args.args[2].endswith("sunny_fpga.bit"))
+        self.assertEqual(target.read_bytes(), b"\x07" * 200)
+        self.assertEqual(sorted(p.name for p in sda.iterdir() if p.name.startswith("sunny_fpga.bit")),
+                         ["sunny_fpga.bit", "sunny_fpga.bit_20260916000000"])   # board side untouched
 
     def test_bit_download_name_keeps_bit_suffix(self):
         name = MainWindow._bit_download_name

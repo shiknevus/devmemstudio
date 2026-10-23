@@ -289,6 +289,46 @@ class DialogTests(unittest.TestCase):
             time.sleep(.005)
         self.assertEqual(plot._scene_revision, buffer.revision)
 
+    def test_resize_renders_lanes_within_a_frame_budget_and_fills_in_the_rest(self):
+        # A resize (maximize) misses every per-pixel trace piece; redrawing all lanes
+        # in that paint kept Windows showing the grown area black for hundreds of ms.
+        buffer = MonitorBuffer(8)
+        buffer.extend([(i*.01, tuple(i+column for column in range(8))) for i in range(1500)])
+        self.dialog.buffer = buffer
+        plot = self.dialog.plot
+        plot.set_series(buffer, [f'R{i}' for i in range(8)])
+        self.dialog.show()
+        self.app.processEvents()
+        plot.repaint()
+        render = MonitorPlot._render_lane
+        in_paint = []
+
+        def slow_render(widget, *args, **kwargs):
+            cursor = inspect.currentframe().f_back
+            try:
+                while cursor is not None and cursor.f_code is not MonitorPlot.paintEvent.__code__:
+                    cursor = cursor.f_back
+                in_paint.append(cursor is not None)
+            finally:
+                del cursor
+            time.sleep(.01)
+            return render(widget, *args, **kwargs)
+
+        with patch.object(MonitorPlot, '_render_lane', new=slow_render):
+            self.dialog.resize(self.dialog.width() + 300, self.dialog.height() + 200)
+            self.app.processEvents()
+            plot.repaint()
+            rows = plot._scene_rows(plot._visible_rect().toAlignedRect())
+            self.assertGreater(len(rows), 2)
+            self.assertIn(sum(in_paint), (1, 2))   # 16 ms budget at 10 ms per lane
+            self.assertGreaterEqual(plot._frame_render_ms, 12)   # data frames stay off-paint until re-measured
+            deadline = time.monotonic() + 3
+            while any(column not in plot._lane_scenes for column, _ in rows) and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.005)
+            self.assertTrue(all(column in plot._lane_scenes for column, _ in rows), 'tile jobs filled every lane')
+            self.assertEqual(sum(in_paint), sum(in_paint[:2]))   # the rest never rendered inside a paint
+
     def test_scroll_rejects_tiles_from_before_a_retained_buffer_drop(self):
         buffer = MonitorBuffer(32, limit=64)
         buffer.extend([(i*.01, tuple(i+column for column in range(32))) for i in range(64)])

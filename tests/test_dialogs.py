@@ -131,13 +131,35 @@ class BitRollbackDialogTests(unittest.TestCase):
         self.assertEqual(dialog.status.text(), "测试列表")
         self.assertFalse(dialog._busy)
 
-    def test_populate_current_bit_is_not_a_rollback_target(self):
+    def test_populate_current_bit_is_download_only(self):
         dialog = BitRollbackDialog()
         dialog.populate([{"name": "sunny_fpga.bit", "timestamp": None},
                          {"name": "sunny_fpga.bit_20260914120000", "timestamp": "20260914120000"}], "")
+        self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit_20260914120000")   # newest backup preselected
+        self.assertTrue(dialog.rollback_button.isEnabled())
         live = dialog.list.item(0)
-        self.assertFalse(live.flags() & Qt.ItemIsEnabled, "当前版本不可作为回退目标")
-        self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit_20260914120000")
+        self.assertTrue(live.flags() & Qt.ItemIsEnabled and live.flags() & Qt.ItemIsSelectable, "当前版本可选中")
+        dialog.list.setCurrentRow(0)
+        self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit")
+        self.assertTrue(dialog.download_button.isEnabled())
+        self.assertFalse(dialog.rollback_button.isEnabled(), "当前版本不可作为回退目标")
+        rollbacks, downloads = [], []
+        dialog.rollback_requested.connect(rollbacks.append)
+        dialog.download_requested.connect(downloads.append)
+        dialog.list.itemDoubleClicked.emit(live)   # double-click means rollback: ignored for the live bit
+        dialog.start_rollback()
+        self.assertEqual(rollbacks, [])
+        dialog.download_button.click()
+        self.assertEqual(downloads, ["sunny_fpga.bit"])
+        dialog.list.setCurrentRow(1)
+        self.assertTrue(dialog.rollback_button.isEnabled())
+
+    def test_populate_only_current_bit_selects_it_for_download(self):
+        dialog = BitRollbackDialog()
+        dialog.populate([{"name": "sunny_fpga.bit", "timestamp": None}], "")
+        self.assertEqual(dialog.selected_backup(), "sunny_fpga.bit")
+        self.assertTrue(dialog.download_button.isEnabled())
+        self.assertFalse(dialog.rollback_button.isEnabled())
 
     def test_download_button_follows_selection_and_busy(self):
         dialog = BitRollbackDialog()

@@ -516,7 +516,7 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
     except (OSError, ValueError):
         return None
     data["types"] = {key: normalized for key, entry in data["types"].items()
-                     if (normalized := _normalize_catalog_entry(entry)) is not None}
+                     if (normalized := _normalize_catalog_entry(entry, owned=True)) is not None}
     # Tests and offline acceptance opt out of the machine's real overrides via env flag.
     if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
         overrides = user_data_dir() / "component_overrides"
@@ -529,7 +529,7 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
                         continue   # imported before this build's catalog: bundled table is newer
                 except (OSError, ValueError):
                     continue
-                normalized = _normalize_catalog_entry(entry)
+                normalized = _normalize_catalog_entry(entry, owned=True)
                 if normalized is not None:
                     data["types"][item.stem] = normalized
     return data
@@ -588,8 +588,10 @@ def _valid_fields(items) -> list[dict]:
     return result
 
 
-def _normalize_catalog_entry(entry) -> dict | None:
-    """Validate external register tables before they reach GUI/command code."""
+def _normalize_catalog_entry(entry, owned=False) -> dict | None:
+    """Validate external register tables before they reach GUI/command code.
+
+    owned: freshly parsed JSON nobody else holds, filtered in place instead of copied."""
     if not isinstance(entry, dict) or not isinstance(entry.get("registers"), list):
         return None
     registers = []
@@ -599,7 +601,7 @@ def _normalize_catalog_entry(entry) -> dict | None:
         name, width = item.get("name"), parse_int(item.get("width", 32))
         if not isinstance(name, str) or not name.strip() or width is None or not 1 <= width <= 64:
             continue
-        register = copy.deepcopy(item)
+        register = item if owned else copy.deepcopy(item)
         register["width"] = width
         for key in ("aliases", "buttons"):
             if key in register:
@@ -609,7 +611,7 @@ def _normalize_catalog_entry(entry) -> dict | None:
         registers.append(register)
     if not registers:
         return None
-    normalized = copy.deepcopy(entry)
+    normalized = entry if owned else {key: copy.deepcopy(value) for key, value in entry.items() if key != "registers"}
     normalized["registers"] = registers
     return normalized
 

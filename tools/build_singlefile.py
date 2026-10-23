@@ -142,7 +142,10 @@ def main():
         payload.write_bytes(packed)
         payload_key.write_text(json.dumps({"raw_sha256": raw_sha.hex(), "codec": codec, "blocks": blocks}), encoding="utf-8")
     stamp = runtime_stamp(content)
-    digest = ",".join(f"0x{byte:02x}" for byte in raw_sha)
+    # Each block is verified by the thread that unpacks it, instead of one serial pass over the whole runtime.
+    digests = [",".join(f"0x{byte:02x}" for byte in hashlib.sha256(part).digest()) for part in split_blocks(raw)]
+    if [len(part) for part in split_blocks(raw)] != [raw_size for _, raw_size in blocks]:
+        raise SystemExit("Cached payload blocks do not match the runtime split; delete build/singlefile-launcher/payload.*")
     lines = ["#include <stddef.h>",
              f'#define RUNTIME_ID L"{runtime_id}"',
              f'#define RUNTIME_VERSION L"{__version__}"',
@@ -151,10 +154,9 @@ def main():
              f"#define RUNTIME_BLOCK_COUNT {len(blocks)}",
              f"#define RUNTIME_MTIME {stamp}ULL",
              "typedef struct { const wchar_t *path; DWORD size; } RuntimeFile;",
-             "typedef struct { DWORD packed; DWORD raw; } RuntimeBlock;   /* consecutive LZMS streams */",
-             f"static const unsigned char runtime_sha256[32] = {{{digest}}};",
+             "typedef struct { DWORD packed; DWORD raw; unsigned char sha256[32]; } RuntimeBlock;   /* consecutive LZMS streams */",
              "static const RuntimeBlock runtime_blocks[RUNTIME_BLOCK_COUNT] = {",
-             *(f"    {{{packed_size}u, {raw_size}u}}," for packed_size, raw_size in blocks),
+             *(f"    {{{packed_size}u, {raw_size}u, {{{digest}}}}}," for (packed_size, raw_size), digest in zip(blocks, digests)),
              "};",
              "static const RuntimeFile runtime_files[RUNTIME_FILE_COUNT] = {"]
     lines += [f'    {{L"{c_wide(record["path"].replace("/", chr(92)))}", {record["size"]}u}},' for record in records]
