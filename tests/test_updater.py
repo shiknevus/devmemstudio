@@ -468,7 +468,8 @@ class ReleaseVersionTests(unittest.TestCase):
                 make_release.build_release(base / "plain.exe", "5.2.7")
 
 
-# ok/fail exit at once; window = launcher error box; stuck = no app ever; parent = launcher running its app.
+# ok/fail exit at once; window = launcher error box; stuck = no app ever; parent = launcher running its app;
+# splash = the launcher's starting splash: visible but owned by a hidden window, then the app.
 PROBE_SOURCE = r"""#include <windows.h>
 #include <string.h>
 #ifndef EXIT_CODE
@@ -478,6 +479,19 @@ int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
 {
 #if defined(WINDOW)
     CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"probe error", WS_POPUP | WS_VISIBLE, -32000, -32000, 1, 1, 0, 0, a, 0);
+    Sleep(30000);
+#elif defined(SPLASH)
+    if (strstr(c, "child")) { Sleep(30000); return 0; }
+    HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"", WS_POPUP, 0, 0, 0, 0, 0, 0, a, 0);
+    CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, L"STATIC", L"", WS_POPUP | WS_VISIBLE,
+                    -32000, -32000, 1, 1, owner, 0, a, 0);
+    Sleep(2500);   /* seen by the first polls, then the app starts */
+    wchar_t self[MAX_PATH], line[MAX_PATH + 16];
+    GetModuleFileNameW(0, self, MAX_PATH);
+    wsprintfW(line, L"\"%s\" child", self);
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(self, line, 0, 0, 0, 0, 0, 0, &si, &pi)) return 9;
     Sleep(30000);
 #elif defined(STUCK)
     Sleep(30000);
@@ -511,7 +525,7 @@ class WindowsReplacementTests(unittest.TestCase):
         source = cls.base / "probe.c"
         source.write_text(PROBE_SOURCE)
         for name, flags in (("ok", ["-DEXIT_CODE=0"]), ("fail", ["-DEXIT_CODE=7"]), ("window", ["-DWINDOW"]),
-                            ("stuck", ["-DSTUCK"]), ("parent", ["-DPARENT"])):
+                            ("splash", ["-DSPLASH"]), ("stuck", ["-DSTUCK"]), ("parent", ["-DPARENT"])):
             subprocess.run([shutil.which("gcc"), str(source), "-mwindows", *flags,
                             "-o", str(cls.base / f"{name}.exe")], check=True, capture_output=True, timeout=30)
 
@@ -581,6 +595,18 @@ class WindowsReplacementTests(unittest.TestCase):
             self.assertTrue(result["restored"], result)
             self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
             self.assertEqual(staged.read_bytes(), (self.base / "window.exe").read_bytes())
+
+    def test_owned_launcher_splash_is_not_mistaken_for_an_error_box(self):
+        """Process.MainWindowHandle skips owned windows, so the launcher's owned splash passes even with
+        the helpers already released (5.6.0's unowned splash was rolled back as an error box)."""
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory, new="splash", start_timeout=20)
+            try:
+                self.assertTrue(result["success"], result)
+                self.assertEqual(target.read_bytes(), (self.base / "splash.exe").read_bytes())
+            finally:
+                kill_tree(result.get("pid", 0))
+                time.sleep(0.5)   # image lock released before the directory is removed
 
     def test_new_launcher_that_never_starts_app_rolls_back(self):
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:

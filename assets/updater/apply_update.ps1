@@ -67,7 +67,7 @@ function Replace-DevmemFile($source, $target, $backup) {
     }
 }
 
-# The launcher owns no window except its error MessageBox, and runs the app as a child process.
+# The launcher's only unowned window is its failure screen (the starting splash is owned); it runs the app as a child process.
 function Wait-DevmemStarted($process, $seconds) {
     $begin = [DateTime]::UtcNow
     while ($true) {

@@ -102,12 +102,9 @@ def collect(runtime):
     return records, b"".join(parts)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--runtime", type=Path, default=ROOT / "build" / "dist" / "_runtime")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "DevmemStudio.exe")
-    args = parser.parse_args()
-    runtime = args.runtime.resolve()
+def pack(runtime, output, build=ROOT / "build" / "singlefile-launcher"):
+    """Pack `runtime` behind the launcher as `output`; `build` keeps the sources and the payload cache."""
+    runtime = Path(runtime).resolve()
     if not (runtime / "DevmemStudio.exe").is_file() or not (runtime / "_internal").is_dir():
         raise SystemExit("Build the PyInstaller runtime first (DevmemStudio.spec)")
     gcc, windres = (shutil.which(f"x86_64-w64-mingw32-{tool}") or shutil.which(tool) for tool in ("gcc", "windres"))
@@ -115,7 +112,7 @@ def main():
         raise SystemExit("MinGW-w64 gcc and windres are required to build the single-file launcher")
     if subprocess.run([gcc, "-dumpmachine"], capture_output=True, text=True).stdout.strip().split("-")[0] != "x86_64":
         raise SystemExit(f"{gcc} does not target x86_64; the launcher must match the 64-bit runtime")
-    build = ROOT / "build" / "singlefile-launcher"
+    build = Path(build)
     build.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     records, raw = collect(runtime)
@@ -221,7 +218,7 @@ END
                     "-Wl,--dynamicbase,--nxcompat,--high-entropy-va,--no-insert-timestamp", "-I", str(build),   # reproducible EXE
                     str(ROOT / "tools" / "runtime_launcher" / "launcher.c"), "launcher.res",
                     "-lcabinet", "-lbcrypt", "-o", str(result)], cwd=build, check=True)
-    target = args.output.resolve()
+    target = Path(output).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         result.replace(target)
@@ -233,6 +230,15 @@ END
               "exe_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "codec": "Windows LZMS",
               "cache": "%LOCALAPPDATA%\\DevmemStudio\\runtime\\" + runtime_id,
               "build_seconds": round(time.perf_counter() - started, 1)}
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime", type=Path, default=ROOT / "build" / "dist" / "_runtime")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist" / "DevmemStudio.exe")
+    args = parser.parse_args()
+    report = pack(args.runtime, args.output)
     (ROOT / "artifacts").mkdir(exist_ok=True)
     (ROOT / "artifacts" / "singlefile-build.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))

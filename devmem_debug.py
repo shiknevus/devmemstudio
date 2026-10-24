@@ -59,6 +59,9 @@ def main():
     if 'window_maximized' not in window.cfg and (available.width() <= 1400 or available.height() <= 850):
         # Before show(): the window opens maximized instead of animating from normal size.
         window.setWindowState(window.windowState() | Qt.WindowMaximized)
+    if sys.platform == 'win32' and not args.offscreen:
+        from devmem_studio.taskbar import dismiss_launcher_splash
+        dismiss_launcher_splash()   # the launcher's splash goes first: it never sits over the new window
     window.show()
     launcher = os.environ.get('DEVMEMSTUDIO_LAUNCHER')
     if launcher and sys.platform == 'win32' and not args.offscreen:
