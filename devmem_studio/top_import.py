@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 
-from .core import parse_int, resource_path, user_data_dir
+from .core import component_override_dirs, parse_int, resource_path
 
 REG_GRID_START = 0x800
 REG_GRID_STEP = 0x200
@@ -519,19 +519,23 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
                      if (normalized := _normalize_catalog_entry(entry, owned=True)) is not None}
     # Tests and offline acceptance opt out of the machine's real overrides via env flag.
     if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
-        overrides = user_data_dir() / "component_overrides"
         bundled_at = _catalog_timestamp(data.get("generated_at"))
-        if overrides.is_dir():
-            for item in sorted(overrides.glob("*.json")):
+        chosen = {}
+        for folder in component_override_dirs():
+            if not folder.is_dir():
+                continue
+            for item in sorted(folder.glob("*.json")):
                 try:
                     entry = json.loads(item.read_text(encoding="utf-8"))
-                    if bundled_at is not None and override_imported_at(item, entry) < bundled_at:
-                        continue   # imported before this build's catalog: bundled table is newer
+                    imported = override_imported_at(item, entry)
                 except (OSError, ValueError):
                     continue
+                if bundled_at is not None and imported < bundled_at:
+                    continue   # imported before this build's catalog: bundled table is newer
                 normalized = _normalize_catalog_entry(entry, owned=True)
-                if normalized is not None:
-                    data["types"][item.stem] = normalized
+                if normalized is not None and imported >= chosen.get(item.stem, (float("-inf"),))[0]:
+                    chosen[item.stem] = (imported, normalized)   # same type in both folders: newest import wins
+        data["types"].update({key: entry for key, (_, entry) in chosen.items()})
     return data
 
 

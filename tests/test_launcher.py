@@ -4,6 +4,7 @@ from ctypes import wintypes as w
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -13,12 +14,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 IDCANCEL, IDRETRY, GW_OWNER, WM_COMMAND, WM_KEYDOWN, VK_ESCAPE = 2, 4, 4, 0x0111, 0x0100, 0x1B
 SPLASH = "DevmemStudioLauncherSplash"
+STAGES = range(5, 10)   # launcher.c STAGE_QT..STAGE_PROJECT
 
 # The app the launcher runs: "--exit N" quits before any window, "--window" shows one, "--ready" first has the
-# launcher take its splash down (as devmem_debug does) and quits with 10+ if any splash is still on screen.
+# launcher take its splash down (as devmem_debug does) and quits with 10+ if any splash is still on screen;
+# "--stages" reports the app's stages 60 ms apart before that.
 FAKE_APP = r"""#include <windows.h>
 #include <stdlib.h>
 #include <string.h>
+typedef struct { volatile LONG stage; volatile LONGLONG at[10]; } Progress;
 int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
 {
     const char *code = strstr(c, "--exit ");
@@ -30,6 +34,20 @@ int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
             return 10;
         if (strstr(c, "--late"))
             Sleep(800);   /* the splash is surely up and animating by now */
+        if (strstr(c, "--stages")) {
+            wsprintfW(event, L"%s.progress", name);
+            HANDLE mapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, event);
+            Progress *progress = mapping ? MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, sizeof *progress) : NULL;
+            if (!progress)
+                return 14;
+            for (int s = 5; s <= 9; ++s) {
+                LARGE_INTEGER now;
+                QueryPerformanceCounter(&now);
+                progress->at[s] = now.QuadPart;
+                progress->stage = s;
+                Sleep(60);
+            }
+        }
         wsprintfW(event, L"%s.ready", name);
         HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, event);
         wsprintfW(event, L"%s.gone", name);
@@ -109,6 +127,12 @@ def children(parent):
         more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     kernel.CloseHandle(snapshot)
     return found
+
+
+def read_timings(path):
+    """launcher.c Timings: warm and cold ms per stage."""
+    magic, version, *ms = struct.unpack("<4sI20d", path.read_bytes())
+    return magic, version, ms[:10], ms[10:]
 
 
 class Window:
@@ -311,6 +335,37 @@ class LauncherTests(unittest.TestCase):
     def test_clean_app_exit_without_window_is_not_a_failure(self):
         self.start("--exit 0")
         self.assertEqual(self.exit_code(), 0)
+
+    def timings(self, appdata):
+        try:
+            return read_timings(next((Path(appdata) / "DevmemStudio" / "splash").glob("*.times")))
+        except (StopIteration, OSError, struct.error):   # not yet, or being written
+            return None
+
+    def test_splash_shows_at_every_start(self):
+        appdata = self.work / "appdata"
+        for attempt in range(2):   # the second start unpacks nothing
+            self.start("--ready --late", appdata=appdata)
+            splash = self.splash(failing=False)
+            self.assertTrue(splash.owned, f"attempt {attempt}")
+            self.stop()
+
+    def test_stage_times_are_learned_for_the_next_start(self):
+        appdata = self.work / "appdata"
+
+        def learned(kind, stage, default):   # kind 2: warm, 3: cold
+            def check():
+                found = self.timings(appdata)
+                return found and found[kind][stage] != default and found[kind]
+            return check
+
+        self.start("--ready --stages", appdata=appdata)   # unpacks: a cold start, learned apart
+        self.wait_for(learned(3, 2, 850), what="cold timings")
+        self.stop()
+        self.start("--ready --stages", appdata=appdata)
+        warm = self.wait_for(learned(2, 5, 25), what="warm timings")
+        for stage, default in zip(STAGES, (25, 55, 20, 490, 60)):   # each took 60 ms (or a timer tick more)
+            self.assertLess(abs(warm[stage] - (default + 60) / 2), 15, (stage, warm))
 
 
 if __name__ == "__main__":

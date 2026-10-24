@@ -11,6 +11,7 @@ __pycache__/
 
 # local machine settings and credentials
 registers.json
+component_overrides/
 
 # native Bit_pack engine build outputs
 /tools/bitpack/_build/

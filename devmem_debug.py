@@ -13,15 +13,19 @@ def main():
     parser.add_argument('--smoke-test', metavar='OUTPUT_DIR', help='Run offline acceptance and save a report and screenshots')
     parser.add_argument('--offscreen', action='store_true', help='Render without a visible window')
     args = parser.parse_args()
+    from devmem_studio import launcher_splash
+    launcher_splash.stage(launcher_splash.QT)   # the single-file launcher's bar follows these stages
     if args.offscreen:
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtWidgets import QApplication, QMessageBox
+    launcher_splash.stage(launcher_splash.MODULES)
     from devmem_studio.core import user_data_dir
     from devmem_studio import __version__
     from devmem_studio.theme import STYLE
     from devmem_studio.window import MainWindow
+    launcher_splash.stage(launcher_splash.UI)
     app = QApplication(sys.argv[:1])
     if args.offscreen and sys.platform == 'win32':
         fonts = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'
@@ -53,6 +57,7 @@ def main():
     if args.smoke_test:
         from devmem_studio.smoke import run_smoke
         return run_smoke(app, Path(args.smoke_test))
+    launcher_splash.stage(launcher_splash.WINDOW)
     window = MainWindow()
     available = app.primaryScreen().availableGeometry()
     # MainWindow restores the saved normal size and maximized state separately.
@@ -60,9 +65,9 @@ def main():
         # Before show(): the window opens maximized instead of animating from normal size.
         window.setWindowState(window.windowState() | Qt.WindowMaximized)
     if sys.platform == 'win32' and not args.offscreen:
-        from devmem_studio.taskbar import dismiss_launcher_splash
-        dismiss_launcher_splash()   # the launcher's splash goes first: it never sits over the new window
-    window.show()
+        launcher_splash.show_main_window(window)   # the splash's bar fills and it closes first
+    else:
+        window.show()
     launcher = os.environ.get('DEVMEMSTUDIO_LAUNCHER')
     if launcher and sys.platform == 'win32' and not args.offscreen:
         from devmem_studio.taskbar import bind_relaunch

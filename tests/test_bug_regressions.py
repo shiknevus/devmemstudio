@@ -152,7 +152,7 @@ class CatalogRegressions(unittest.TestCase):
                 {"offset": "0x010", "width": 32}]}), encoding="utf-8")
             with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
                     patch("devmem_studio.top_import.resource_path", return_value=bundled), \
-                    patch("devmem_studio.top_import.user_data_dir", return_value=root):
+                    patch("devmem_studio.top_import.component_override_dirs", return_value=[overrides]):
                 catalog = top_import.load_type_catalog()
             registers, exact = top_import.registers_for(catalog, "ec_uut")
             self.assertTrue(exact)

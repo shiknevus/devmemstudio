@@ -18,7 +18,7 @@ from devmem_studio.component_parse import (  # noqa: E402,F401
     harvest_debug_snapshots, harvest_signal_widths, harvest_type_notes, parse_component_folder,
     parse_decode_file, parse_define_table, read_text_resilient, split_top_level,
     strip_block_comments, strip_comments, top_is_plaintext)
-from devmem_studio.core import user_data_dir  # noqa: E402
+from devmem_studio.core import component_override_dirs  # noqa: E402
 from devmem_studio.top_import import (  # noqa: E402
     _catalog_timestamp, find_top_files, override_imported_at, parse_top)
 
@@ -190,6 +190,11 @@ def _override_time(item: Path) -> float:
     return override_imported_at(item, entry)
 
 
+def local_override_dirs() -> list[Path]:
+    """「更新控件」 folders on the build machine, including the one beside the built dist EXE."""
+    return component_override_dirs() + [ROOT / "dist" / "component_overrides"]
+
+
 def refresh(out: Path, rtl: Path | None, stamp: str, strict: bool = False) -> int:
     """Build step: regenerate from the recorded RTL root; rewrite only when something changed."""
     try:
@@ -225,9 +230,9 @@ def refresh(out: Path, rtl: Path | None, stamp: str, strict: bool = False) -> in
     old_types = previous.get("types", {})
     kept = carry_removed(catalog, old_types)
     bundled_at = _catalog_timestamp(previous.get("generated_at"))
-    overrides = user_data_dir() / "component_overrides"
-    newer = sorted(item.stem for item in overrides.glob("*.json")
-                   if bundled_at is None or _override_time(item) >= bundled_at) if overrides.is_dir() else []
+    newer = sorted({item.stem for folder in local_override_dirs() if folder.is_dir()
+                    for item in folder.glob("*.json")
+                    if bundled_at is None or _override_time(item) >= bundled_at})
     changed = sorted(key for key in catalog["types"] if catalog["types"][key] != old_types.get(key))
     if not changed and not newer:
         print(f"up to date: {len(catalog['types'])} types, generated_at {previous.get('generated_at')}")

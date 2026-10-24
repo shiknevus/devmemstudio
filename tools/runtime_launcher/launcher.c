@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <wctype.h>
 #include "runtime_manifest.h"
 
 #define RES_PAYLOAD 501
@@ -158,33 +159,64 @@ static int write_file(const wchar_t *path, const unsigned char *data, DWORD size
     return CloseHandle(file) && ok;
 }
 
-/* Start-up stage and unpack progress (permille), shown by the splash. */
-enum { STAGE_CHECK, STAGE_WAIT, STAGE_INFLATE, STAGE_WRITE, STAGE_START };
-#define INFLATE_SHARE 450
+/* Start-up stages in order: the launcher's, then the app's (QT on), which it reports through the Progress block. */
+enum { STAGE_CHECK, STAGE_WAIT, STAGE_INFLATE, STAGE_WRITE, STAGE_START, STAGE_QT, STAGE_MODULES, STAGE_UI,
+       STAGE_WINDOW, STAGE_PROJECT, STAGE_COUNT };
+#define INFLATE_SHARE 450   /* permille of the unpack */
 #define WRITE_SHARE 550
 
-static HANDLE splash_now;
-static volatile LONG launch_stage, unpack_permille, unpack_round;
-static volatile double unpack_since;
+typedef struct {   /* shared with devmem_studio/launcher_splash.py */
+    volatile LONG stage;
+    volatile LONGLONG at[STAGE_COUNT];   /* QueryPerformanceCounter as each app stage began */
+} Progress;
+
+static Progress *progress;
+static HANDLE splash_ready, splash_gone;
+static volatile LONG launch_stage, launch_round, unpacking, unpack_permille;
+static volatile double stage_at[STAGE_COUNT];   /* clock_ms as each launcher stage began; 0: not reached */
+
+static double qpc_ms(LONGLONG count)
+{
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return (double)count * 1000.0 / (double)frequency.QuadPart;
+}
 
 static double clock_ms(void)   /* GetTickCount64 steps by 15.6 ms: too coarse for animation */
 {
-    LARGE_INTEGER now, frequency;
+    LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    QueryPerformanceFrequency(&frequency);
-    return (double)now.QuadPart * 1000.0 / (double)frequency.QuadPart;
+    return qpc_ms(now.QuadPart);
 }
 
 static void set_stage(LONG stage)
 {
     if (stage == STAGE_INFLATE) {
-        unpack_since = clock_ms();
         InterlockedExchange(&unpack_permille, 0);
-        InterlockedIncrement(&unpack_round);
+        InterlockedExchange(&unpacking, 1);
     }
+    if (!stage_at[stage])
+        stage_at[stage] = clock_ms();
     InterlockedExchange(&launch_stage, stage);
-    if (stage == STAGE_INFLATE && splash_now)
-        SetEvent(splash_now);   /* unpacking takes long: show now rather than after the delay */
+}
+
+/* A start (again, after Retry): the bar and the hand-over begin anew. */
+static void begin_launch(void)
+{
+    for (int i = 0; i < STAGE_COUNT; ++i) {
+        stage_at[i] = 0;
+        if (progress)
+            progress->at[i] = 0;
+    }
+    if (progress)
+        progress->stage = 0;
+    InterlockedExchange(&unpacking, 0);
+    if (splash_ready)
+        ResetEvent(splash_ready);
+    if (splash_gone)
+        ResetEvent(splash_gone);
+    InterlockedIncrement(&launch_round);
+    set_stage(STAGE_CHECK);
 }
 
 static void unpack_advance(DWORD bytes, LONG share)
@@ -425,50 +457,118 @@ static LPPROC_THREAD_ATTRIBUTE_LIST job_attribute(HANDLE *job)
     return list;
 }
 
-/* Splash: at once while unpacking, else after SPLASH_DELAY without an app window; failures show here with Retry/Cancel.
-   Starting, it is owned and untitled: updaters take an unowned window for an error, tools look for "DevmemStudio" titles. */
-#define SPLASH_DELAY 1000
+/* Splash, at every start: one bar runs through all stages, timed by the starts before; full, the splash closes and only
+   then the main window shows. Starting, it is owned: updaters take an unowned window for an error. Failures show here
+   with Retry/Cancel. */
 #define SPLASH_TIMEOUT 60000ULL
 #define SPLASH_FRAME (1000.0 / 60)   /* ms */
-#define SPLASH_EASE 80.0   /* ms: time constant of the bar toward the progress */
+#define SPLASH_EASE 40.0   /* ms: time constant of the bar toward the progress */
 #define SPLASH_SPEED 2.0   /* permille per ms at most: no jumps */
-#define SPLASH_HOLD 200.0   /* ms at 100% before the sweep */
-#define SPLASH_SWEEP 1600.0   /* ms per pass */
+#define SPLASH_FINISH 60.0   /* ms to fill the rest once the app is ready */
+#define SPLASH_HOLD 50.0   /* ms full before it closes */
 #define SPLASH_WIDTH 420   /* 96-dpi pixels */
 #define SPLASH_HEIGHT 112
 #define SPLASH_PAD 26
 #define SPLASH_GLYPH 40
 #define SPLASH_TEXT (SPLASH_PAD + SPLASH_GLYPH + 18)
+#define SPLASH_CLASS L"DevmemStudioLauncherSplash"
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
-static const wchar_t *const stage_text[] = {
+static const wchar_t *const stage_text[STAGE_COUNT] = {
     L"正在检查运行环境…",
     L"正在等待另一个 DevmemStudio 准备运行环境…",
     L"首次运行，正在解压运行环境…",
-    L"首次运行，正在解压运行环境…",   /* writing: one step for the eye, the bar goes on */
-    L"正在启动程序…",
+    L"首次运行，正在写入运行环境…",
+    L"正在启动 Python 运行时…",
+    L"正在加载 Qt 界面库…",
+    L"正在加载程序模块…",
+    L"正在初始化界面样式…",
+    L"正在创建主窗口…",
+    L"正在载入上次导入的 top 文件…",
 };
 
-static HANDLE splash_done, splash_answer, splash_thread, splash_ready, splash_gone;
+/* ms per stage, averaged over the starts before: warm, and cold for starts that unpack (inflate and write count as one) */
+static double expected[2][STAGE_COUNT] = {
+    {[STAGE_CHECK] = 6, [STAGE_START] = 150, [STAGE_QT] = 25, [STAGE_MODULES] = 55, [STAGE_UI] = 20, [STAGE_WINDOW] = 490,
+     [STAGE_PROJECT] = 60},
+    {[STAGE_CHECK] = 6, [STAGE_INFLATE] = 850, [STAGE_START] = 340, [STAGE_QT] = 40, [STAGE_MODULES] = 80, [STAGE_UI] = 30,
+     [STAGE_WINDOW] = 1800, [STAGE_PROJECT] = 100},
+};
+
+typedef struct {
+    char magic[4];
+    UINT32 version;
+    double ms[2][STAGE_COUNT];
+} Timings;
+
+static HANDLE splash_done, splash_answer, splash_thread, progress_map;
 static HINSTANCE splash_instance;
+static wchar_t *splash_times;   /* where the averages are kept */
 static int splash_enabled, splash_silent;
 static volatile LONG splash_failure, splash_choice;
 static const wchar_t *volatile splash_problem;   /* non-NULL: show it with Retry/Cancel */
 
 static struct {   /* splash thread only */
     HWND window, owner, retry, cancel;
-    HANDLE answer;
+    HANDLE answer, gone;
     HFONT title, note, strong;
     HICON logo;
     UINT dpi;
-    LONG failure, answered, round, filling;   /* filling: the unpack bar is on screen */
-    double shown, last, full_at, sweep_from;   /* shown: permille on screen; times in clock_ms */
-    const wchar_t *problem, *text;   /* text, percent: the status line as painted; percent -1 while sweeping */
+    LONG failure, answered, round;
+    double shown, drawn, last, ready_at, full_at, finish_rate;   /* shown: permille; drawn: as last invalidated */
+    const wchar_t *problem, *text;   /* text, percent: the status line as painted */
     int percent;
 } splash;
+
+/* %LOCALAPPDATA%\DevmemStudio\splash\<hash of this EXE's folder>.times: each copy loads its own settings and top. */
+static wchar_t *splash_location(void)
+{
+    static wchar_t self[PATH_CAP];
+    DWORD length = GetModuleFileNameW(NULL, self, PATH_CAP);
+    wchar_t *slash = length && length < PATH_CAP ? wcsrchr(self, L'\\') : NULL, *appdata = environment(L"LOCALAPPDATA"), *path = NULL;
+    if (slash && appdata) {
+        unsigned long long hash = 14695981039346656037ULL;   /* FNV-1a */
+        for (const wchar_t *c = self; c < slash; ++c)
+            hash = (hash ^ (unsigned long long)towupper(*c)) * 1099511628211ULL;
+        wchar_t leaf[64];
+        swprintf(leaf, 64, L"DevmemStudio\\splash\\%016llx.times", hash);
+        path = join(appdata, leaf);
+    }
+    free(appdata);
+    return path;
+}
+
+static void splash_timings(int save)
+{
+    if (!splash_times)
+        return;
+    wchar_t *slash = wcsrchr(splash_times, L'\\');
+    if (save) {
+        *slash = 0;
+        CreateDirectoryW(splash_times, NULL);
+        *slash = L'\\';
+    }
+    HANDLE file = CreateFileW(splash_times, save ? GENERIC_WRITE : GENERIC_READ, FILE_SHARE_READ, NULL,
+                              save ? CREATE_ALWAYS : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE)
+        return;
+    Timings timings = {{'D', 'M', 'S', 'T'}, 2, {{0}}};
+    DWORD done = 0;
+    if (save) {
+        memcpy(timings.ms, expected, sizeof expected);
+        WriteFile(file, &timings, sizeof timings, &done, NULL);
+    } else if (ReadFile(file, &timings, sizeof timings, &done, NULL) && done == sizeof timings
+               && !memcmp(timings.magic, "DMST", 4) && timings.version == 2) {
+        for (int cold = 0; cold < 2; ++cold)
+            for (int i = 0; i < STAGE_COUNT; ++i)
+                if (timings.ms[cold][i] >= 0 && timings.ms[cold][i] <= 60000)   /* NaN fails both */
+                    expected[cold][i] = timings.ms[cold][i];
+    }
+    CloseHandle(file);
+}
 
 static UINT window_dpi(HWND window)
 {
@@ -566,27 +666,21 @@ static void splash_paint(HDC target)
         DrawTextW(dc, splash.problem, -1, &message, DT_WORDBREAK | DT_EDITCONTROL | DT_NOPREFIX);
     } else {
         if (splash.text && IntersectRect(&overlap, &area, &status)) {
-            if (splash.percent >= 0) {
-                wchar_t percent[8];
-                swprintf(percent, 8, L"%d%%", splash.percent);
-                SelectObject(dc, splash.strong);
-                SetTextColor(dc, accent);
-                DrawTextW(dc, percent, -1, &status, DT_SINGLELINE | DT_RIGHT | DT_NOPREFIX);
-            }
+            wchar_t percent[8];
+            swprintf(percent, 8, L"%d%%", splash.percent);
+            SelectObject(dc, splash.strong);
+            SetTextColor(dc, accent);
+            DrawTextW(dc, percent, -1, &status, DT_SINGLELINE | DT_RIGHT | DT_NOPREFIX);
+            RECT text = status;
+            text.right -= px(44);   /* clear of the percentage */
             SelectObject(dc, splash.note);
             SetTextColor(dc, RGB(0x6F, 0x82, 0x95));
-            DrawTextW(dc, splash.text, -1, &status, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(dc, splash.text, -1, &text, DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         }
         if (IntersectRect(&overlap, &area, &bar)) {
-            int width = bar.right - bar.left;
             fill(dc, bar.left, bar.top, bar.right, bar.bottom, track);
-            if (splash.percent >= 0) {
-                span(dc, bar.left, bar.right, bar.top, bar.bottom, bar.left, bar.left + width * splash.shown / 1000, accent, track);
-            } else {   /* nothing to measure: a segment gliding across, eased in and out */
-                double pass = (clock_ms() - splash.sweep_from) / SPLASH_SWEEP, phase = pass - (double)(LONGLONG)pass;
-                double piece = width * 0.3, at = bar.left - piece + (width + piece) * phase * phase * (3 - 2 * phase);
-                span(dc, bar.left, bar.right, bar.top, bar.bottom, at, at + piece, accent, track);
-            }
+            span(dc, bar.left, bar.right, bar.top, bar.bottom, bar.left, bar.left + (bar.right - bar.left) * splash.shown / 1000,
+                 accent, track);
         }
     }
     BitBlt(target, area.left, area.top, area.right - area.left, area.bottom - area.top, dc, area.left, area.top, SRCCOPY);
@@ -616,13 +710,13 @@ static void splash_show_failure(const wchar_t *problem)
     SelectObject(dc, previous);
     ReleaseDC(splash.window, dc);
     int top = px(74) + text.bottom + px(18), right = px(SPLASH_WIDTH) - px(SPLASH_PAD), width = px(84), height = px(28);
+    SetWindowTextW(splash.window, L"DevmemStudio " RUNTIME_VERSION);
+    SetWindowLongPtrW(splash.window, GWL_EXSTYLE, GetWindowLongPtrW(splash.window, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE);
+    SetWindowLongPtrW(splash.window, GWLP_HWNDPARENT, 0);   /* unowned: updaters see the failure, before its buttons do */
     SetWindowPos(splash.cancel, NULL, right - width, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     SetWindowPos(splash.retry, NULL, right - 2 * width - px(8), top, width, height,
                  SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     splash_place(top + height + px(20));
-    SetWindowTextW(splash.window, L"DevmemStudio " RUNTIME_VERSION);
-    SetWindowLongPtrW(splash.window, GWL_EXSTYLE, GetWindowLongPtrW(splash.window, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE);
-    SetWindowLongPtrW(splash.window, GWLP_HWNDPARENT, 0);   /* unowned: updaters see the failure */
     ShowWindow(splash.window, SW_SHOW);
     SetForegroundWindow(splash.window);
     SetFocus(splash.retry);
@@ -632,14 +726,88 @@ static void splash_show_failure(const wchar_t *problem)
 static void splash_show_progress(void)
 {
     splash.problem = NULL;
-    ShowWindow(splash.retry, SW_HIDE);
-    ShowWindow(splash.cancel, SW_HIDE);
+    SetWindowLongPtrW(splash.window, GWLP_HWNDPARENT, (LONG_PTR)splash.owner);   /* owned again before it looks it */
     SetWindowTextW(splash.window, L"");
     SetWindowLongPtrW(splash.window, GWL_EXSTYLE, GetWindowLongPtrW(splash.window, GWL_EXSTYLE) | WS_EX_NOACTIVATE);
-    SetWindowLongPtrW(splash.window, GWLP_HWNDPARENT, (LONG_PTR)splash.owner);
+    ShowWindow(splash.retry, SW_HIDE);
+    ShowWindow(splash.cancel, SW_HIDE);
     splash_place(px(SPLASH_HEIGHT));
     splash.text = NULL;
     InvalidateRect(splash.window, NULL, FALSE);
+}
+
+static double splash_at(LONG stage)   /* clock_ms as the stage began; 0: not reached */
+{
+    if (stage <= STAGE_START)
+        return stage_at[stage];
+    LONGLONG at = progress ? progress->at[stage] : 0;
+    return at > 0 ? qpc_ms(at) : 0;
+}
+
+static LONG splash_stage(void)
+{
+    LONG stage = launch_stage, app = progress ? progress->stage : 0;
+    return stage == STAGE_START && app > STAGE_START && app < STAGE_COUNT ? app : stage;
+}
+
+static double splash_weight(LONG stage)   /* share of the bar: waiting has none, writing is part of the unpack */
+{
+    if (stage == STAGE_WAIT || stage == STAGE_WRITE || (stage == STAGE_INFLATE && !unpacking))
+        return 0;
+    return max(expected[unpacking != 0][stage], 1.0);
+}
+
+/* The stages before in full, this one by unpack progress or by time against the starts before; late, it nears its end. */
+static double splash_target(LONG stage, double now)
+{
+    LONG part = stage == STAGE_WRITE ? STAGE_INFLATE : stage == STAGE_WAIT ? STAGE_CHECK : stage;
+    double before = 0, total = 0, done;
+    for (LONG s = 0; s < STAGE_COUNT; ++s) {
+        before += s < part ? splash_weight(s) : 0;
+        total += splash_weight(s);
+    }
+    if (part == STAGE_INFLATE) {   /* a block inflates in one call: creep meanwhile */
+        double elapsed = now - stage_at[STAGE_INFLATE];
+        done = max((double)unpack_permille, stage == STAGE_INFLATE ? (INFLATE_SHARE - 50) * elapsed / (elapsed + 300) : 0) / 1000;
+    } else {
+        double began = splash_at(part), x = began ? max(now - began, 0.0) / splash_weight(part) : 0;
+        done = x < 0.8 ? x : 1 - 0.04 / (x - 0.6);   /* the last fifth slows down gradually: still moving when late */
+    }
+    return 1000 * (before + splash_weight(part) * done) / total;
+}
+
+/* This start's stage times into the averages for the next start: the cold ones when it unpacked. */
+static void splash_learn(double ready_at)
+{
+    double at[STAGE_COUNT];
+    for (LONG s = 0; s < STAGE_COUNT; ++s)
+        at[s] = splash_at(s);
+    if (at[STAGE_WAIT])
+        return;
+    double *average = expected[at[STAGE_INFLATE] != 0];
+    for (LONG s = 0; s < STAGE_COUNT; ++s) {
+        if (s == STAGE_WAIT || s == STAGE_WRITE || (s == STAGE_INFLATE && !at[s]))
+            continue;
+        double end = ready_at;
+        for (LONG next = s + 1; next < STAGE_COUNT; ++next)
+            if (next != STAGE_WAIT && next != STAGE_WRITE && at[next]) {
+                end = at[next];
+                break;
+            }
+        average[s] = (average[s] + (at[s] ? min(max(end - at[s], 0.0), 60000.0) : 0)) / 2;
+    }
+    splash_timings(1);
+}
+
+static void splash_hand_over(double now)   /* the app waits to show its window: fill the rest */
+{
+    splash.ready_at = now;
+    splash.finish_rate = max(2 * SPLASH_SPEED, (1000 - splash.shown) / SPLASH_FINISH);
+}
+
+static int splash_finished(double now)   /* full for a moment */
+{
+    return splash.ready_at && !splash.problem && splash.full_at && now - splash.full_at >= SPLASH_HOLD;
 }
 
 static void splash_tick(void)
@@ -648,6 +816,7 @@ static void splash_tick(void)
     const wchar_t *problem = splash_problem;
     if (problem && failure != splash.failure) {
         splash.failure = failure;
+        splash.ready_at = splash.full_at = 0;
         splash_show_failure(problem);
     } else if (!problem && splash.problem) {
         splash_show_progress();
@@ -655,45 +824,34 @@ static void splash_tick(void)
     if (splash.problem)
         return;
     double now = clock_ms(), step = splash.last ? min(now - splash.last, 100.0) : 0;
-    LONG stage = launch_stage, round = unpack_round;
+    LONG stage = splash_stage(), round = launch_round;
     splash.last = now;
-    if ((stage == STAGE_INFLATE || stage == STAGE_WRITE) && round != splash.round) {   /* an unpack (again, after Retry) */
+    if (round != splash.round) {   /* a start (again, after Retry) */
         splash.round = round;
-        splash.filling = 1;
-        splash.shown = splash.full_at = 0;
+        splash.shown = splash.ready_at = splash.full_at = 0;
     }
-    if (stage < STAGE_INFLATE && splash.filling) {   /* a Retry starting over */
-        splash.filling = 0;
-        splash.sweep_from = now;
-    }
-    if (splash.filling) {
-        double target = stage == STAGE_START ? 1000 : unpack_permille;
-        if (stage == STAGE_INFLATE) {   /* a block inflates in one call: creep meanwhile */
-            double elapsed = now - unpack_since;
-            target = max(target, (INFLATE_SHARE - 50) * elapsed / (elapsed + 300));
-        }
-        double gap = target - splash.shown;
+    if (splash.ready_at) {
+        splash.shown = min(splash.shown + splash.finish_rate * step, 1000.0);
+    } else {
+        double gap = splash_target(stage, now) - splash.shown;
         if (gap > 0)   /* exponential approach, capped in speed, with a floor so it arrives */
             splash.shown += min(gap, min(max(gap * step / (SPLASH_EASE + step), 0.5 * step), SPLASH_SPEED * step));
-        if (stage != STAGE_INFLATE && stage != STAGE_WRITE && splash.shown >= 1000) {
-            if (!splash.full_at)
-                splash.full_at = now;
-            else if (now - splash.full_at >= SPLASH_HOLD) {
-                splash.filling = 0;
-                splash.sweep_from = now;
-            }
-        }
     }
-    const wchar_t *text = stage_text[splash.filling ? STAGE_INFLATE : stage];
-    int percent = splash.filling ? (int)(splash.shown / 10) : -1;
+    if (splash.shown >= 1000 && !splash.full_at)
+        splash.full_at = now;
+    const wchar_t *text = splash.ready_at ? L"正在打开主窗口…" : stage_text[stage];
+    int percent = (int)(splash.shown / 10);
     if (text != splash.text || percent != splash.percent) {
         RECT status = splash_row(48, 68);
         splash.text = text;
         splash.percent = percent;
         InvalidateRect(splash.window, &status, FALSE);
     }
-    RECT bar = splash_row(80, 84);
-    InvalidateRect(splash.window, &bar, FALSE);
+    if (splash.shown != splash.drawn) {
+        RECT bar = splash_row(80, 84);
+        splash.drawn = splash.shown;
+        InvalidateRect(splash.window, &bar, FALSE);
+    }
 }
 
 static LRESULT CALLBACK splash_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -736,34 +894,24 @@ static LRESULT CALLBACK splash_proc(HWND window, UINT message, WPARAM wparam, LP
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-static void splash_run(void)
+/* The card, centered on the monitor with the cursor; fonts, icon and buttons at its DPI. */
+static int splash_create(void)
 {
-    HANDLE done = splash_done, ready = splash_ready;   /* own copies: splash_stop may give up on us */
-    HANDLE waits[3] = {splash_done, splash_now, splash_ready};
-    splash.answer = splash_answer;
-    DWORD first = WaitForMultipleObjects(ready ? 3 : 2, waits, FALSE, SPLASH_DELAY);
-    if (first == WAIT_OBJECT_0 || first == WAIT_OBJECT_0 + 2)
-        return;   /* the launcher stopped, or the app is about to show its window, before the delay */
     WNDCLASSEXW type = {sizeof type, CS_DROPSHADOW, splash_proc, 0, 0, splash_instance, NULL,
-                        LoadCursorW(NULL, IDC_APPSTARTING), NULL, NULL, L"DevmemStudioLauncherSplash", NULL};
+                        LoadCursorW(NULL, IDC_APPSTARTING), NULL, NULL, SPLASH_CLASS, NULL};
     POINT cursor = {0, 0};
     GetCursorPos(&cursor);
     MONITORINFO monitor = {sizeof monitor, {0, 0, 0, 0}, {0, 0, 0, 0}, 0};
     if ((!RegisterClassExW(&type) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
         || !GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &monitor))
-        return;
+        return 0;
     const RECT *work = &monitor.rcWork;
-    splash.owner = CreateWindowExW(WS_EX_TOOLWINDOW, type.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0,
-                                   NULL, NULL, splash_instance, NULL);
-    splash.window = splash.owner ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, type.lpszClassName,
-                                                   L"", WS_POPUP | WS_CLIPCHILDREN, work->left, work->top, 1, 1,
+    splash.owner = CreateWindowExW(WS_EX_TOOLWINDOW, SPLASH_CLASS, L"", WS_POPUP, 0, 0, 0, 0, NULL, NULL, splash_instance, NULL);
+    splash.window = splash.owner ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, SPLASH_CLASS, L"",
+                                                   WS_POPUP | WS_CLIPCHILDREN, work->left, work->top, 1, 1,
                                                    splash.owner, NULL, splash_instance, NULL) : NULL;
-    if (!splash.window) {
-        if (splash.owner)
-            DestroyWindow(splash.owner);
-        ZeroMemory(&splash, sizeof splash);
-        return;
-    }
+    if (!splash.window)
+        return 0;
     splash.dpi = window_dpi(splash.window);   /* placed on the target monitor first, so this is its DPI */
     splash.title = splash_font(splash.dpi, 12, FW_SEMIBOLD);
     splash.note = splash_font(splash.dpi, 9, FW_NORMAL);
@@ -778,7 +926,34 @@ static void splash_run(void)
     int width = px(SPLASH_WIDTH), height = px(SPLASH_HEIGHT);
     SetWindowPos(splash.window, NULL, (work->left + work->right - width) / 2, (work->top + work->bottom - height) / 2,
                  width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    splash.sweep_from = clock_ms();
+    return 1;
+}
+
+static void splash_destroy(void)
+{
+    if (splash.window)
+        DestroyWindow(splash.window);
+    if (splash.owner)
+        DestroyWindow(splash.owner);
+    HGDIOBJ fonts[] = {splash.title, splash.note, splash.strong};
+    for (int i = 0; i < 3; ++i)
+        if (fonts[i])
+            DeleteObject(fonts[i]);
+    if (splash.logo)
+        DestroyIcon(splash.logo);
+}
+
+static void splash_run(void)
+{
+    HANDLE done = splash_done, ready = splash_ready;   /* own copies: splash_stop may give up on us */
+    splash.answer = splash_answer;
+    splash.gone = splash_gone;
+    splash_timings(0);
+    if (!splash_create()) {
+        splash_destroy();
+        ZeroMemory(&splash, sizeof splash);
+        return;
+    }
     splash_tick();
     ShowWindow(splash.window, SW_SHOWNOACTIVATE);
     /* 60 fps from a high-resolution timer (a plain wait rounds to 15.6 ms steps, ~21 fps). Tick, paint, then wait:
@@ -789,6 +964,8 @@ static void splash_run(void)
     double next = clock_ms();
     for (;;) {
         double now = clock_ms();
+        if (!splash.ready_at && !splash.problem && ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0)
+            splash_hand_over(now);
         if (now >= next) {
             splash_tick();
             next = next + SPLASH_FRAME > now ? next + SPLASH_FRAME : now + SPLASH_FRAME;
@@ -799,7 +976,7 @@ static void splash_run(void)
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-        if (WaitForSingleObject(done, 0) == WAIT_OBJECT_0 || (ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0))
+        if (WaitForSingleObject(done, 0) == WAIT_OBJECT_0 || splash_finished(clock_ms()))
             break;
         double wait = max(next - clock_ms(), 0.0);
         LARGE_INTEGER due;
@@ -807,24 +984,22 @@ static void splash_run(void)
         HANDLE wakers[3];
         DWORD count = 0;
         wakers[count++] = done;
-        if (ready)
+        if (ready && !splash.ready_at)
             wakers[count++] = ready;
         int timed = frame && SetWaitableTimer(frame, &due, 0, NULL, NULL, FALSE);
         if (timed)
             wakers[count++] = frame;
-        DWORD woke = MsgWaitForMultipleObjects(count, wakers, FALSE, timed ? INFINITE : (DWORD)wait + 1, QS_ALLINPUT);
-        if (woke == WAIT_OBJECT_0 || (ready && woke == WAIT_OBJECT_0 + 1))
+        if (MsgWaitForMultipleObjects(count, wakers, FALSE, timed ? INFINITE : (DWORD)wait + 1, QS_ALLINPUT) == WAIT_OBJECT_0)
             break;
     }
     if (frame)
         CloseHandle(frame);
-    DestroyWindow(splash.window);
-    DestroyWindow(splash.owner);
-    DeleteObject(splash.title);
-    DeleteObject(splash.note);
-    DeleteObject(splash.strong);
-    if (splash.logo)
-        DestroyIcon(splash.logo);
+    splash_destroy();
+    if (splash.ready_at) {   /* handed over: the app's window first, the file write after */
+        if (splash.gone)
+            SetEvent(splash.gone);
+        splash_learn(splash.ready_at);
+    }
     ZeroMemory(&splash, sizeof splash);
 }
 
@@ -846,9 +1021,8 @@ static void splash_open(void)
     if (splash_gone)
         ResetEvent(splash_gone);
     splash_done = CreateEventW(NULL, TRUE, FALSE, NULL);
-    splash_now = CreateEventW(NULL, TRUE, FALSE, NULL);
     splash_answer = CreateEventW(NULL, FALSE, FALSE, NULL);
-    splash_thread = splash_done && splash_now && splash_answer ? CreateThread(NULL, 0, splash_main, NULL, 0, NULL) : NULL;
+    splash_thread = splash_done && splash_answer ? CreateThread(NULL, 0, splash_main, NULL, 0, NULL) : NULL;
     if (!splash_thread && splash_gone)
         SetEvent(splash_gone);
 }
@@ -858,13 +1032,19 @@ static void splash_start(HINSTANCE instance, const wchar_t *arguments)
     splash_instance = instance;
     splash_silent = wcsstr(arguments, L"--smoke-test") != NULL;
     splash_enabled = !splash_silent && !wcsstr(arguments, L"--offscreen");   /* acceptance runs stay windowless */
-    wchar_t name[64], event[72];
+    wchar_t name[64], event[80];
     swprintf(name, 64, L"Local\\DevmemStudio.Splash.%lu", GetCurrentProcessId());
-    swprintf(event, 72, L"%ls.ready", name);
-    splash_ready = splash_enabled ? CreateEventW(NULL, TRUE, FALSE, event) : NULL;
-    swprintf(event, 72, L"%ls.gone", name);
-    splash_gone = splash_enabled ? CreateEventW(NULL, TRUE, FALSE, event) : NULL;
-    SetEnvironmentVariableW(L"DEVMEMSTUDIO_LAUNCHER_SPLASH", splash_ready && splash_gone ? name : NULL);
+    if (splash_enabled) {
+        swprintf(event, 80, L"%ls.ready", name);
+        splash_ready = CreateEventW(NULL, TRUE, FALSE, event);
+        swprintf(event, 80, L"%ls.gone", name);
+        splash_gone = CreateEventW(NULL, TRUE, FALSE, event);
+        swprintf(event, 80, L"%ls.progress", name);
+        progress_map = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(Progress), event);
+        progress = progress_map ? MapViewOfFile(progress_map, FILE_MAP_WRITE, 0, 0, sizeof(Progress)) : NULL;
+        splash_times = splash_location();
+    }
+    SetEnvironmentVariableW(L"DEVMEMSTUDIO_LAUNCHER_SPLASH", splash_ready && splash_gone && progress ? name : NULL);
     if (splash_enabled)
         splash_open();
 }
@@ -875,38 +1055,38 @@ static void splash_stop(void)
         SetEvent(splash_done);
         if (WaitForSingleObject(splash_thread, 2000) != WAIT_OBJECT_0) {
             CloseHandle(splash_thread);   /* still running: it keeps its events */
-            splash_thread = splash_done = splash_now = splash_answer = NULL;
+            splash_thread = splash_done = splash_answer = NULL;
             return;
         }
         CloseHandle(splash_thread);
     }
     if (splash_done)
         CloseHandle(splash_done);
-    if (splash_now)
-        CloseHandle(splash_now);
     if (splash_answer)
         CloseHandle(splash_answer);
-    splash_thread = splash_done = splash_now = splash_answer = NULL;
+    splash_thread = splash_done = splash_answer = NULL;
 }
 
 /* Shows the problem in the splash (an error box without one); nonzero for Retry. */
 static int splash_fail(const wchar_t *problem)
 {
+    splash_problem = problem;   /* before any new splash thread looks */
+    InterlockedIncrement(&splash_failure);
     if (splash_enabled && (!splash_thread || WaitForSingleObject(splash_thread, 0) == WAIT_OBJECT_0)) {
         splash_stop();
         splash_open();   /* stopped at the app's window (or its signal), or never started */
     }
     if (splash_thread) {
-        splash_problem = problem;
-        InterlockedIncrement(&splash_failure);
-        SetEvent(splash_now);
         HANDLE waits[2] = {splash_answer, splash_thread};
         DWORD woke = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+        if (splash_ready)
+            ResetEvent(splash_ready);   /* the failed app's: no hand-over once the problem clears */
         splash_problem = NULL;
         if (woke == WAIT_OBJECT_0)
             return splash_choice == IDRETRY;
         splash_stop();   /* no window could be made */
     }
+    splash_problem = NULL;
     return !splash_silent && MessageBoxW(NULL, problem, L"DevmemStudio " RUNTIME_VERSION, MB_RETRYCANCEL | MB_ICONERROR) == IDRETRY;
 }
 
@@ -927,15 +1107,21 @@ static BOOL CALLBACK seek_window(HWND window, LPARAM context)
     return TRUE;
 }
 
-/* Keep the splash until the app shows any window of its own (main window or an error box), exits, or times out.
-   Nonzero: it exited first; the splash stays for a failure. */
+/* Keep the splash until it has handed over (the app said "ready"), or else the app shows any window of its own
+   (an error box), exits, or times out. Nonzero: it exited first; the splash stays for a failure. */
 static int splash_until_window(HANDLE process, DWORD id)
 {
     Seek seek = {id, 0};
     ULONGLONG until = GetTickCount64() + SPLASH_TIMEOUT;
     while (splash_thread && GetTickCount64() < until) {
-        if (WaitForSingleObject(process, 25) != WAIT_TIMEOUT)
+        HANDLE waits[2] = {process, splash_thread};
+        DWORD woke = WaitForMultipleObjects(2, waits, FALSE, 25);
+        if (woke == WAIT_OBJECT_0)
             return 1;
+        if (woke == WAIT_OBJECT_0 + 1)
+            break;
+        if (splash_ready && WaitForSingleObject(splash_ready, 0) == WAIT_OBJECT_0)
+            continue;   /* handing over: the splash ends itself */
         EnumWindows(seek_window, (LPARAM)&seek);
         if (seek.found)
             break;
@@ -1019,7 +1205,7 @@ static const wchar_t *launch(HINSTANCE instance, const wchar_t *arguments, DWORD
     HANDLE mutex = NULL;
     int owned = 0, windowless = 0;
     *exit_code = 3;
-    set_stage(STAGE_CHECK);
+    begin_launch();
     if (!appdata || !(top = join(appdata, L"DevmemStudio")) || !(base = join(top, L"runtime")))
         goto done;
     problem = L"无法创建运行库缓存目录 %LOCALAPPDATA%\\DevmemStudio\\runtime。";

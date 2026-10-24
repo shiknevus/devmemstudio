@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxL
                                QDialog, QSizePolicy, QLayout, QTreeWidget, QTreeWidgetItem)
 
 from . import __version__
-from . import completion, component_parse, top_import
+from . import completion, component_parse, launcher_splash, top_import
 from .catalog import REGISTER_FIELDS
 from .bitpack_dialog import BitPackDialog
 from .update_dialog import UpdateDialog
@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
         saved_top = self.cfg.get("top_path")
         if saved_top:
             if Path(saved_top).is_file():
+                launcher_splash.stage(launcher_splash.PROJECT)
                 self.load_top(Path(saved_top), quiet=True)
             else:
                 self.append_log("SYSTEM", f"上次导入的 top 文件不存在：{saved_top}；可重新导入。")
@@ -1134,7 +1135,7 @@ class MainWindow(QMainWindow):
             self.type_catalog = {"schema": component_parse.CATALOG_SCHEMA, "types": {}}
         updated_keys = set()
         try:
-            overrides = user_data_dir() / "component_overrides"
+            overrides = self.store.path.parent / "component_overrides"   # beside registers.json: copies with the EXE
             overrides.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             overrides = None

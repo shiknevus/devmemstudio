@@ -111,6 +111,13 @@ def user_data_dir() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "DevmemStudio"
 
 
+def component_override_dirs() -> list[Path]:
+    """「更新控件」 results: local app data (older releases, read-only EXE dirs), then beside the EXE."""
+    legacy = user_data_dir() / "component_overrides"
+    portable = application_dir() / "component_overrides"
+    return [legacy] if portable == legacy else [legacy, portable]
+
+
 def parse_addr(value):
     """Addresses without a prefix are still hexadecimal, as in the legacy app."""
     try:

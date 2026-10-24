@@ -2,7 +2,6 @@
 """Taskbar identity for the single-file build: pinning must restart the launcher, not the cached runtime."""
 import ctypes
 from ctypes import wintypes
-import os
 import uuid
 
 APP_ID = "Sunny.DevmemStudio"
@@ -151,28 +150,6 @@ def bind_relaunch(hwnd, launcher):
                 return False
         return _method(store, 7)(store) == 0   # IPropertyStore::Commit
     return bool(_with_store(hwnd, apply))
-
-
-def dismiss_launcher_splash(timeout=0.5):
-    """Have the single-file launcher take its splash down (and wait) before the main window shows."""
-    name = os.environ.get("DEVMEMSTUDIO_LAUNCHER_SPLASH")
-    if not name:
-        return False
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
-    kernel.OpenEventW.restype = wintypes.HANDLE
-    kernel.SetEvent.argtypes = kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-    kernel.WaitForSingleObject.restype = wintypes.DWORD
-    ready = kernel.OpenEventW(0x00100002, False, name + ".ready")   # SYNCHRONIZE | EVENT_MODIFY_STATE
-    gone = kernel.OpenEventW(0x00100000, False, name + ".gone")   # SYNCHRONIZE
-    try:
-        return bool(ready and gone and kernel.SetEvent(ready)
-                    and kernel.WaitForSingleObject(gone, int(timeout * 1000)) == 0)
-    finally:
-        for handle in (ready, gone):
-            if handle:
-                kernel.CloseHandle(handle)
 
 
 def read_relaunch(hwnd):

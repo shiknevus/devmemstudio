@@ -231,9 +231,8 @@ def run_smoke(app, directory: Path):
             " default: o_st_rd_data = 32'd0; endcase\nendmodule\n", encoding="utf-8")
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(directory)), \
                 patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
-                patch("devmem_studio.window.FileChoiceDialog.exec", return_value=QDialog.Accepted), \
-                patch("devmem_studio.window.user_data_dir", return_value=directory):
-            window.import_component()
+                patch("devmem_studio.window.FileChoiceDialog.exec", return_value=QDialog.Accepted):
+            window.import_component()   # saved beside the config: directory/component_overrides
             settle(lambda: not window._busy and not getattr(window, "_component_import_active", False))
         imported = window.type_catalog["types"]["ec_slv_pul_axis"]
         check("imported_from" in imported and
@@ -243,7 +242,8 @@ def run_smoke(app, directory: Path):
         settle(lambda: not window._busy)
         check(len(window.regs) == 3, "Imported definition applies to the selected component immediately")
         os.environ.pop("DEVMEMSTUDIO_IGNORE_OVERRIDES", None)   # verify the override reloads
-        with patch("devmem_studio.top_import.user_data_dir", return_value=directory):
+        with patch("devmem_studio.top_import.component_override_dirs",
+                   return_value=[directory / "component_overrides"]):
             window.type_catalog = top_import.load_type_catalog()
         os.environ["DEVMEMSTUDIO_IGNORE_OVERRIDES"] = "1"
         check("imported_from" in window.type_catalog["types"]["ec_slv_pul_axis"],

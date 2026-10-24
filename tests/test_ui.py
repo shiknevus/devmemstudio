@@ -1084,11 +1084,10 @@ class TopImportUiTests(UiTestBase):
 
         with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(root)), \
                 patch.object(FileChoiceDialog, 'exec', new=choose), \
-                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
-                patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
+                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes):
             self.window.import_component()
             self.settle(lambda: not self.window._busy and not self.window._component_import_active)
-        saved = Path(self.temp.name) / 'component_overrides'
+        saved = Path(self.temp.name) / 'component_overrides'   # beside settings.json (the EXE in a release)
         self.assertTrue((saved / 'ec_1do.json').is_file())
         self.assertFalse((saved / 'ec_1di.json').exists())
 
@@ -1109,8 +1108,7 @@ class TopImportUiTests(UiTestBase):
         self.assertEqual(self.window._type_keys(folder), ['ec_9x_9y', 'ec_9x9y'])
         with patch('devmem_studio.window.QFileDialog.getExistingDirectory', return_value=str(folder)), \
                 patch.object(FileChoiceDialog, 'exec', return_value=QDialog.Accepted), \
-                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes), \
-                patch('devmem_studio.window.user_data_dir', return_value=Path(self.temp.name)):
+                patch('devmem_studio.window.QMessageBox.question', return_value=QMessageBox.Yes):
             self.window.import_component()
             self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         saved = Path(self.temp.name) / 'component_overrides'
@@ -1644,8 +1642,7 @@ class TopImportUiTests(UiTestBase):
         self.assertNotIn("imported_from", self.window.type_catalog["types"]["ec_1do"])
         with patch("devmem_studio.window.QFileDialog.getExistingDirectory", return_value=str(folder)), \
                 patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
-                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes), \
-                patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
+                patch("devmem_studio.window.QMessageBox.question", return_value=QMessageBox.Yes):
             self.window.import_component()
             self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         self.assertTrue((Path(self.temp.name) / "component_overrides" / "ec_1do.json").exists())
@@ -1672,8 +1669,7 @@ class TopImportUiTests(UiTestBase):
                    return_value=str(Path(self.temp.name))), \
                 patch.object(FileChoiceDialog, "exec", return_value=QDialog.Accepted), \
                 patch("devmem_studio.window.QMessageBox.question",
-                      return_value=QMessageBox.Yes) as question, \
-                patch("devmem_studio.window.user_data_dir", return_value=Path(self.temp.name)):
+                      return_value=QMessageBox.Yes) as question:
             self.window.import_component()
             self.settle(lambda: not self.window._busy and not self.window._component_import_active)
         self.assertIn("解析到 3 个寄存器", question.call_args[0][2])

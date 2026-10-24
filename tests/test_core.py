@@ -182,6 +182,17 @@ class ConfigTests(unittest.TestCase):
             self.assertNotEqual(resolved, root_resident.resolve())
             self.assertFalse(str(resolved).startswith(str(root_resident.resolve())))
 
+    def test_component_override_dirs_read_local_app_data_then_beside_exe(self):
+        from unittest.mock import patch
+        import devmem_studio.core as core
+        with patch("devmem_studio.core.user_data_dir", return_value=Path("appdata")), \
+                patch("devmem_studio.core.application_dir", return_value=Path("exe")):
+            self.assertEqual(core.component_override_dirs(),
+                             [Path("appdata/component_overrides"), Path("exe/component_overrides")])
+        with patch("devmem_studio.core.user_data_dir", return_value=Path("same")), \
+                patch("devmem_studio.core.application_dir", return_value=Path("same")):
+            self.assertEqual(core.component_override_dirs(), [Path("same/component_overrides")])
+
     def test_basic_category_selection_and_write_cache_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ConfigStore(Path(directory) / "registers.json")

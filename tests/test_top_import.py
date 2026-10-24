@@ -536,7 +536,7 @@ class CatalogTests(unittest.TestCase):
                     {"offset": "0x000", "name": "IRQ_REG1", "width": 32, "readonly": True}]}),
                 encoding="utf-8")
             (overrides / "broken.json").write_text("{broken", encoding="utf-8")
-            with patch("devmem_studio.top_import.user_data_dir", return_value=Path(directory)):
+            with patch("devmem_studio.top_import.component_override_dirs", return_value=[overrides]):
                 catalog = top_import.load_type_catalog()
         self.assertIn("ec_custom", catalog["types"])
         self.assertNotIn("broken", catalog["types"])
@@ -563,7 +563,7 @@ class CatalogTests(unittest.TestCase):
                 os.utime(item, (moment, moment))
             with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
                     patch("devmem_studio.top_import.resource_path", return_value=bundled), \
-                    patch("devmem_studio.top_import.user_data_dir", return_value=root):
+                    patch("devmem_studio.top_import.component_override_dirs", return_value=[overrides]):
                 catalog = top_import.load_type_catalog()
         names = {key: [reg["name"] for reg in top_import.registers_for(catalog, key)[0]]
                  for key in ("ec_old", "ec_new")}
@@ -591,12 +591,41 @@ class CatalogTests(unittest.TestCase):
                 os.utime(item, (moment, moment))
             with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
                     patch("devmem_studio.top_import.resource_path", return_value=bundled), \
-                    patch("devmem_studio.top_import.user_data_dir", return_value=root):
+                    patch("devmem_studio.top_import.component_override_dirs", return_value=[overrides]):
                 catalog = top_import.load_type_catalog()
         names = {key: [reg["name"] for reg in top_import.registers_for(catalog, key)[0]]
                  for key in ("ec_restored", "ec_stale")}
         self.assertIn("IMPORTED", names["ec_restored"])
         self.assertNotIn("IMPORTED", names["ec_stale"])
+
+    def test_overrides_beside_exe_merge_with_local_app_data_newest_import_wins(self):
+        """A folder copied beside the EXE from another PC loads; a type in both folders takes the newer import."""
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundled = root / "catalog.json"
+            bundled.write_text(json.dumps({"generated_at": "2026-10-10T12:00:00+08:00", "types": {
+                name: {"registers": [{"offset": "0x00C", "name": "EC_ID", "width": 32}]}
+                for name in ("ec_both", "ec_beside", "ec_local")}}), encoding="utf-8")
+            legacy, beside = root / "appdata" / "component_overrides", root / "exe" / "component_overrides"
+            for folder, name, stamp, register in (
+                    (legacy, "ec_both", "2026-10-12T00:00:00+08:00", "LEGACY_NEWER"),
+                    (beside, "ec_both", "2026-10-11T00:00:00+08:00", "BESIDE_OLDER"),
+                    (beside, "ec_beside", "2026-10-11T00:00:00+08:00", "BESIDE"),
+                    (legacy, "ec_local", "2026-10-11T00:00:00+08:00", "LEGACY")):
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / f"{name}.json").write_text(json.dumps({"imported_at": stamp, "registers": [
+                    {"offset": "0x010", "name": register, "width": 32}]}), encoding="utf-8")
+            with patch.dict(os.environ, {"DEVMEMSTUDIO_IGNORE_OVERRIDES": ""}), \
+                    patch("devmem_studio.top_import.resource_path", return_value=bundled), \
+                    patch("devmem_studio.top_import.component_override_dirs", return_value=[legacy, beside]):
+                catalog = top_import.load_type_catalog()
+        names = {key: [reg["name"] for reg in top_import.registers_for(catalog, key)[0]]
+                 for key in ("ec_both", "ec_beside", "ec_local")}
+        self.assertIn("LEGACY_NEWER", names["ec_both"])
+        self.assertNotIn("BESIDE_OLDER", names["ec_both"])
+        self.assertIn("BESIDE", names["ec_beside"])
+        self.assertIn("LEGACY", names["ec_local"])
 
     def test_registers_for_skips_malformed_override_offsets(self):
         """User-edited override JSON with a broken offset must not crash the table rebuild."""

@@ -295,7 +295,7 @@ class BuildTests(unittest.TestCase):
                                        "types": {"ec_gone": {"decode_file": "x/ps_rw_pl_reg_gone.sv", "registers": []},
                                                  "ec_u_ut": {"decode_file": decode, "registers": []}}}),
                            encoding="utf-8")
-            with patch.object(gen, "user_data_dir", return_value=root / "no_user_data"):
+            with patch.object(gen, "local_override_dirs", return_value=[root / "no_user_data"]):
                 self.assertEqual(gen.refresh(out, None, "2026-10-11T12:00:00"), 0)
                 written = json.loads(out.read_text(encoding="utf-8"))
                 self.assertEqual(written["generated_at"], "2026-10-11T12:00:00")
@@ -314,9 +314,14 @@ class BuildTests(unittest.TestCase):
             overrides = root / "user" / "component_overrides"
             overrides.mkdir(parents=True)
             (overrides / "ec_uut.json").write_text("{}", encoding="utf-8")   # mtime now > stamp
-            with patch.object(gen, "user_data_dir", return_value=root / "user"):
+            with patch.object(gen, "local_override_dirs", return_value=[root / "empty", overrides]):
                 self.assertEqual(gen.refresh(out, None, "2099-01-01T00:00:00"), 0)
             self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["generated_at"], "2099-01-01T00:00:00")
+
+    def test_local_override_dirs_include_the_dist_exe_folder(self):
+        with patch.object(gen, "component_override_dirs", return_value=[Path("appdata")]):
+            self.assertEqual(gen.local_override_dirs(),
+                             [Path("appdata"), gen.ROOT / "dist" / "component_overrides"])
 
     def test_refresh_without_rtl_root_leaves_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -839,7 +844,7 @@ class ReviewRegressionTests(unittest.TestCase):
             overrides.mkdir(parents=True)
             restored = overrides / "ec_uut.json"   # restored backup: file mtime is new, import was old
             restored.write_text(json.dumps({"imported_at": "2025-12-31T00:00:00+08:00"}), encoding="utf-8")
-            with patch.object(gen, "user_data_dir", return_value=root / "user"):
+            with patch.object(gen, "local_override_dirs", return_value=[overrides]):
                 self.assertEqual(gen.refresh(out, None, "2099-01-01T00:00:00"), 0)
             self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["generated_at"], "2026-01-01T00:00:00+08:00")
 
