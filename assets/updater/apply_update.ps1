@@ -67,8 +67,10 @@ function Replace-DevmemFile($source, $target, $backup) {
     }
 }
 
-# The launcher's only unowned window is its failure screen (the starting splash is owned); it runs the app as a child process.
-function Wait-DevmemStarted($process, $seconds) {
+# Started = the new app wrote the flag file $marker (see updater.report_started; once its main window is up). The
+# launcher's only unowned window is its failure screen (the starting splash is owned); it runs the app as a child process.
+# No flag within $readySeconds (an app that cannot report): the older check applies, a child process under the launcher.
+function Wait-DevmemStarted($process, $seconds, $marker, $readySeconds) {
     $begin = [DateTime]::UtcNow
     while ($true) {
         if ($process.WaitForExit(250)) {
@@ -79,8 +81,9 @@ function Wait-DevmemStarted($process, $seconds) {
         if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
             throw ('The new application showed an error: ' + $process.MainWindowTitle)
         }
+        if ($marker -and (Test-Path -LiteralPath $marker)) { return }
         $elapsed = ([DateTime]::UtcNow - $begin).TotalSeconds
-        if ($elapsed -ge 3) {
+        if ($elapsed -ge $readySeconds) {
             try {
                 $child = Get-CimInstance Win32_Process -Filter ('ParentProcessId=' + $process.Id) -ErrorAction Stop |
                     Where-Object { $_.CreationDate -ge $process.StartTime } | Select-Object -First 1
@@ -99,6 +102,9 @@ function Invoke-DevmemUpdate($job) {
     $newProcess = $null
     $startSeconds = 120
     if ($job.start_timeout) { $startSeconds = [int]$job.start_timeout }
+    $readySeconds = 60
+    if ($null -ne $job.ready_timeout) { $readySeconds = [int]$job.ready_timeout }
+    $marker = $null
     try {
         $stagePath = [IO.Path]::GetFullPath($job.staged)
         # The staged name is ours alone, so it is removed even if the other paths are bad.
@@ -134,8 +140,12 @@ function Invoke-DevmemUpdate($job) {
         Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI*' -or $_.Name -eq '_MEIPASS2' -or $_.Name -like 'DEVMEMSTUDIO_LAUNCHER*' } |
             ForEach-Object { Remove-Item -LiteralPath ('Env:' + $_.Name) }
         $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+        # Passes through the launcher to the app; a fresh name per run, so an old flag never counts.
+        $marker = Join-Path ([IO.Path]::GetTempPath()) ('devmem-update-ready-' + [Guid]::NewGuid().ToString('N') + '.flag')
+        $env:DEVMEMSTUDIO_UPDATE_READY = $marker
         $newProcess = Start-Devmem $targetPath
-        Wait-DevmemStarted $newProcess $startSeconds
+        Remove-Item -LiteralPath 'Env:DEVMEMSTUDIO_UPDATE_READY' -ErrorAction SilentlyContinue   # not for the rollback's start
+        Wait-DevmemStarted $newProcess $startSeconds $marker $readySeconds
         return @{ success = $true; version = $job.version; backup = $backupPath; pid = $newProcess.Id }
     } catch {
         $reason = $_.Exception.Message
@@ -154,6 +164,7 @@ function Invoke-DevmemUpdate($job) {
         }
         return @{ success = $false; error = $reason; restored = $restored; backup = $backupPath }
     } finally {
+        if ($marker) { Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue }
         if ($ownsStage -and -not $replaced -and (Test-Path -LiteralPath $stagePath)) {
             Remove-Item -LiteralPath $stagePath -ErrorAction SilentlyContinue
         }

@@ -5,9 +5,10 @@ import errno
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from devmem_studio.bitpack import firmware_members, run_firmware_pack, scan_firmware_files
 from devmem_studio.core import CommandError, SshSession, connect_ssh_until_cancelled
@@ -45,6 +46,23 @@ class FirmwarePackTests(unittest.TestCase):
                 self.assertEqual(archive.read(f"{version}/{path.name}"), before[path])
             self.assertIsNone(archive.testzip())
         self.assertEqual({path: path.read_bytes() for path in before}, before)
+
+    def test_entries_keep_source_modification_time(self):
+        stamp = time.mktime((2024, 3, 5, 14, 30, 20, 0, 0, -1))
+        for path in (self.bit, *(p for p, _ in self.bins)):
+            os.utime(path, (stamp, stamp))
+        result = self.pack(self.bit)
+        with ZipFile(result["path"]) as archive:
+            for info in archive.infolist():
+                self.assertEqual(info.date_time, (2024, 3, 5, 14, 30, 20), info.filename)
+                self.assertEqual(info.compress_type, ZIP_DEFLATED)
+
+    def test_small_entries_are_not_zip64(self):
+        result = self.pack(self.bit)
+        with ZipFile(result["path"]) as archive:
+            for info in archive.infolist():
+                self.assertLess(info.extract_version, 45, info.filename)
+                self.assertEqual(info.extra, b"", info.filename)
 
     def test_only_one_selected_bin_omits_bit_and_unselected_binary(self):
         binary = self.bins[0][0]

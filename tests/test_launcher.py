@@ -3,6 +3,7 @@ import ctypes
 from ctypes import wintypes as w
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -18,7 +19,8 @@ STAGES = range(5, 10)   # launcher.c STAGE_QT..STAGE_PROJECT
 
 # The app the launcher runs: "--exit N" quits before any window, "--window" shows one, "--ready" first has the
 # launcher take its splash down (as devmem_debug does) and quits with 10+ if any splash is still on screen;
-# "--stages" reports the app's stages 60 ms apart before that.
+# "--stages" reports the app's stages 60 ms apart before that; "--check-data" quits with 21 (before any signal) if
+# _internal\data.bin starts with zeros, as an app whose runtime file was zeroed would.
 FAKE_APP = r"""#include <windows.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +30,24 @@ int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
     const char *code = strstr(c, "--exit ");
     if (code)
         return atoi(code + 7);
+    if (strstr(c, "--check-data")) {
+        char path[MAX_PATH];
+        unsigned char head[16];
+        DWORD got = 0;
+        GetModuleFileNameA(NULL, path, MAX_PATH);
+        *strrchr(path, '\\') = 0;
+        strcat(path, "\\_internal\\data.bin");
+        HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                                  OPEN_EXISTING, 0, NULL);
+        if (file == INVALID_HANDLE_VALUE || !ReadFile(file, head, 16, &got, NULL) || got != 16)
+            return 20;
+        CloseHandle(file);
+        int zeros = 1;
+        for (int i = 0; i < 16; ++i)
+            zeros = zeros && !head[i];
+        if (zeros)
+            return 21;
+    }
     if (strstr(c, "--ready")) {
         wchar_t name[96], event[112];
         if (!GetEnvironmentVariableW(L"DEVMEMSTUDIO_LAUNCHER_SPLASH", name, 96))
@@ -127,6 +147,17 @@ def children(parent):
         more = kernel.Process32NextW(snapshot, ctypes.byref(entry))
     kernel.CloseHandle(snapshot)
     return found
+
+
+KNOWN_DLLS = {"kernel32.dll", "user32.dll", "gdi32.dll", "msvcrt.dll", "shell32.dll", "ole32.dll", "advapi32.dll",
+              "shlwapi.dll", "shcore.dll"}   # KnownDLLs: the loader takes them from System32, never the EXE's folder
+
+
+def runtime_dir(appdata):
+    """The finished runtime folder (not a .tmp/.old leftover)."""
+    found = [item for item in (Path(appdata) / "DevmemStudio" / "runtime").iterdir() if re.fullmatch(r"[\d.]+-[0-9a-f]{12}", item.name)]
+    assert len(found) == 1, found
+    return found[0]
 
 
 def read_timings(path):
@@ -335,6 +366,74 @@ class LauncherTests(unittest.TestCase):
     def test_clean_app_exit_without_window_is_not_a_failure(self):
         self.start("--exit 0")
         self.assertEqual(self.exit_code(), 0)
+
+    def zero_in_place(self, path):
+        """A power cut's leftover: right size, right stamp, zeros inside."""
+        stat = path.stat()
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                path.write_bytes(bytes(stat.st_size))
+                break
+            except PermissionError:   # the job ends the app a moment after the launcher
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.1)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    def test_zeroed_runtime_file_of_the_right_size_is_unpacked_again(self):
+        original = (self.base / "runtime" / "_internal" / "data.bin").read_bytes()
+        for relative in ("_internal/data.bin", "DevmemStudio.exe"):   # the app dies on start-up / cannot even be created
+            with self.subTest(relative):
+                appdata = self.work / f"appdata-{Path(relative).name}"
+                self.start("--ready --check-data", appdata=appdata)
+                self.wait_for(lambda: children(self.process.dwProcessId), what="the app process")
+                time.sleep(1)   # past its hand-over
+                self.assertIsNone(self.main_window())
+                self.stop()
+                runtime = runtime_dir(appdata)
+                data = runtime / "_internal" / "data.bin"
+                self.zero_in_place(runtime / relative)
+                self.assertFalse(any((runtime / relative).read_bytes()[:16]))
+                self.start("--ready --check-data", appdata=appdata)
+                self.wait_for(lambda: data.read_bytes() == original and children(self.process.dwProcessId),
+                              what="the damaged runtime to be unpacked again")
+                self.wait_for(lambda: not any(x.name == SPLASH and x.visible for x in self.windows()), what="the hand-over")
+                time.sleep(1)
+                self.assertIsNone(self.main_window())   # no failure screen
+                self.assertEqual(kernel.WaitForSingleObject(self.process.hProcess, 0), 0x102)   # still running
+                self.stop()
+
+    def test_failing_app_is_not_unpacked_again_and_again(self):
+        appdata = self.work / "appdata"
+        self.start("--exit 7", appdata=appdata)   # first start: freshly unpacked, no second try
+        user32.PostMessageW(self.splash(failing=True).handle, WM_COMMAND, IDCANCEL, 0)
+        self.assertEqual(self.exit_code(), 7)
+        self.stop()
+        stamp = (runtime_dir(appdata) / "DevmemStudio.exe").stat().st_ctime_ns
+        self.start("--exit 7", appdata=appdata)   # warm cache, app dies: one fresh unpack, then the failure
+        user32.PostMessageW(self.splash(failing=True).handle, WM_COMMAND, IDCANCEL, 0)
+        self.assertEqual(self.exit_code(15), 7)
+        self.assertGreater((runtime_dir(appdata) / "DevmemStudio.exe").stat().st_ctime_ns, stamp)
+
+    def test_launcher_imports_only_known_dlls_and_ignores_planted_ones(self):
+        objdump = shutil.which("x86_64-w64-mingw32-objdump")
+        if objdump:
+            listing = subprocess.run([objdump, "-p", str(self.exe)], capture_output=True, text=True, timeout=30).stdout
+            imported = {line.split(":")[1].strip().lower() for line in listing.splitlines() if "DLL Name:" in line}
+            self.assertTrue(imported)
+            self.assertLessEqual(imported, KNOWN_DLLS)   # cabinet and bcrypt are not: they load from System32 on demand
+        home = self.work / "bin"
+        home.mkdir()
+        self.exe = home / "DevmemStudio.exe"
+        shutil.copyfile(self.__class__.exe, self.exe)
+        for name in ("cabinet", "bcrypt", "version", "uxtheme", "dwmapi", "comctl32", "msimg32", "winmm"):
+            (home / f"{name}.dll").write_bytes(b"MZ" + bytes(200))   # loads as nothing: failure if it is ever picked
+        self.start("--ready", appdata=self.work / "appdata")   # unpacks (cabinet, bcrypt), then the app hands over
+        self.wait_for(lambda: children(self.process.dwProcessId), what="the app process")
+        time.sleep(1)
+        self.assertIsNone(self.main_window())   # no failure screen
+        self.assertEqual(kernel.WaitForSingleObject(self.process.hProcess, 0), 0x102)
 
     def timings(self, appdata):
         try:

@@ -238,7 +238,9 @@ def run_firmware_pack(source, bins, output, project, timeout, cancel, progress):
                 check()
                 progress(f"正在打包：{name}")
                 digest = hashlib.sha256()
-                with path.open("rb") as incoming, archive.open(name, "w", force_zip64=True) as packed:
+                entry = zipfile.ZipInfo.from_file(path, name, strict_timestamps=False)   # keep the source mtime
+                entry.compress_type = zipfile.ZIP_DEFLATED
+                with path.open("rb") as incoming, archive.open(entry, "w") as packed:   # file_size is set: zip64 only when the file needs it
                     while chunk := incoming.read(1024 * 1024):
                         check()
                         digest.update(chunk)

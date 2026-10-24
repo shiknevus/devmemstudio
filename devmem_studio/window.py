@@ -14,7 +14,8 @@ import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, QPoint, QRect, QSize, Slot
-from PySide6.QtGui import QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtGui import (QIcon, QFont, QColor, QShortcut, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument,
+                           QRegion)
 from PySide6.QtWidgets import (QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLineEdit, QSpinBox, QCheckBox, QComboBox, QLabel, QButtonGroup, QTableWidget,
                                QTableWidgetItem, QHeaderView, QAbstractItemView, QSplitter, QScrollArea,
@@ -27,7 +28,7 @@ from .catalog import REGISTER_FIELDS
 from .bitpack_dialog import BitPackDialog
 from .update_dialog import UpdateDialog
 from . import updater
-from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, HostKeyUnknownError, CommandError, DEFAULT_LOG_PATH, access_width, parse_addr, parse_int,
+from .core import (ConfigStore, SshSession, DemoSession, ReadbackError, HostKeyChangedError, HostKeyUnknownError, CommandError, DEFAULT_LOG_PATH, access_width, field_span, parse_addr, parse_int,
                    validated_address, write_value, write_command, format_decoded_fields, register_group,
                    resource_path, user_data_dir, session_logger, BATCH_READ_CHUNK,
                    normalize_remote_dir, remember_dir, MONITOR_INTERVAL_MS, MONITOR_MAX_REGISTERS, LIVE_INTERVAL_MS,
@@ -978,8 +979,10 @@ class MainWindow(QMainWindow):
         chooser = FileChoiceDialog("选择要导入的 top", f"在 {folder} 下找到 {len(rows)} 个包含 ec_ 控件的文件{partial}，"
                                    "按控件数量、修改时间排列，双击或点「选择」确定。", folder, rows,
                                    ["控件", "修改时间"], self)
-        if chooser.exec() == QDialog.Accepted and chooser.selected_path():
-            self._confirm_import_top(chooser.selected_path())
+        accepted, path = chooser.exec() == QDialog.Accepted, chooser.selected_path()
+        chooser.deleteLater()   # one-shot modal: free it and its taskbar record
+        if accepted and path:
+            self._confirm_import_top(path)
 
     def import_component(self):
         """Re-parse component register definitions at runtime (RTL changed, no rebuild).
@@ -1068,10 +1071,11 @@ class MainWindow(QMainWindow):
             "选择要导入的组件", f"在 {folder} 下找到 {len(rows)} 个组件目录。已默认全选，"
             "可点击行取消或重新选择；点「选择」后解析并确认导入。", folder, rows,
             ["类型", "寄存器定义文件"], self, multiple=True, path_header="组件目录")
-        if chooser.exec() != QDialog.Accepted:
+        accepted, selected = chooser.exec() == QDialog.Accepted, set(chooser.selected_paths())
+        chooser.deleteLater()
+        if not accepted:
             self._finish_component_import()
             return
-        selected = set(chooser.selected_paths())
         targets = [target for target in targets if str(target) in selected]
         if not targets:
             self._finish_component_import()
@@ -1151,9 +1155,8 @@ class MainWindow(QMainWindow):
                 updated_keys.add(key)
                 if overrides is not None:
                     try:
-                        (overrides / f"{key}.json").write_text(
-                            json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
-                    except OSError as exc:
+                        top_import.write_json_atomic(overrides / f"{key}.json", entry)   # temp + os.replace
+                    except (OSError, TypeError, ValueError) as exc:
                         self.append_log("ERROR", f"组件定义保存失败（{key}，本次会话内仍生效）：{exc}")
             if keys:
                 self.append_log("SYSTEM", f"已更新控件类型 {', '.join(keys)}：{len(entry['registers'])} 项寄存器（{target}）。")
@@ -1227,14 +1230,25 @@ class MainWindow(QMainWindow):
 
     def _apply_rtl_base(self, path):
         """Set the base address from components_param.vh; otherwise leave it editable."""
-        param = top_import.find_components_param(path)
+        for note in (self.type_catalog or {}).pop("load_warnings", []):   # catalog/override load problems
+            self.append_log("ERROR", f"组件目录：{note}")
+        param, source = top_import.locate_components_param(path)
         address = None
         if param is not None:
             try:
                 address = top_import.parse_base_address(top_import.read_text_resilient(param))
             except OSError:
                 address = None
-        if address is not None:
+        if address is not None and source == "sibling":
+            # A neighbouring folder's file may be another project's: prefill it, keep the field editable.
+            self.rtl_base = None
+            self.base_field.setEnabled(True)
+            self.base_field.setText(f"0x{address:08x}")
+            self.cfg["base"] = f"0x{address:08x}"
+            self.base_field.setToolTip(f"取自相邻目录 {param}，可能属于其他工程，请核对；可手动修改。")
+            self.append_log("SYSTEM", f"本工程目录下未找到 components_param.vh，已按相邻目录 {param} 将基地址预填为 "
+                                      f"0x{address:08X}，请核对（可在左侧修改）。")
+        elif address is not None:
             self.rtl_base = address
             self.base_field.setText(f"0x{address:08x}")
             self.base_field.setEnabled(False)
@@ -1457,6 +1471,21 @@ class MainWindow(QMainWindow):
             return
         self._last_context = context
         self._updating = True
+        try:
+            self._populate_registers(comp, registers, exact, bias, start, wiring)
+        except Exception:
+            self._last_context = None   # the next selection rebuilds from scratch
+            raise
+        finally:
+            self._updating = False
+        self.search.clear()
+        self.filter_rows()
+        self.cfg["base"] = f"0x{base:08x}"
+        self._refresh_controls()
+        self._sync_monitor()
+        self._schedule_save()
+
+    def _populate_registers(self, comp, registers, exact, bias, start, wiring):
         self.selected = None
         self.regs = copy.deepcopy(sorted(registers, key=lambda r: parse_addr(r["offset"])))
         self.cache_key = f"top:{comp['module_type']}@0x{bias:04x}"
@@ -1508,7 +1537,7 @@ class MainWindow(QMainWindow):
                 if col in (1, 3, 4, 5):
                     item.setFont(QFont("Consolas", 10))
                 item.setTextAlignment(Qt.AlignmentFlag(self.table.horizontalHeaderItem(col).textAlignment()))
-                tooltip = f'{display} · {register_group(reg)}\n全地址 0x{reg["_address"]:08X}\n字段长度 {reg.get("width", 32)} 位'
+                tooltip = f'{display} · {register_group(reg)}\n全地址 0x{reg["_address"]:08X}\n字段长度 {field_span(reg)}'
                 if reg["name"].startswith("PARAM") and not reg.get("signal"):
                     tooltip += "\n未接线：顶层例化中已注释，读回值无意义。" if reg.get("unwired") else \
                                "\n预留：寄存器已接线但组件内未使用（PS 可自由读写）。"
@@ -1524,13 +1553,6 @@ class MainWindow(QMainWindow):
             self.table.setCellWidget(index, 6, read_button)
             self.row_buttons.append(read_button)
             self._update_table_row(reg)
-        self._updating = False
-        self.search.clear()
-        self.filter_rows()
-        self.cfg["base"] = f"0x{base:08x}"
-        self._refresh_controls()
-        self._sync_monitor()
-        self._schedule_save()
 
     @staticmethod
     def _display_name(reg):
@@ -1673,6 +1695,16 @@ class MainWindow(QMainWindow):
             return
         reg = self.selected
         self._updating = True
+        try:
+            self._fill_inspector(reg)
+        finally:
+            self._updating = False
+        self._inspector_mode_changed()
+        self._show_measurement()
+        self._update_command_preview()
+        self._refresh_controls()
+
+    def _fill_inspector(self, reg):
         self.reg_name.setText(reg["name"])
         self.reg_address.setText(f'0x{reg["_address"]:08X}')
         self.access_badge.setText("只读" if reg.get("readonly") else "写-only" if reg.get("write_only")
@@ -1702,11 +1734,6 @@ class MainWindow(QMainWindow):
             self.preset_combo.setItemData(index, self.preset_combo.itemText(index), Qt.ToolTipRole)
         self._refresh_selector_tooltips()
         self.write_button.setText("触发并回读" if reg.get("action") else "写入并回读")
-        self._updating = False
-        self._inspector_mode_changed()
-        self._show_measurement()
-        self._update_command_preview()
-        self._refresh_controls()
 
     def _remember_inspector_mode(self):
         self.cfg["inspector_mode"] = "write" if self.write_mode.isChecked() else "bits"
@@ -1786,9 +1813,11 @@ class MainWindow(QMainWindow):
 
     def _on_screen_changed(self, screen):
         self._set_screen(screen)
-        QTimer.singleShot(0, self._fit_to_screen)
+        self._on_screen_metrics_changed()
 
     def _on_screen_metrics_changed(self, *_):
+        self._filter_min_widths = None   # DPI/font metrics change the measured widths
+        self._title_fit_key = None
         QTimer.singleShot(0, self._fit_to_screen)
 
     def _fit_to_screen(self):
@@ -1816,12 +1845,21 @@ class MainWindow(QMainWindow):
         self._apply_responsive_layout()
         if self.isMaximized():
             return
+        if QApplication.mouseButtons() != Qt.NoButton:
+            QTimer.singleShot(250, self._fit_to_screen)   # mid-drag: never fight the move loop
+            return
+        desktop = QRegion()
+        for each in QApplication.screens():
+            desktop = desktop.united(QRegion(each.availableGeometry()))
+        if QRegion(self.frameGeometry()).subtracted(desktop).isEmpty():
+            return   # fully on the desktop, possibly spanning monitors
         width = min(self.width(), available.width() - frame_w)
         height = min(self.height(), available.height() - frame_h)
         if width != self.width() or height != self.height():
             self.resize(width, height)
-        x = min(max(self.x(), available.left()), available.right() - self.width() - frame_w + 1)
-        y = min(max(self.y(), available.top()), available.bottom() - self.height() - frame_h + 1)
+        # Left/top win when the window still exceeds the work area: keep the title bar reachable.
+        x = max(min(self.x(), available.right() - self.width() - frame_w + 1), available.left())
+        y = max(min(self.y(), available.bottom() - self.height() - frame_h + 1), available.top())
         if (x, y) != (self.x(), self.y()):
             self.move(x, y)
 
@@ -1880,9 +1918,12 @@ class MainWindow(QMainWindow):
             if control.text() != (text if labelled else ""):
                 control.setText(text if labelled else "")
             control.setIconSize(QSize(16, 16))
-            control.setFixedWidth(control.sizeHint().width())
-            control.setAccessibleName(text)
-            control.setToolTip(text)
+            width = control.sizeHint().width()
+            if control.minimumWidth() != width or control.maximumWidth() != width:
+                control.setFixedWidth(width)
+            if control.toolTip() != text:
+                control.setAccessibleName(text)
+                control.setToolTip(text)
 
     def _schedule_title_fit(self):
         """Coalesce title fitting on a timer owned by this window."""
@@ -1907,6 +1948,13 @@ class MainWindow(QMainWindow):
             badge_shown = not self.module_badge.isHidden() and bool(self.module_badge.text())
             title_full = self.module_title.sizeHint().width()
             badge_full = self.module_badge.sizeHint().width() if badge_shown else 0
+            key = (available, margins.left(), margins.right(), row.spacing(), title_full, badge_full,
+                   self.register_count.text(), self.poll_check.sizeHint().width(), tuple(widget.isHidden() for widget in (
+                       self.register_count, self.poll_check, self.write_all_button,
+                       self.read_all_button, self.export_button, self.help_button)))
+            if key == getattr(self, "_title_fit_key", None):
+                return   # resize drags repeat the same inputs many times
+            self._title_fit_key = key
             for labelled in (True, False):
                 self._set_action_labels(labelled)
                 fixed = [widget for widget in (self.register_count, self.poll_check, self.write_all_button,
@@ -2032,11 +2080,21 @@ class MainWindow(QMainWindow):
             return   # no real width before the first show; its resize refits then
         available = self.register_filters.width()
         layout = self.register_filters.layout()
-        for level in range(len(REGISTER_FILTER_DENSITIES)):
-            if level != self._filter_density:
-                self._apply_filter_density(level)
-            layout.invalidate()
-            if layout.minimumSize().width() <= available:
+        shown = tuple(not layout.itemAt(index).isEmpty() for index in range(layout.count()))
+        needs = getattr(self, "_filter_min_widths", None)   # (shown, level) -> minimum width
+        if needs is None:
+            needs = self._filter_min_widths = {}
+        last = len(REGISTER_FILTER_DENSITIES) - 1
+        for level in range(last + 1):
+            need = needs.get((shown, level))
+            if need is None:   # measured once per level, not restyled on every resize
+                if level != self._filter_density:
+                    self._apply_filter_density(level)
+                layout.invalidate()
+                need = needs[(shown, level)] = layout.minimumSize().width()
+            if need <= available or level == last:
+                if level != self._filter_density:
+                    self._apply_filter_density(level)
                 return
 
     def _fit_compact_selectors(self, compact, tiny):
@@ -2069,7 +2127,12 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._apply_responsive_layout()
-        QTimer.singleShot(0, self._fit_console_toolbar)
+        timer = getattr(self, "_toolbar_fit_timer", None)
+        if timer is None:   # one deferred refit per event-loop pass, however many resizes
+            timer = self._toolbar_fit_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._fit_console_toolbar)
+        timer.start(0)
         if hasattr(self, "inspector_scroll"):
             QTimer.singleShot(0, self._reveal_inspector)
 
@@ -2123,7 +2186,7 @@ class MainWindow(QMainWindow):
         self.decoded_view.set_fields(definitions, self._decoded_values(reg, value, definitions))
         self.decoded_view.setVisible(self.bit_mode.isChecked() and bool(definitions))
         note = f' · {reg["_note"]}' if reg.get("_note") else ""
-        self.decoded_label.setText(reg["_error"] or f'{register_group(reg)} · 字段长度 {reg.get("width", 32)} 位{note}')
+        self.decoded_label.setText(reg["_error"] or f'{register_group(reg)} · 字段长度 {field_span(reg)}{note}')
         self.decoded_label.setVisible(self.bit_mode.isChecked() and (bool(reg["_error"]) or not definitions))
 
     def _remember_reg(self, reg):
@@ -2366,7 +2429,9 @@ class MainWindow(QMainWindow):
         if current != request[:3]:
             return
         dialog = HostKeyDialog(change, self)
-        if dialog.exec() == QDialog.Accepted and not self._closing:
+        accepted = dialog.exec() == QDialog.Accepted
+        dialog.deleteLater()
+        if accepted and not self._closing:
             self._connect_device(request, approved_change=change)
         elif not self._closing:
             self.append_log("SYSTEM", "已取消主机密钥更新。")
@@ -3295,8 +3360,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "请修正写入值", f'{reg["name"]}：{exc}')
             return
         dialog = BatchDialog(records, self)
-        if dialog.exec() == QDialog.Accepted:
-            self._write_many(dialog.selected())
+        selected = dialog.selected() if dialog.exec() == QDialog.Accepted else None
+        dialog.deleteLater()
+        if selected is not None:
+            self._write_many(selected)
 
     def _poll_toggled(self, checked):
         if checked:

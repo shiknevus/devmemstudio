@@ -147,6 +147,14 @@ def access_width(register: dict) -> int:
     return width if width in (8, 16, 32, 64) else 32
 
 
+def field_span(register: dict) -> str:
+    """Field length for display: a slice above bit 0 shows its bits; access stays 32-bit."""
+    if "field_low" in register:
+        low, width = int(register["field_low"]), int(register["field_width"])
+        return f"{width} 位（bit {low + width - 1}:{low}）"
+    return f"{int(register.get('width', 32))} 位"
+
+
 def write_value(text: str, fmt: str, width: int) -> int:
     try:
         value = int(str(text).strip(), 16 if fmt == "H" else 10)
@@ -1225,7 +1233,7 @@ class SshSession:
         self.run(write_command(address, width, value), quiet=quiet)
         # Readback is observed data; self-clearing/action registers need not equal the write value.
         try:
-            return self.read(address, quiet=quiet)
+            return self.read(address, quiet=quiet, width=width)   # same width as the write
         except Exception as exc:
             raise ReadbackError(f"0x{address:08X} 写入已完成，但回读失败：{exc}") from exc
 

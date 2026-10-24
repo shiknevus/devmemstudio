@@ -25,6 +25,7 @@ _UBOOT_PROMPT = re.compile(r"(?:^|\n)[\w-]*(?:=>|>) ?$")
 _KERNEL_STARTED = re.compile(r"Starting kernel|\[\s*\d+\.\d+\]")
 _UBOOT_REPEAT = 0.04   # like a held key: one byte every 40 ms
 _UBOOT_HOLD = 6.0      # give up holding once the countdown has surely run out
+_WRITE_CHUNK = 256     # pasted text goes out in slices, reads interleaved
 
 
 def _open_error(port, exc):
@@ -140,13 +141,16 @@ class SerialSession:
     # -- pump thread ---------------------------------------------------------
     def _pump(self, ser, generation, outbox):
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        pending = bytearray()
         try:
             while generation == self._generation:
-                while True:
+                while len(pending) < _WRITE_CHUNK:
                     try:
-                        ser.write(outbox.get_nowait())
+                        pending += outbox.get_nowait()
                     except queue.Empty:
                         break
+                if pending:
+                    self._write_chunk(ser, pending)
                 waiting = ser.in_waiting   # raises once the USB device is gone
                 if waiting:
                     text = decoder.decode(ser.read(waiting))
@@ -159,11 +163,12 @@ class SerialSession:
                 uboot = self._uboot   # read once: the GUI thread may disarm it meanwhile
                 if uboot is not None:
                     self._hold_uboot_key(ser, uboot)
+                if pending:
+                    continue
                 try:
-                    data = outbox.get(timeout=_IDLE)
+                    pending += outbox.get(timeout=_IDLE)
                 except queue.Empty:
                     continue
-                ser.write(data)
         except Exception as exc:
             if generation != self._generation:
                 return   # closed on purpose
@@ -175,6 +180,15 @@ class SerialSession:
             except Exception:
                 pass
             self.on_lost(f"串口 {self.port} 已断开（USB 串口线可能已拔出）：{exc}")
+
+    def _write_chunk(self, ser, pending):
+        chunk = bytes(pending[:_WRITE_CHUNK])
+        del pending[:_WRITE_CHUNK]
+        try:
+            ser.write(chunk)
+        except serial.SerialTimeoutException:
+            pending.clear()   # part of the chunk may be out: drop the rest instead of repeating it
+            self.log("ERROR", "串口发送超时：板端未及时接收，其余未发送的输入已丢弃。")
 
     def _watch_login(self, text):
         if self._auto_login:

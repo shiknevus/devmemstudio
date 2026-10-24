@@ -316,6 +316,48 @@ class UpdateTransportTests(unittest.TestCase):
                 self.assertRaises(ValueError):
             updater.check_release(current="97.0.0")
 
+    def test_automatic_check_reads_a_release_still_uploading_as_no_update(self):
+        uploading = release_payload()
+        uploading["assets"] = []
+        with patch.object(updater, "_open", side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps([uploading]).encode())):
+            self.assertIsNone(updater.check_release_quietly(current="97.0.0"))
+            with self.assertRaises(updater.MissingAsset):   # the manual check still says so
+                updater.check_release(current="97.0.0")
+        foreign = release_payload()
+        foreign["assets"][0]["browser_download_url"] = "https://github.com/other/repo/releases/download/v99.0.0/x.zip"
+        with patch.object(updater, "_open", return_value=io.BytesIO(json.dumps([foreign]).encode())), \
+                self.assertRaises(ValueError):   # other problems are not hidden
+            updater.check_release_quietly(current="97.0.0")
+
+    def test_report_started_writes_only_the_flag_the_helper_named(self):
+        with tempfile.TemporaryDirectory() as directory:
+            flag = Path(directory) / "devmem-update-ready-0123abcd.flag"
+            with patch.dict(os.environ, {updater.READY_ENV: str(flag)}):
+                self.assertTrue(updater.report_started())
+                self.assertNotIn(updater.READY_ENV, os.environ)   # children of the app do not inherit it
+            self.assertEqual(flag.read_text(), str(os.getpid()))
+            self.assertFalse(updater.report_started())   # not started by a helper: nothing to do
+            for odd in (Path(directory) / "victim.txt", Path("devmem-update-ready-x.flag")):
+                with patch.dict(os.environ, {updater.READY_ENV: str(odd)}):
+                    self.assertFalse(updater.report_started())
+                self.assertFalse(odd.exists())
+            with patch.dict(os.environ, {updater.READY_ENV: str(Path(directory) / "missing" / "devmem-update-ready-1.flag")}):
+                self.assertFalse(updater.report_started())   # unwritable: the helper falls back, the app carries on
+
+    def test_helper_environment_never_carries_a_stale_flag(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {updater.READY_ENV: "stale"}), \
+                patch.object(updater.subprocess, "Popen") as popen:
+            job = Path(directory) / "install.json"
+            job.write_text(json.dumps({"started": str(Path(directory) / "started.flag")}), encoding="utf-8")
+
+            def helper(*args, **kwargs):   # the helper's first act: its started flag
+                Path(directory, "started.flag").write_text("1")
+                return object()
+
+            popen.side_effect = helper
+            updater.start_install(job, timeout=5)
+            self.assertNotIn(updater.READY_ENV, popen.call_args.kwargs["env"])
+
     def test_cleanup_failure_never_masks_download_error(self):
         data = package_bytes()
         with tempfile.TemporaryDirectory() as directory, \
@@ -475,9 +517,40 @@ PROBE_SOURCE = r"""#include <windows.h>
 #ifndef EXIT_CODE
 #define EXIT_CODE 0
 #endif
+static BOOL spawn_child(PROCESS_INFORMATION *pi)
+{
+    wchar_t self[MAX_PATH], line[MAX_PATH + 16];
+    GetModuleFileNameW(0, self, MAX_PATH);
+    wsprintfW(line, L"\"%s\" child", self);
+    STARTUPINFOW si = {sizeof si};
+    return CreateProcessW(self, line, 0, 0, 0, 0, 0, 0, &si, pi);
+}
 int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d)
 {
-#if defined(WINDOW)
+#if defined(LATEFAIL)
+    /* launcher + app: the app dies at 4 s, after the 3 s the old check waited, and the launcher exits with its code */
+    PROCESS_INFORMATION pi;
+    DWORD code = 5;
+    if (strstr(c, "child")) { Sleep(4000); return 5; }
+    if (!spawn_child(&pi)) return 9;
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &code);
+    return (int)code;
+#elif defined(MARKER)
+    /* the app reports "started" at 4.5 s through the flag file the helper named, then runs on */
+    PROCESS_INFORMATION pi;
+    if (strstr(c, "child")) {
+        char flag[MAX_PATH];
+        if (GetEnvironmentVariableA("DEVMEMSTUDIO_UPDATE_READY", flag, MAX_PATH)) {
+            Sleep(4500);
+            CloseHandle(CreateFileA(flag, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0));
+        }
+        Sleep(30000);
+        return 0;
+    }
+    if (!spawn_child(&pi)) return 9;
+    Sleep(30000);
+#elif defined(WINDOW)
     CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"probe error", WS_POPUP | WS_VISIBLE, -32000, -32000, 1, 1, 0, 0, a, 0);
     Sleep(30000);
 #elif defined(SPLASH)
@@ -525,7 +598,8 @@ class WindowsReplacementTests(unittest.TestCase):
         source = cls.base / "probe.c"
         source.write_text(PROBE_SOURCE)
         for name, flags in (("ok", ["-DEXIT_CODE=0"]), ("fail", ["-DEXIT_CODE=7"]), ("window", ["-DWINDOW"]),
-                            ("splash", ["-DSPLASH"]), ("stuck", ["-DSTUCK"]), ("parent", ["-DPARENT"])):
+                            ("splash", ["-DSPLASH"]), ("stuck", ["-DSTUCK"]), ("parent", ["-DPARENT"]),
+                            ("latefail", ["-DLATEFAIL"]), ("marker", ["-DMARKER"])):
             subprocess.run([shutil.which("gcc"), str(source), "-mwindows", *flags,
                             "-o", str(cls.base / f"{name}.exe")], check=True, capture_output=True, timeout=30)
 
@@ -600,7 +674,7 @@ class WindowsReplacementTests(unittest.TestCase):
         """Process.MainWindowHandle skips owned windows, so the launcher's owned splash passes even with
         the helpers already released (5.6.0's unowned splash was rolled back as an error box)."""
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
-            result, target, staged, backup = self.apply(directory, new="splash", start_timeout=20)
+            result, target, staged, backup = self.apply(directory, new="splash", start_timeout=20, ready_timeout=3)
             try:
                 self.assertTrue(result["success"], result)
                 self.assertEqual(target.read_bytes(), (self.base / "splash.exe").read_bytes())
@@ -616,15 +690,39 @@ class WindowsReplacementTests(unittest.TestCase):
             self.assertTrue(result["restored"], result)
             self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
 
-    def test_running_app_child_counts_as_started(self):
+    def test_running_app_child_counts_as_started_when_it_cannot_report(self):
+        """An app that never writes the flag: after ready_timeout the older check applies (a child under the launcher)."""
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
-            result, target, staged, backup = self.apply(directory, new="parent", start_timeout=20)
+            began = time.monotonic()
+            result, target, staged, backup = self.apply(directory, new="parent", start_timeout=20, ready_timeout=6)
             try:
                 self.assertTrue(result["success"], result)
+                self.assertGreaterEqual(time.monotonic() - began, 5.5)   # not the old fixed 3 s
                 self.assertEqual(target.read_bytes(), (self.base / "parent.exe").read_bytes())
             finally:
                 kill_tree(result.get("pid", 0))
                 time.sleep(0.5)   # image lock released before the directory is removed
+
+    def test_flag_from_the_new_app_is_what_counts_as_started(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            began = time.monotonic()
+            result, target, staged, backup = self.apply(directory, new="marker", start_timeout=30, ready_timeout=30)
+            try:
+                self.assertTrue(result["success"], result)
+                self.assertGreaterEqual(time.monotonic() - began, 4)   # waited for the report, not 3 s
+                self.assertEqual(target.read_bytes(), (self.base / "marker.exe").read_bytes())
+            finally:
+                kill_tree(result.get("pid", 0))
+                time.sleep(0.5)
+
+    def test_new_app_dying_after_three_seconds_but_before_the_flag_rolls_back(self):
+        with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
+            result, target, staged, backup = self.apply(directory, new="latefail", start_timeout=30, ready_timeout=30)
+            self.assertFalse(result["success"], result)
+            self.assertIn("exited with code 5", result["error"])
+            self.assertTrue(result["restored"], result)
+            self.assertEqual(target.read_bytes(), (self.base / "ok.exe").read_bytes())
+            self.assertEqual(staged.read_bytes(), (self.base / "latefail.exe").read_bytes())
 
     def test_access_denied_replace_is_retried(self):
         with tempfile.TemporaryDirectory(prefix="安装 空格 ", dir=self.base) as directory:
@@ -792,6 +890,20 @@ class UpdateDialogTests(unittest.TestCase):
         self.assertGreater(blocks["DevmemStudio 98.0.0"].blockFormat().topMargin(), 0)
         code = [item.fragment() for item in blocks["item CODE"] if item.fragment().text() == "CODE"][0]
         self.assertIn("Consolas", code.charFormat().fontFamilies())
+        dialog.close()
+
+    def test_automatic_check_is_silent_while_a_release_is_still_uploading_but_manual_says_so(self):
+        from devmem_studio.update_dialog import UpdateDialog
+        dialog = UpdateDialog()
+        with patch.object(updater, "check_release", side_effect=updater.MissingAsset("发布版本缺少 Windows 更新包")):
+            dialog.check(automatic=True)
+            self.settle(dialog)
+            self.assertFalse(dialog.isVisible())
+            self.assertNotEqual(dialog.status.property("state"), "error")
+            dialog.check()
+            self.settle(dialog)
+        self.assertEqual(dialog.status.property("state"), "error")
+        self.assertIn("缺少", dialog.status.text())
         dialog.close()
 
     def test_automatic_network_failure_stays_hidden(self):

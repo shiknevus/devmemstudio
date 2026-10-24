@@ -5,8 +5,10 @@ Usage:
   release_github.py <version> <body-file> status   print the release and its asset digests only
   release_github.py <version> status               same as above (the body file is optional here)
 
-Reruns are cheap and non-destructive: an asset whose size and sha256 already match the local file is
-left untouched instead of being deleted and uploaded again.
+A new release is created as a draft, gets its assets, and is published only once they are all verified, so
+update checks never see a release without its package. Reruns are cheap and non-destructive: an asset whose
+size and sha256 already match the local file is left untouched; a changed one is uploaded under a temporary
+name, the old one deleted, and the new one renamed.
 """
 import hashlib
 import json
@@ -130,11 +132,19 @@ try:
 except urllib.error.HTTPError as exc:
     if exc.code != 404:
         raise
-    if mode == "status":
+    # The tag lookup never returns drafts: a draft left by an interrupted run is found in the list instead.
+    release = next((item for item in api("GET", f"https://api.github.com/repos/{REPO}/releases?per_page=100")
+                    if item.get("draft") and item.get("tag_name") == tag), None)
+    if release is None and mode == "status":
         raise SystemExit(f"{tag} has no GitHub release yet")
-    release = api("POST", f"https://api.github.com/repos/{REPO}/releases", json.dumps({
-        "tag_name": tag, "target_commitish": commit, "name": f"DevmemStudio {version}",
-        "body": body_file.read_text(encoding="utf-8"), "draft": False, "prerelease": False}).encode())
+    if release is None:   # a draft until its assets are all up: clients checking for updates never see a release without a package
+        release = api("POST", f"https://api.github.com/repos/{REPO}/releases", json.dumps({
+            "tag_name": tag, "target_commitish": commit, "name": f"DevmemStudio {version}",
+            "body": body_file.read_text(encoding="utf-8"), "draft": True, "prerelease": False}).encode())
+    elif mode == "publish":
+        release = api("PATCH", f"https://api.github.com/repos/{REPO}/releases/{release['id']}", json.dumps({
+            "target_commitish": commit, "name": f"DevmemStudio {version}",
+            "body": body_file.read_text(encoding="utf-8")}).encode())
 
 if mode == "status":
     for asset in release["assets"]:
@@ -183,30 +193,48 @@ for path, content_type in ((archive, "application/zip"), (checksum, "text/plain"
             api("DELETE", dangling["url"])
         except (SystemExit, urllib.error.HTTPError):
             pass   # api() gives up with SystemExit, which `except Exception` misses
-    replacement = None
     if stale:
-        # GitHub rejects an upload while an asset has the same name.  Stage the
-        # *new* bytes under a content-addressed name first, so a failed final
-        # upload still leaves a copy of the new artifact on the release.
-        replacement = upload_asset(path, content_type, f"{path.name}.replacement-{digest[:12]}")
+        # GitHub rejects an upload while an asset has the same name.  Upload the *new* bytes under a temporary
+        # name first, drop the old asset, then rename: no second upload, and the gap without the package is two calls.
+        staged = upload_asset(path, content_type, f"{path.name}.replacement-{digest[:12]}")
+        if staged.get("state") not in (None, "uploaded"):
+            raise SystemExit(f"{staged.get('name')} ended in state {staged.get('state')}; rerun the command")
         try:
             api("DELETE", stale["url"])
         except urllib.error.HTTPError as exc:
             if exc.code != 404:   # already gone is fine
                 raise
-    try:
-        asset = upload_asset(path, content_type, path.name)   # retries internally
-    except SystemExit as exc:
-        kept = f"; the new bytes are kept as {replacement.get('name')}" if replacement else ""
-        raise SystemExit(f"{path.name} upload failed{kept}. Rerun this command to finish the publish.") from exc
-    if asset.get("state") not in (None, "uploaded"):
-        # starter = half uploaded: keep the staged copy, a rerun replaces this asset
-        raise SystemExit(f"{path.name} ended in state {asset.get('state')}; rerun the command")
-    if replacement and replacement.get("url"):
         try:
-            api("DELETE", replacement["url"])   # canonical name is live: drop the staging copy
-        except (SystemExit, urllib.error.HTTPError) as exc:
-            print(f"could not delete {replacement.get('name')}: {exc}; the next run cleans it up", flush=True)
+            asset = api("PATCH", staged["url"], json.dumps({"name": path.name}).encode())
+        except SystemExit as exc:
+            raise SystemExit(f"renaming {staged.get('name')} to {path.name} failed. "
+                             "Rerun this command to finish the publish.") from exc
+    else:
+        try:
+            asset = upload_asset(path, content_type, path.name)   # retries internally
+        except SystemExit as exc:
+            raise SystemExit(f"{path.name} upload failed. Rerun this command to finish the publish.") from exc
+    if asset.get("state") not in (None, "uploaded"):
+        # starter = half uploaded: a rerun replaces this asset
+        raise SystemExit(f"{path.name} ended in state {asset.get('state')}; rerun the command")
     uploaded.append({"asset": asset.get("name"), "size": asset.get("size"), "state": asset.get("state"),
                      "digest": asset.get("digest")})
-print(json.dumps({"release": release["html_url"], "tag": tag, "commit": commit, "assets": uploaded}, ensure_ascii=False))
+
+# Every asset up and matching the local files before the release becomes visible to update checks.
+final = api("GET", f"https://api.github.com/repos/{REPO}/releases/{release['id']}")
+problems = []
+for path in (archive, checksum):
+    found = [asset for asset in final.get("assets", []) if asset["name"] == path.name]
+    if len(found) != 1:
+        problems.append(f"{path.name}: {len(found)} assets by that name")
+    elif found[0].get("state") != "uploaded" or found[0].get("size") != path.stat().st_size:
+        problems.append(f"{path.name}: state {found[0].get('state')}, size {found[0].get('size')} (local {path.stat().st_size})")
+    elif found[0].get("digest") and found[0]["digest"] != f"sha256:{sha256_of(path)}":
+        problems.append(f"{path.name}: digest {found[0]['digest']} differs from the local file")
+if problems:
+    raise SystemExit("release not published, assets do not match: " + "; ".join(problems) + ". Rerun the command.")
+if final.get("draft"):
+    final = api("PATCH", f"https://api.github.com/repos/{REPO}/releases/{release['id']}",
+                json.dumps({"draft": False, "prerelease": False}).encode())
+print(json.dumps({"release": final["html_url"], "tag": tag, "commit": commit, "draft": bool(final.get("draft")),
+                  "assets": uploaded}, ensure_ascii=False))

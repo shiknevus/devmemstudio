@@ -132,7 +132,14 @@ class RegisterTests(unittest.TestCase):
         with self.assertRaisesRegex(ReadbackError, "写入已完成，但回读失败"):
             session.write(0xB0102208, 32, 1)
         session.run.assert_called_once_with("devmem 0xb0102208 32 0x1", quiet=False)
-        session.read.assert_called_once_with(0xB0102208, quiet=False)
+        session.read.assert_called_once_with(0xB0102208, quiet=False, width=32)
+
+    def test_readback_uses_the_write_width(self):
+        session = SshSession()
+        session.run = Mock(return_value="")
+        session.read = Mock(return_value=0x5A)
+        self.assertEqual(session.write(0xB0102209, 8, 0x5A), 0x5A)
+        session.read.assert_called_once_with(0xB0102209, quiet=False, width=8)
 
     def test_failed_write_does_not_read_back_or_report_success(self):
         session = SshSession()

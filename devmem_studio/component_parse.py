@@ -4,10 +4,11 @@ EXE's 更新控件 feature (runtime re-parse of a single component folder)."""
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from pathlib import Path
 import re
 
-from .top_import import COMMENT_SCAN, read_text_resilient
+from .top_import import COMMENT_SCAN, read_text_resilient, register_offset_problem
 
 ALIASES = {"ec_sf_door": "sf_doo"}
 # 9'h1B4 / 12'd16 / 12'b1010 / plain 436. A plain number must end the line; a
@@ -28,7 +29,8 @@ WRITE_IF = re.compile(r"\bif\s*\([^;]*?" + _WR_ADDR + r"[^;]*?\)\s*(?:begin\b\s*
 _WR_IF_ASSIGN = re.compile(r"\b([A-Za-z_]\w*(?:\s*\[[^\]]*\])*)\s*(?:<=|=)\s*"
                            r"(?:\{\s*(?:\d+\s*'\s*[sS]?[bdhBDH]\s*[0-9a-fA-F_xzXZ]+\s*,\s*)+)?"
                            r"i_st_wr_data(?:\s*\[\s*(\d+)\s*(?::\s*(\d+)\s*)?\])?")
-READ_CASE = re.compile(r"case\s*\(\s*rd_addr_d2(?:\s*\[[^\]]*\])?\s*\)(.*?)endcase", re.S)
+READ_CASE = re.compile(r"\bcase[zx]?\s*\(\s*rd_addr_d2(?:\s*\[[^\]]*\])?\s*\)")   # head only; body paired by _case_blocks
+_CASE_WORD = re.compile(r"\b(?:case[zx]?|endcase)\b")
 # Case item labels: a macro list (```A, `B :``) opening an arm, i.e. after the case
 # head, a ``;``, ``begin`` or ``end``.  RHS macros (concat, ``? `X : y``, ``[`MSB:0]``)
 # are data, not registers.
@@ -183,8 +185,8 @@ def _literal_width(element: str) -> int | None:
     return int(sized.group(1)) if sized else None
 
 
-def _padded_read_width(concat: str) -> int | None:
-    """Read width of {pad, value, pad}: 32 minus constant padding on both ends."""
+def _padded_read_span(concat: str) -> tuple[int, int] | None:
+    """(low, high) bit span of {pad, value, pad}: constant padding on both ends excluded."""
     pads = [_literal_width(part) for part in split_top_level(concat.strip()[1:-1])]
     lead = trail = 0
     while pads and pads[0] is not None:
@@ -192,7 +194,21 @@ def _padded_read_width(concat: str) -> int | None:
     while pads and pads[-1] is not None:
         trail += pads.pop()
     width = 32 - lead - trail
-    return width if pads and (lead or trail) and width > 0 else None
+    return (trail, 31 - lead) if pads and (lead or trail) and width > 0 else None
+
+
+def _case_blocks(body: str) -> list[tuple[int, int]]:
+    """(start, end) of each case(rd_addr_d2) body; case/endcase pairs are counted so nested cases stay inside."""
+    blocks = []
+    for head in READ_CASE.finditer(body):
+        depth, end = 1, None
+        for word in _CASE_WORD.finditer(body, head.end()):
+            depth += 1 if word.group(0) != "endcase" else -1
+            if not depth:
+                end = word.start()
+                break
+        blocks.append((head.end(), end if end is not None else len(body)))
+    return blocks
 
 
 def _if_register_writes(body: str) -> list[tuple[str, str, str]]:
@@ -239,8 +255,8 @@ def _if_register_writes(body: str) -> list[tuple[str, str, str]]:
     return found
 
 
-def _write_widths(body: str) -> dict[str, int | None]:
-    """Written bit span per register; None = full-word write (no slice)."""
+def _write_spans(body: str) -> dict[str, tuple[int, int] | None]:
+    """Written (low, high) bit span per register; None = full-word write (no slice)."""
     spans: dict[str, tuple[int, int] | None] = {}
     for name, hi, lo in [*WRITE.findall(body), *WRITE_IF.findall(body),
                          *_if_register_writes(body)]:
@@ -253,39 +269,59 @@ def _write_widths(body: str) -> dict[str, int | None]:
             # Several slices of one register ([15:0] and [31:16]) cover their union.
             span = None if previous is None or span is None else (min(previous[0], span[0]), max(previous[1], span[1]))
         spans[name] = span
-    return {name: (span[1] - span[0] + 1 if span else None) for name, span in spans.items()}
+    return spans
 
 
-def parse_decode_file(text: str) -> list[dict]:
+def parse_decode_file(text: str, warnings: list[str] | None = None) -> list[dict]:
     """Registers implemented by one ps_rw_pl_reg module: read case plus write ternaries/ifs.
 
     A read address compared outside the read mux (e.g. rd_en_d2 && rd_addr_d2 == `X
-    popping a FIFO) marks that register read_side_effect."""
+    popping a FIFO) marks that register read_side_effect.
+
+    width is the devmem access width source: a field that does not start at bit 0
+    (``[31:16]``, ``{y,16'd0}``) is accessed as a whole 32-bit word, so width is 32
+    and the real slice goes to field_low/field_width."""
     body = strip_comments(text)
-    writes = _write_widths(body)
-    reads, widths = set(), {}
+    writes = _write_spans(body)
+    reads, spans = set(), {}
     # Every case block contributes read arms; a multi-mux decode file must not
     # silently drop the later blocks.
-    for case in READ_CASE.findall(body):
+    blocks = _case_blocks(body)
+    for start, end in blocks:
+        case = body[start:end]
         for name, concat in READ_CONCAT.findall(case):
-            width = _padded_read_width(concat)
-            if width:
-                widths[name] = width
+            span = _padded_read_span(concat)
+            if span:
+                spans[name] = span
         for name, hi, lo in _READ_SLICE.findall(case):
             # A byte/slice output bus (o_st_rd_data[7:0]) sizes the read; the
-            # concat-computed width (set above) still wins when both exist.
-            widths.setdefault(name, abs(int(hi) - int(lo)) + 1)
+            # concat-computed span (set above) still wins when both exist.
+            spans.setdefault(name, (min(int(hi), int(lo)), max(int(hi), int(lo))))
         # Only tag-position macros name registers read by this mux.
         for labels in _READ_TAG.findall(case):
             reads.update(re.findall(r"`(\w+)", labels))
-    side_effects = {first or second for first, second in READ_COMPARE.findall(READ_CASE.sub(" ", body))}
+    if not reads and warnings is not None:
+        warnings.append("读译码未解析到任何寄存器（未找到 case(rd_addr_d2) 块，或写法不被识别）。")
+    outside, cursor = [], 0
+    for start, end in blocks:
+        outside.append(body[cursor:max(cursor, start)])
+        cursor = max(cursor, end)
+    outside.append(body[cursor:])
+    side_effects = {first or second
+                    for first, second in READ_COMPARE.findall(" ".join(outside))}
     entries = []
     for name in sorted(reads | set(writes)):
+        span = writes.get(name) or spans.get(name)
         item = {"name": name, "writable": name in writes, "readable": name in reads,
-                "width": writes.get(name) or widths.get(name) or 32}
+                "width": span[1] - span[0] + 1 if span else 32}
+        # Any side whose field starts above bit 0 breaks a narrow access at the base address.
+        if any(candidate and candidate[0] > 0 for candidate in (writes.get(name), spans.get(name))):
+            item["width"] = 32
+            if span and span[0] > 0:
+                item["field_low"], item["field_width"] = span[0], span[1] - span[0] + 1
+        entries.append(item)
         if name in side_effects:
             item["read_side_effect"] = True
-        entries.append(item)
     return entries
 
 
@@ -646,13 +682,19 @@ def build_type_entry(key: str, decode_path: Path, defines: dict[str, int],
     top_file: the caller's find_top_file result (None = no top); looked up when omitted."""
     warnings: list[str] = []
     registers = []
-    for item in parse_decode_file(read_text_resilient(decode_path)):
+    for item in parse_decode_file(read_text_resilient(decode_path), warnings):
         offset = defines.get(item["name"])
         if offset is None:
             warnings.append(f"{decode_path.name}: {item['name']} missing from reg_addr_pl.vh")
             continue
+        problem = register_offset_problem(offset)
+        if problem:
+            warnings.append(f"{decode_path.name}: {item['name']} 偏移 0x{offset:X} {problem}，已跳过。")
+            continue
         entry = {"offset": f"0x{offset:03X}", "name": item["name"], "width": item["width"],
                  "readonly": not item["writable"]}
+        if "field_low" in item:
+            entry["field_low"], entry["field_width"] = item["field_low"], item["field_width"]   # access is 32-bit
         if item["writable"] and not item["readable"]:
             entry["write_only"] = True
         if item.get("read_side_effect"):
@@ -806,8 +848,16 @@ def find_component_folders(root: Path, *, max_depth: int = 32,
     folders: set[Path] = set()
     pending: list[tuple[Path, int]] = [(root, 0)]
     visited = files_seen = 0
+    real_seen: set[str] = set()   # resolved folders already scanned (links/junction loops)
     while pending and visited < max_folders and files_seen < max_files:
         folder, depth = pending.pop()
+        try:
+            real = os.path.normcase(str(folder.resolve()))
+        except (OSError, RuntimeError):
+            continue
+        if real in real_seen:
+            continue
+        real_seen.add(real)
         visited += 1
         try:
             entries = list(folder.iterdir())
@@ -818,7 +868,7 @@ def find_component_folders(root: Path, *, max_depth: int = 32,
                 break
             try:
                 # Do not recurse through user supplied links/junctions.
-                if path.is_symlink():
+                if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
                     continue
                 if path.is_dir():
                     if depth < max_depth and visited + len(pending) < max_folders:

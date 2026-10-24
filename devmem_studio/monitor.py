@@ -78,6 +78,7 @@ class MonitorBuffer:
         self._range_offset = 0   # retained data's position in the first cached block
         self.pauses = []         # (begin, end) seconds without sampling between runs
         self._resumed = False
+        self._rebase = None      # gap (s) to place a resumed run on another clock
         self._levels = {}        # (column, signed) -> [first block, mins, maxs] per 2**k-sample level
 
     def __len__(self):
@@ -86,6 +87,13 @@ class MonitorBuffer:
     def mark_resume(self):
         """The next sample starts a resumed run: record the gap before it."""
         self._resumed = bool(self.times)
+        self._rebase = None
+
+    def rebase_resume(self, gap):
+        """The resumed run stamps on another clock (regmon monotonic vs shell wall time):
+        place its first sample `gap` seconds after the last one instead of trusting its stamp."""
+        if self._resumed:
+            self._rebase = max(0.0, float(gap))
 
     def extend(self, samples):
         for stamp, values in samples:
@@ -96,6 +104,9 @@ class MonitorBuffer:
             if self._resumed:
                 self._resumed = False
                 previous = self.times[-1]
+                if self._rebase is not None:
+                    self.t0 = stamp - previous - self._rebase
+                    moment, self._rebase = previous + self._rebase, None
                 if moment < previous:   # board clock restarted (reboot): continue the axis
                     self.t0 -= previous - moment
                     moment = previous
@@ -1763,6 +1774,7 @@ class MonitorDialog(ManagedDialog):
         self.monitored_offsets = []
         self._shown = None    # idle lanes when they differ from the run, see shown
         self.sampler = ""     # board-side sampler of the current/last run, see SAMPLER_LABELS
+        self._paused_at = 0.0    # monotonic time of the last pause
         self._last_data = None   # monotonic time of the latest samples of this run
         self._shown_pause = 0
         self.interval_ms = self.settings["interval_ms"]   # period of the current/last run
@@ -2195,6 +2207,7 @@ class MonitorDialog(ManagedDialog):
             return False
         self._stop.set()   # same epoch: samples already in flight still belong to this run
         self._terminate_board_sampler()   # hush the sampler now, not after its next period
+        self._paused_at = time.monotonic()
         self._set_state("paused")
         self._refresh()
         self._set_status(self._summary("已暂停"))
@@ -2267,6 +2280,8 @@ class MonitorDialog(ManagedDialog):
 
     def _sampler_known(self, token, kind):
         if token == self._epoch:
+            if self.sampler and kind != self.sampler and self.buffer is not None:
+                self.buffer.rebase_resume(time.monotonic() - self._paused_at)   # clocks differ: use the PC's pause
             self.sampler = kind
             self._dirty = True
 

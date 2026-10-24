@@ -98,6 +98,32 @@ class SerialSessionTests(unittest.TestCase):
             self.session.send(key)
         self.assertTrue(wait_for(lambda: bytes(port.written) == b"ls\t\x1b[A\r&"))
 
+    def test_long_paste_goes_out_in_slices_with_reads_between(self):
+        sizes = []
+        port = self.connect(FakePort(lambda port, data: (sizes.append(len(data)), port.emit("."))))
+        text = bytes(range(32, 127)) * 100
+        self.session.send(text)
+        self.assertTrue(wait_for(lambda: bytes(port.written) == text))
+        self.assertLessEqual(max(sizes), 256)
+        self.assertTrue(wait_for(lambda: self.received().count(".") == len(sizes)))
+
+    def test_write_timeout_drops_the_paste_but_keeps_the_session(self):
+        from serial import SerialTimeoutException
+        stalled = [True]
+
+        def board(port, data):
+            if stalled[0]:
+                stalled[0] = False
+                raise SerialTimeoutException("Write timeout")
+        port = self.connect(FakePort(board))
+        self.session.send(b"x" * 1000)
+        self.assertTrue(wait_for(lambda: any("发送超时" in text for _, text in self.logs)))
+        self.session.send(b"ls\r")
+        self.assertTrue(wait_for(lambda: bytes(port.written).endswith(b"ls\r")))
+        self.assertEqual(self.lost, [])
+        self.assertTrue(self.session.alive)
+        self.assertNotIn(b"x" * 300, bytes(port.written))   # nothing after the stalled slice is resent
+
     def test_split_utf8_is_decoded_across_reads(self):
         port = self.connect(FakePort())
         encoded = "中文".encode("utf-8")

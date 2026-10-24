@@ -490,6 +490,39 @@ class ComponentsParamTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty:
             self.assertIsNone(top_import.find_components_param(Path(empty) / "x" / "top.sv"))
 
+    def test_sibling_project_copy_is_flagged_and_own_copy_wins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "work"
+            for name in ("zeta", "alpha"):   # scandir order must not decide: sorted -> alpha first
+                (root / name / "include_files").mkdir(parents=True)
+                (root / name / "include_files" / "components_param.vh").write_text(name, encoding="utf-8")
+            top = root / "mine" / "top" / "emcc_mix_top.sv"
+            top.parent.mkdir(parents=True)
+            top.write_text("// top", encoding="utf-8")
+            found, source = top_import.locate_components_param(top)
+            self.assertEqual((found.read_text(encoding="utf-8"), source), ("alpha", "sibling"))
+            own = root / "mine" / "include_files"
+            own.mkdir()
+            (own / "components_param.vh").write_text("own", encoding="utf-8")
+            found, source = top_import.locate_components_param(top)
+            self.assertEqual((found.read_text(encoding="utf-8"), source), ("own", "own"))
+
+    def test_sibling_search_is_limited_to_nearby_levels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            far = root / "other" / "include_files"
+            far.mkdir(parents=True)
+            (far / "components_param.vh").write_text("x", encoding="utf-8")
+            top = root / "a" / "b" / "c" / "d" / "top.sv"
+            top.parent.mkdir(parents=True)
+            top.write_text("// top", encoding="utf-8")
+            self.assertEqual(top_import.locate_components_param(top), (None, ""))
+
+    def test_register_offset_problem(self):
+        self.assertEqual(top_import.register_offset_problem(0x1FC), "")
+        for bad in (0x1FD, 0x200, 0xB0100000, -4):
+            self.assertTrue(top_import.register_offset_problem(bad), bad)
+
 
 class CatalogTests(unittest.TestCase):
     def test_registers_for_exact_table_is_sorted_and_isolated(self):
@@ -525,6 +558,52 @@ class CatalogTests(unittest.TestCase):
 
     def test_missing_catalog_file_returns_none(self):
         self.assertIsNone(top_import.load_type_catalog(Path(tempfile.gettempdir()) / "definitely-missing.json"))
+
+    def test_misaligned_or_out_of_window_offsets_are_skipped_with_warning(self):
+        table = {"types": {"ec_uut": {"registers": [
+            {"offset": "0x00C", "name": "OK", "width": 32}, {"offset": "0x1FC", "name": "LAST", "width": 32},
+            {"offset": "0x00E", "name": "ODD", "width": 32}, {"offset": "0x200", "name": "FAR", "width": 32},
+            {"offset": "0x100000", "name": "HUGE", "width": 32}]}}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            path.write_text(json.dumps(table), encoding="utf-8")
+            catalog = top_import.load_type_catalog(path)
+        names = [item["name"] for item in top_import.registers_for(catalog, "ec_uut")[0]]
+        self.assertEqual(names, ["IRQ_REG1", "IRQ_REG2", "OK", "LAST"])
+        warned = " ".join(catalog["load_warnings"])
+        for bad in ("ODD", "FAR", "HUGE"):
+            self.assertIn(bad, warned)
+
+    def test_bundled_catalog_has_no_skipped_registers(self):
+        catalog = top_import.load_type_catalog(top_import.resource_path(top_import.CATALOG_RELPATH))
+        self.assertNotIn("load_warnings", catalog)
+        raw = json.loads(top_import.resource_path(top_import.CATALOG_RELPATH).read_text(encoding="utf-8"))
+        for key, entry in raw["types"].items():
+            self.assertEqual(len(top_import.registers_for(catalog, key)[0]),
+                             len(entry["registers"]) + sum(
+                                 name not in {item["name"] for item in entry["registers"]}
+                                 for name in ("IRQ_REG1", "IRQ_REG2")), key)
+
+    def test_broken_override_json_is_reported_not_silent(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            overrides = Path(directory) / "component_overrides"
+            overrides.mkdir()
+            (overrides / "broken.json").write_text("{broken", encoding="utf-8")
+            with patch("devmem_studio.top_import.component_override_dirs", return_value=[overrides]):
+                catalog = top_import.load_type_catalog()
+        self.assertTrue(any("broken.json" in note for note in catalog["load_warnings"]))
+
+    def test_write_json_atomic_replaces_and_leaves_no_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "ec_x.json"
+            target.write_text("old", encoding="utf-8")
+            top_import.write_json_atomic(target, {"名": 1})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"名": 1})
+            with self.assertRaises(TypeError):
+                top_import.write_json_atomic(target, {"bad": object()})
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"名": 1})   # failed write keeps the old file
+            self.assertEqual([item.name for item in Path(directory).iterdir()], ["ec_x.json"])
 
     def test_runtime_component_overrides_merge_into_bundled_catalog(self):
         from unittest.mock import patch

@@ -1,7 +1,9 @@
 """Regressions for tools/gen_component_catalog.py against fixture RTL text."""
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -70,6 +72,61 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(entries["IRQ_REG1"], {"name": "IRQ_REG1", "writable": False, "readable": True, "width": 32})
         self.assertTrue(entries["A_TX_OT"]["writable"] and not entries["A_TX_OT"]["readable"])  # write-only
         self.assertNotIn("DEFAULT", entries)
+
+    def test_field_above_bit0_gets_32bit_access(self):
+        text = """
+        always @(posedge clk) begin
+            hi <= (wr_task_vld && wr_task_addr == `A) ? i_st_wr_data[31:16] : hi;
+            mid <= (wr_task_vld && wr_task_addr == `B) ? i_st_wr_data[15:8] : mid;
+            lo <= (wr_task_vld && wr_task_addr == `C) ? i_st_wr_data[7:0] : lo;
+            both <= (wr_task_vld && wr_task_addr == `D) ? i_st_wr_data[15:0] : both;
+        end
+        always @(*) case (rd_addr_d2)
+            `A : o_st_rd_data <= {hi, 16'd0};
+            `B : o_st_rd_data <= {16'd0, mid, 8'd0};
+            `C : o_st_rd_data <= {24'd0, lo};
+            `E : o_st_rd_data <= {y, 16'd0};
+            `F : o_st_rd_data <= {8'd0, z, 8'd0};
+        endcase"""
+        entries = {item["name"]: item for item in gen.parse_decode_file(text)}
+        self.assertEqual((entries["A"]["width"], entries["A"]["field_low"], entries["A"]["field_width"]), (32, 16, 16))
+        self.assertEqual((entries["B"]["width"], entries["B"]["field_low"], entries["B"]["field_width"]), (32, 8, 8))
+        self.assertEqual((entries["C"]["width"], "field_low" in entries["C"]), (8, False))
+        self.assertEqual(entries["D"]["width"], 16)
+        self.assertEqual((entries["E"]["width"], entries["E"]["field_low"], entries["E"]["field_width"]), (32, 16, 16))
+        self.assertEqual((entries["F"]["width"], entries["F"]["field_low"], entries["F"]["field_width"]), (32, 8, 16))
+
+    def test_read_side_trailing_pad_forces_32bit_even_with_low_write_slice(self):
+        text = """
+        x <= (wr_task_vld && wr_task_addr == `A) ? i_st_wr_data[15:0] : x;
+        case (rd_addr_d2) `A : o_st_rd_data <= {x, 16'd0}; endcase"""
+        item = {entry["name"]: entry for entry in gen.parse_decode_file(text)}["A"]
+        self.assertEqual(item["width"], 32)
+
+    def test_casez_and_nested_case_read_arms(self):
+        text = """
+        always @(*) begin
+            casez (rd_addr_d2[8:0])
+                `A : begin
+                    case (mode)
+                        0: o_st_rd_data <= 1;
+                        default: o_st_rd_data <= 2;
+                    endcase
+                end
+                `B : o_st_rd_data <= {24'd0, b};
+            endcase
+        end
+        always @(*) casex (rd_addr_d2) `C : o_st_rd_data <= c; endcase"""
+        warnings = []
+        entries = {item["name"] for item in gen.parse_decode_file(text, warnings)}
+        self.assertEqual(entries, {"A", "B", "C"})
+        self.assertEqual(warnings, [])
+
+    def test_no_read_case_warns(self):
+        warnings = []
+        self.assertEqual(gen.parse_decode_file("module m; endmodule", warnings), [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("读译码", warnings[0])
 
 
 class MatchTests(unittest.TestCase):
@@ -440,6 +497,18 @@ class ComponentFolderTests(unittest.TestCase):
             self.assertEqual([item.name for item in found], ["shallow"])
             self.assertEqual([item.name for item in gen.find_component_folders(root, max_files=1)], ["shallow"])
 
+    @unittest.skipUnless(os.name == "nt", "directory junctions are Windows-only")
+    def test_find_component_folders_skips_junction_loops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            component = root / "a" / "ec_x"
+            component.mkdir(parents=True)
+            (component / "ps_rw_pl_reg_x.sv").write_text("", encoding="utf-8")
+            for link, target in ((root / "a" / "loop", root), (root / "alias", root / "a")):
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True,
+                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(gen.find_component_folders(root), [component])
+
     def test_concat_hookups_yield_per_bit_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -734,7 +803,10 @@ class ReviewRegressionTests(unittest.TestCase):
             "  `C: o_st_rd_data <= {{24{1'b0}}, c};\n"
             "  `D: o_st_rd_data <= {d_hi, d_lo};\n"
             "endcase\n")}
-        self.assertEqual([entries[name]["width"] for name in "ABCD"], [8, 24, 8, 32])
+        # A/B have trailing padding: field is narrower but access stays a 32-bit word.
+        self.assertEqual([entries[name]["width"] for name in "ABCD"], [32, 32, 8, 32])
+        self.assertEqual([(entries[name]["field_low"], entries[name]["field_width"]) for name in "AB"],
+                         [(16, 8), (8, 24)])
 
     def test_param_hookups_nested_multiline_and_trailing_comma_notes(self):
         top = ("module ec_uut();\n"

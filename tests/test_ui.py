@@ -1528,6 +1528,24 @@ class TopImportUiTests(UiTestBase):
         self.settle()
         self.assertEqual(self.window.regs[0]["_address"], 0xB0200000 + 0x6400 + 0x000)
 
+    def test_sibling_components_param_prefills_but_never_locks_base(self):
+        root = Path(self.temp.name)
+        (root / "sibling" / "include_files").mkdir(parents=True)
+        (root / "sibling" / "include_files" / "components_param.vh").write_text(
+            "`define PL_CFG_BASE_ADDR {32'hB030_0000}\n", encoding="utf-8")
+        (root / "mine").mkdir()
+        (root / "mine" / "rtl-top.sv").write_text(self.write_fixture_top("tmp-top.sv").read_text(encoding="utf-8"),
+                                                  encoding="utf-8")
+        self.window.load_top(root / "mine" / "rtl-top.sv")
+        self.settle()
+        self.assertIsNone(self.window.rtl_base)
+        self.assertTrue(self.window.base_field.isEnabled())
+        self.assertEqual(self.window.base_field.text().lower(), "0xb0300000")   # prefilled, still editable
+        self.assertTrue(any("相邻目录" in text for _, _, text in self.window.log_records_system))
+        self.window.select_component(self.window.top_info["components"][0])
+        self.settle()
+        self.assertEqual(self.window.regs[0]["_address"], 0xB0300000 + 0x6400)
+
     def test_behavior_presets_notes_and_debug_decode(self):
         self.window.view_buttons["task_a"].click()
         self.settle(lambda: not self.window._busy)

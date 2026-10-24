@@ -217,7 +217,7 @@ END
                     "-fno-ident", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
                     "-Wl,--dynamicbase,--nxcompat,--high-entropy-va,--no-insert-timestamp", "-I", str(build),   # reproducible EXE
                     str(ROOT / "tools" / "runtime_launcher" / "launcher.c"), "launcher.res",
-                    "-lcabinet", "-lbcrypt", "-o", str(result)], cwd=build, check=True)
+                    "-o", str(result)], cwd=build, check=True)   # cabinet/bcrypt are loaded from System32 at run time
     target = Path(output).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     try:

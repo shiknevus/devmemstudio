@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
 import re
+import tempfile
 
 from .core import component_override_dirs, parse_int, resource_path
 
@@ -470,14 +472,21 @@ def _parse_unheaded(text: str, skip_instances: frozenset[str] | None = None, fin
     return {"components": components, "warnings": warnings}
 
 
-def find_components_param(top_path: Path) -> Path | None:
-    """Walk up from the top file to locate include_files/components_param.vh."""
-    for ancestor in [Path(top_path).resolve()] + list(Path(top_path).resolve().parents)[:6]:
-        for candidate in (ancestor / "include_files/components_param.vh",):
-            if candidate.is_file():
-                return candidate
+SIBLING_SEARCH_LEVELS = 4   # top file + 3 parent folders; sibling fallback never walks the whole drive
+
+
+def locate_components_param(top_path: Path) -> tuple[Path | None, str]:
+    """(components_param.vh, source): source is "own" for an ancestor's include_files,
+    "sibling" for a neighbouring project's copy (a different project may own it), "" if none."""
+    start = Path(top_path).resolve()
+    ancestors = [start] + list(start.parents)[:6]
+    for ancestor in ancestors:   # own project first: every ancestor's include_files before any sibling
+        candidate = ancestor / "include_files/components_param.vh"
+        if candidate.is_file():
+            return candidate, "own"
+    for ancestor in ancestors[:SIBLING_SEARCH_LEVELS]:
         try:   # one stat per child, not a directory listing per child like glob("*/…")
-            children = list(os.scandir(ancestor))
+            children = sorted(os.scandir(ancestor), key=lambda child: child.name.lower())
         except OSError:
             continue
         for child in children:
@@ -488,8 +497,30 @@ def find_components_param(top_path: Path) -> Path | None:
                 continue
             sibling = Path(child.path) / "include_files/components_param.vh"
             if sibling.is_file():
-                return sibling
-    return None
+                return sibling, "sibling"
+    return None, ""
+
+
+def find_components_param(top_path: Path) -> Path | None:
+    """Walk up from the top file to locate include_files/components_param.vh."""
+    return locate_components_param(top_path)[0]
+
+
+def write_json_atomic(path: Path, data) -> None:
+    """Write JSON via a same-directory temp file + os.replace, so a crash never leaves half a file."""
+    path = Path(path)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+                                         suffix=".tmp", delete=False) as handle:
+            temp_name = handle.name
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 def parse_base_address(text: str) -> int | None:
@@ -515,8 +546,10 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
             return None
     except (OSError, ValueError):
         return None
+    notes: list[str] = []
     data["types"] = {key: normalized for key, entry in data["types"].items()
-                     if (normalized := _normalize_catalog_entry(entry, owned=True)) is not None}
+                     if (normalized := _normalize_catalog_entry(entry, owned=True, warnings=notes,
+                                                                label=f"目录 {key}：")) is not None}
     # Tests and offline acceptance opt out of the machine's real overrides via env flag.
     if path is None and not os.environ.get("DEVMEMSTUDIO_IGNORE_OVERRIDES"):
         bundled_at = _catalog_timestamp(data.get("generated_at"))
@@ -528,14 +561,21 @@ def load_type_catalog(path: Path | None = None) -> dict | None:
                 try:
                     entry = json.loads(item.read_text(encoding="utf-8"))
                     imported = override_imported_at(item, entry)
-                except (OSError, ValueError):
+                except (OSError, ValueError) as exc:
+                    notes.append(f"组件定义 {item} 读取或解析失败，已忽略：{exc}")
                     continue
                 if bundled_at is not None and imported < bundled_at:
                     continue   # imported before this build's catalog: bundled table is newer
-                normalized = _normalize_catalog_entry(entry, owned=True)
-                if normalized is not None and imported >= chosen.get(item.stem, (float("-inf"),))[0]:
+                normalized = _normalize_catalog_entry(entry, owned=True, warnings=notes, label=f"组件定义 {item.name}：")
+                if normalized is None:
+                    notes.append(f"组件定义 {item} 不含有效寄存器表，已忽略。")
+                elif imported >= chosen.get(item.stem, (float("-inf"),))[0]:
                     chosen[item.stem] = (imported, normalized)   # same type in both folders: newest import wins
         data["types"].update({key: entry for key, (_, entry) in chosen.items()})
+    if notes:
+        data["load_warnings"] = notes   # window logs them; also in the file log
+        for note in notes:
+            logging.getLogger("devmem-studio.catalog").warning(note)
     return data
 
 
@@ -553,13 +593,22 @@ def override_imported_at(item: Path, entry=None) -> float:
     return recorded if recorded is not None else Path(item).stat().st_mtime
 
 
+def register_offset_problem(offset: int) -> str:
+    """Why a register offset cannot be read safely ('' when fine): 4-byte aligned, inside the component window."""
+    if offset < 0 or offset % 4:
+        return "未按 4 字节对齐"
+    if offset >= REG_GRID_STEP:
+        return f"超出组件寄存器窗口（0x{REG_GRID_STEP:X}）"
+    return ""
+
+
 def _parse_offset(item) -> int | None:
-    """Register offset from a catalog/override entry; None when malformed."""
+    """Register offset from a catalog/override entry; None when malformed, misaligned or outside the window."""
     try:
         offset = int(str(item["offset"]).strip(), 16)
-        return offset if 0 <= offset <= 0xFFFFFFFF else None
     except (KeyError, TypeError, ValueError):
         return None
+    return None if register_offset_problem(offset) else offset
 
 
 def _valid_named_values(items) -> list[dict]:
@@ -592,18 +641,24 @@ def _valid_fields(items) -> list[dict]:
     return result
 
 
-def _normalize_catalog_entry(entry, owned=False) -> dict | None:
+def _normalize_catalog_entry(entry, owned=False, warnings: list[str] | None = None, label="") -> dict | None:
     """Validate external register tables before they reach GUI/command code.
 
-    owned: freshly parsed JSON nobody else holds, filtered in place instead of copied."""
+    owned: freshly parsed JSON nobody else holds, filtered in place instead of copied.
+    warnings: collects a note per skipped register (load time only; registers_for stays quiet)."""
     if not isinstance(entry, dict) or not isinstance(entry.get("registers"), list):
         return None
     registers = []
     for item in entry["registers"]:
         if not isinstance(item, dict) or _parse_offset(item) is None:
+            if warnings is not None:
+                warnings.append(f"{label}寄存器 {item.get('name') if isinstance(item, dict) else item!r} "
+                                f"偏移 {item.get('offset') if isinstance(item, dict) else '?'} 无效、未对齐或越界，已跳过。")
             continue
         name, width = item.get("name"), parse_int(item.get("width", 32))
         if not isinstance(name, str) or not name.strip() or width is None or not 1 <= width <= 64:
+            if warnings is not None:
+                warnings.append(f"{label}寄存器 {name!r} 名称或位宽无效，已跳过。")
             continue
         register = item if owned else copy.deepcopy(item)
         register["width"] = width

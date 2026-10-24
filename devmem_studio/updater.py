@@ -23,6 +23,7 @@ FEED_URL = f"{RELEASES_URL}.atom"   # web feed, not counted against the API quot
 API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"   # one call: latest + skipped notes
 MAX_PACKAGE = 512 * 1024 * 1024
 TIMEOUT = 15
+READY_ENV = "DEVMEMSTUDIO_UPDATE_READY"   # set by apply_update.ps1: flag file the new app writes once it is up
 
 # Authenticode thumbprint the update EXE must be signed by before the helper
 # swaps it in.  Empty means signature pinning is not yet enabled (the current
@@ -285,6 +286,31 @@ def check_release(cancel=None, current=__version__):
     return replace(release, notes=combined_notes(formal, current, release.version)[:100000])
 
 
+def check_release_quietly(cancel=None, current=__version__):
+    """Automatic check: a release whose package is still being uploaded reads as 'no update yet'."""
+    try:
+        return check_release(cancel, current)
+    except MissingAsset:
+        return None
+
+
+def report_started():
+    """After the main window shows: tell the update helper that launched this process that start-up worked.
+
+    Returns whether a flag was written; a no-op outside an update (the helper passes the flag path in the environment)."""
+    path = os.environ.pop(READY_ENV, "")
+    if not path:
+        return False
+    flag = Path(path)
+    if not flag.is_absolute() or not flag.name.startswith("devmem-update-ready-") or flag.suffix != ".flag":
+        return False
+    try:
+        flag.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        return False   # the helper then falls back to its older check
+    return True
+
+
 def parse_checksum(data, name):
     text = data.decode("utf-8-sig").strip()
     match = re.fullmatch(r"([a-fA-F0-9]{64})(?:\s+\*?([^\r\n]+))?", text)
@@ -439,7 +465,8 @@ def start_install(job_path, timeout=10.0, pump=None):
     marker.unlink(missing_ok=True)
     powershell = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith("_PYI") and key != "_MEIPASS2" and not key.startswith("DEVMEMSTUDIO_LAUNCHER")}
+                   if not key.startswith("_PYI") and key not in ("_MEIPASS2", READY_ENV)
+                   and not key.startswith("DEVMEMSTUDIO_LAUNCHER")}
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                "-File", str(job_path.parent / "apply_update.ps1"), "-JobPath", str(job_path)]

@@ -21,7 +21,44 @@
 #define SWEEP_AGE 6000000000ULL   /* 10 min in 100 ns: never touch a fresh extraction */
 #define STAMP_SLACK 20000000ULL   /* 2 s: FAT time resolution */
 
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
+
 static HANDLE locks[RUNTIME_FILE_COUNT];
+
+/* cabinet and bcrypt are not KnownDLLs: no static import (a same-named DLL beside the EXE would load first); they are
+   loaded from System32 only, when an unpack needs them. */
+static struct {
+    HMODULE cabinet, bcrypt;
+    BOOL (WINAPI *create_decompressor)(DWORD, PCOMPRESS_ALLOCATION_ROUTINES, PDECOMPRESSOR_HANDLE);
+    BOOL (WINAPI *decompress)(DECOMPRESSOR_HANDLE, LPCVOID, SIZE_T, PVOID, SIZE_T, PSIZE_T);
+    BOOL (WINAPI *close_decompressor)(DECOMPRESSOR_HANDLE);
+    NTSTATUS (WINAPI *open_provider)(BCRYPT_ALG_HANDLE *, LPCWSTR, LPCWSTR, ULONG);
+    NTSTATUS (WINAPI *create_hash)(BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE *, PUCHAR, ULONG, PUCHAR, ULONG, ULONG);
+    NTSTATUS (WINAPI *hash_data)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
+    NTSTATUS (WINAPI *finish_hash)(BCRYPT_HASH_HANDLE, PUCHAR, ULONG, ULONG);
+    NTSTATUS (WINAPI *destroy_hash)(BCRYPT_HASH_HANDLE);
+    NTSTATUS (WINAPI *close_provider)(BCRYPT_ALG_HANDLE, ULONG);
+} api;
+
+#define RESOLVE(module, field, name) (api.field = (__typeof__(api.field))(void (*)(void))GetProcAddress(module, name))
+
+static int load_codec(void)
+{
+    if (api.close_provider)
+        return 1;
+    api.cabinet = LoadLibraryExW(L"cabinet.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    api.bcrypt = LoadLibraryExW(L"bcrypt.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!api.cabinet || !api.bcrypt)
+        return 0;
+    return RESOLVE(api.cabinet, create_decompressor, "CreateDecompressor") && RESOLVE(api.cabinet, decompress, "Decompress")
+        && RESOLVE(api.cabinet, close_decompressor, "CloseDecompressor")
+        && RESOLVE(api.bcrypt, open_provider, "BCryptOpenAlgorithmProvider")
+        && RESOLVE(api.bcrypt, create_hash, "BCryptCreateHash") && RESOLVE(api.bcrypt, hash_data, "BCryptHashData")
+        && RESOLVE(api.bcrypt, finish_hash, "BCryptFinishHash") && RESOLVE(api.bcrypt, destroy_hash, "BCryptDestroyHash")
+        && RESOLVE(api.bcrypt, close_provider, "BCryptCloseAlgorithmProvider");   /* last: set only when all are */
+}
 
 static wchar_t *join(const wchar_t *left, const wchar_t *right)
 {
@@ -126,19 +163,19 @@ static int sha256(const unsigned char *data, size_t size, unsigned char digest[3
 {
     BCRYPT_ALG_HANDLE algorithm = NULL;
     BCRYPT_HASH_HANDLE hash = NULL;
-    int ok = BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0))
-          && BCRYPT_SUCCESS(BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0));
+    int ok = BCRYPT_SUCCESS(api.open_provider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0))
+          && BCRYPT_SUCCESS(api.create_hash(algorithm, &hash, NULL, 0, NULL, 0, 0));
     while (ok && size) {
         ULONG chunk = size > 0x40000000 ? 0x40000000 : (ULONG)size;
-        ok = BCRYPT_SUCCESS(BCryptHashData(hash, (PUCHAR)data, chunk, 0));
+        ok = BCRYPT_SUCCESS(api.hash_data(hash, (PUCHAR)data, chunk, 0));
         data += chunk;
         size -= chunk;
     }
-    ok = ok && BCRYPT_SUCCESS(BCryptFinishHash(hash, digest, 32, 0));
+    ok = ok && BCRYPT_SUCCESS(api.finish_hash(hash, digest, 32, 0));
     if (hash)
-        BCryptDestroyHash(hash);
+        api.destroy_hash(hash);
     if (algorithm)
-        BCryptCloseAlgorithmProvider(algorithm, 0);
+        api.close_provider(algorithm, 0);
     return ok;
 }
 
@@ -156,6 +193,8 @@ static int write_file(const wchar_t *path, const unsigned char *data, DWORD size
     }
     FILETIME stamp = {(DWORD)RUNTIME_MTIME, (DWORD)(RUNTIME_MTIME >> 32)};
     ok = ok && SetFileTime(file, NULL, NULL, &stamp);   /* the stamp is what later launches check */
+    if (ok)
+        FlushFileBuffers(file);   /* data on disk before the directory rename: a power cut must not leave right-sized zeros */
     return CloseHandle(file) && ok;
 }
 
@@ -239,12 +278,12 @@ static DWORD WINAPI inflate(LPVOID context)
     DECOMPRESSOR_HANDLE decompressor = NULL;
     SIZE_T size = 0;
     unsigned char digest[32];
-    block->ok = CreateDecompressor(COMPRESS_ALGORITHM_LZMS, NULL, &decompressor)
-             && Decompress(decompressor, block->packed, block->packed_size, block->raw, block->raw_size, &size)
+    block->ok = api.create_decompressor(COMPRESS_ALGORITHM_LZMS, NULL, &decompressor)
+             && api.decompress(decompressor, block->packed, block->packed_size, block->raw, block->raw_size, &size)
              && size == block->raw_size
              && sha256(block->raw, block->raw_size, digest) && !memcmp(digest, block->sha256, 32);
     if (decompressor)
-        CloseDecompressor(decompressor);
+        api.close_decompressor(decompressor);
     if (block->ok)
         unpack_advance(block->raw_size, INFLATE_SHARE);
     return 0;
@@ -281,7 +320,7 @@ static int extract(HINSTANCE instance, const wchar_t *staging)
     HGLOBAL loaded = resource ? LoadResource(instance, resource) : NULL;
     unsigned char *packed = loaded ? LockResource(loaded) : NULL;
     DWORD packed_size = resource ? SizeofResource(instance, resource) : 0;
-    if (!packed || !packed_size || !CreateDirectoryW(staging, NULL))
+    if (!packed || !packed_size || !load_codec() || !CreateDirectoryW(staging, NULL))
         return 0;
     unsigned char *raw = VirtualAlloc(NULL, RUNTIME_RAW_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!raw)
@@ -1067,15 +1106,20 @@ static void splash_stop(void)
     splash_thread = splash_done = splash_answer = NULL;
 }
 
+static void splash_revive(void)
+{
+    if (splash_enabled && (!splash_thread || WaitForSingleObject(splash_thread, 0) == WAIT_OBJECT_0)) {
+        splash_stop();
+        splash_open();   /* stopped at the app's window (or its signal), or never started */
+    }
+}
+
 /* Shows the problem in the splash (an error box without one); nonzero for Retry. */
 static int splash_fail(const wchar_t *problem)
 {
     splash_problem = problem;   /* before any new splash thread looks */
     InterlockedIncrement(&splash_failure);
-    if (splash_enabled && (!splash_thread || WaitForSingleObject(splash_thread, 0) == WAIT_OBJECT_0)) {
-        splash_stop();
-        splash_open();   /* stopped at the app's window (or its signal), or never started */
-    }
+    splash_revive();
     if (splash_thread) {
         HANDLE waits[2] = {splash_answer, splash_thread};
         DWORD woke = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
@@ -1130,7 +1174,8 @@ static int splash_until_window(HANDLE process, DWORD id)
     return 0;
 }
 
-static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_code, int *windowless)
+/* suspect: the app never got as far as "ready" (or could not be created at all): a damaged runtime looks like this. */
+static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_code, int *windowless, int *suspect)
 {
     static wchar_t self[PATH_CAP];
     DWORD length = GetModuleFileNameW(NULL, self, PATH_CAP);
@@ -1186,11 +1231,14 @@ static int run_app(const wchar_t *root, const wchar_t *arguments, DWORD *exit_co
             WaitForSingleObject(process.hProcess, INFINITE);
             if (!GetExitCodeProcess(process.hProcess, exit_code))
                 *exit_code = 1;
+            *suspect = started && *exit_code && splash_ready && WaitForSingleObject(splash_ready, 0) != WAIT_OBJECT_0;
             CloseHandle(process.hProcess);
         }
         if (job)
             CloseHandle(job);
     }
+    if (!started && command)
+        *suspect = 1;   /* the image would not even be created */
     free(exe);
     free(command);
     return started;
@@ -1223,9 +1271,15 @@ static const wchar_t *launch(HINSTANCE instance, const wchar_t *arguments, DWORD
     if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
         goto done;
     owned = 1;
-    if (!lock_runtime(root)) {
+    int damaged = 0, fresh, suspect, started;
+again:
+    fresh = suspect = 0;
+    if (damaged || !lock_runtime(root)) {   /* damaged: it passed the size/stamp check yet the app died on start-up */
         problem = L"解压运行库失败。请确认磁盘空间充足、用户目录可写；必要时删除 %LOCALAPPDATA%\\DevmemStudio\\runtime 后重试。";
         set_stage(STAGE_INFLATE);
+        free(staging);
+        free(aside);
+        staging = aside = NULL;
         int unpacked = (staging = sibling(base, RUNTIME_ID, L"tmp")) && extract(instance, staging);
         if (!unpacked) {
             if (staging)
@@ -1247,12 +1301,26 @@ static const wchar_t *launch(HINSTANCE instance, const wchar_t *arguments, DWORD
             remove_tree(aside);
         if (!lock_runtime(root))
             goto done;
+        fresh = 1;
     }
     ReleaseMutex(mutex);
     owned = 0;
     problem = L"无法启动 DevmemStudio。";
     set_stage(STAGE_START);
-    if (!run_app(root, arguments, exit_code, &windowless)) {
+    started = run_app(root, arguments, exit_code, &windowless, &suspect);
+    if (suspect && !fresh && !damaged) {   /* once per start: set the cache aside and unpack again */
+        unlock_runtime();
+        problem = L"等待其他 DevmemStudio 准备运行库超时（120 秒）。请稍后重试；仍失败时结束残留的 DevmemStudio 进程后再启动。";
+        wait = WaitForSingleObject(mutex, 120000);
+        if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+            goto done;
+        owned = 1;
+        damaged = 1;
+        splash_revive();
+        begin_launch();
+        goto again;
+    }
+    if (!started) {
         *exit_code = 3;
         goto done;
     }
@@ -1284,6 +1352,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int
 {
     (void)previous;
     (void)show;
+    BOOL (WINAPI *restrict_search)(DWORD) = (BOOL (WINAPI *)(DWORD))(void (*)(void))GetProcAddress(
+        GetModuleHandleW(L"kernel32"), "SetDefaultDllDirectories");   /* Win7 needs KB2533623 */
+    if (restrict_search)
+        restrict_search(LOAD_LIBRARY_SEARCH_SYSTEM32);   /* later loads (ours and the system's) never look beside the EXE */
     DWORD exit_code = 3;
     const wchar_t *problem;
     splash_start(instance, arguments);

@@ -174,7 +174,8 @@ class UpdateDialog(ManagedDialog):
             return
         self._automatic = automatic
         self._set_status("正在检查 GitHub 正式发布版本…")
-        self._start(lambda cancel, progress: updater.check_release(cancel), self._checked)
+        check = updater.check_release_quietly if automatic else updater.check_release   # a release still uploading: say nothing unasked
+        self._start(lambda cancel, progress: check(cancel), self._checked)
 
     def _style_notes(self):
         """Left-aligned notes with a version / section / item hierarchy."""

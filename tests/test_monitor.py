@@ -211,6 +211,18 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(list(buffer.times), [0.0, 0.5, 4.0, 4.0, 4.5])
         self.assertEqual(buffer.pauses, [(0.5, 4.0)])
 
+    def test_resume_on_another_sampler_clock_uses_the_measured_pause(self):
+        buffer = MonitorBuffer(1)
+        buffer.extend([(5000.0, (1,)), (5000.5, (2,))])   # regmon: monotonic seconds
+        buffer.mark_resume()
+        buffer.rebase_resume(3.0)                         # shell fallback: wall-clock seconds
+        buffer.extend([(1.79e9, (3,)), (1.79e9 + .5, (4,))])
+        self.assertEqual(list(buffer.times), [0.0, 0.5, 3.5, 4.0])
+        self.assertEqual(buffer.pauses, [(0.5, 3.5)])
+        buffer.rebase_resume(9.0)                         # not resuming: ignored
+        buffer.extend([(1.79e9 + 1, (5,))])
+        self.assertEqual(buffer.times[-1], 4.5)
+
     def test_dropping_old_samples_forgets_old_pauses(self):
         buffer = MonitorBuffer(1, limit=8)
         buffer.extend([(0.0, (0,)), (1.0, (0,))])

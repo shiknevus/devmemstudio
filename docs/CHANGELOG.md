@@ -1,6 +1,12 @@
 # DevmemStudio 变更记录
 
-本文件是 [README](../README.md) 的历史变更记录：5.6.1 及更早版本的发布变化，按版本从新到旧排列。当前版本的变化见 GitHub 发布页（[shiknevus/devmemstudio releases](https://github.com/shiknevus/devmemstudio/releases)）。
+本文件是 [README](../README.md) 的历史变更记录：5.6.2 及更早版本的发布变化，按版本从新到旧排列。当前版本的变化见 GitHub 发布页（[shiknevus/devmemstudio releases](https://github.com/shiknevus/devmemstudio/releases)）。
+
+## 5.6.2 发布（2026-10-24）
+
+- **启动提示窗每次启动都显示**：居中出现，进度条把启动器阶段（检查环境、首次解压、写入、启动 Python）与程序阶段（加载 Qt、加载模块、初始化样式、创建主窗口、载入 top）拼成一条 0→100%。
+- **各阶段比例按实测自动学习**：冷/暖启动分别统计，写入 `%LOCALAPPDATA%\DevmemStudio\splash\<哈希>.times`，下次启动按实测调整；满格先关提示窗再显主窗口；失败仍在窗内重试/取消。
+- **「更新控件」便携化**：覆盖定义改存 EXE 旁 `component_overrides`（随 EXE 复制即可带到其他电脑），旧版 `%LOCALAPPDATA%` 定义仍读取、较新者优先。
 
 ## 5.6.1 发布（2026-10-24）
 
